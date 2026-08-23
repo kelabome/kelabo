@@ -67,8 +67,9 @@ test('every scheme produces a plan for every event kind', () => {
       const plan = soundPlan(scheme, kind)
       assert.ok(plan.length > 0, `${scheme}/${kind} is silent`)
       for (const n of plan) {
-        assert.ok(n.freq > 0 && n.dur > 0 && n.gain > 0 && n.at >= 0)
-        assert.ok(n.gain <= 0.1, `${scheme}/${kind} too loud for a nudge`)
+        assert.ok(n.freq > 0 && n.dur > 0 && n.at >= 0)
+        // Loud enough to hear over a call, quiet enough to stay a nudge.
+        assert.ok(n.gain >= 0.05 && n.gain <= 0.2, `${scheme}/${kind} gain ${n.gain} out of range`)
       }
     }
   }

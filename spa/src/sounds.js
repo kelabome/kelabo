@@ -16,15 +16,16 @@
  * every play, so flipping it mid-kelabo takes effect immediately.
  */
 
-// Per-scheme voice: waveform, register and level. Gains stay low — these are
-// nudges, not ringtones, and a kelabo can run for hours.
+// Per-scheme voice: waveform, register and level. These are nudges, not
+// ringtones — but they still have to survive laptop speakers and a voice
+// call playing at the same time, which the first pass (0.04–0.06) did not.
 const VOICES = {
-  clay:   { type: 'triangle', base: 523.25, gain: 0.05 },  // C5, warm
-  slate:  { type: 'sine',     base: 440.0,  gain: 0.06 },  // A4, cool
-  sage:   { type: 'triangle', base: 392.0,  gain: 0.05 },  // G4, soft
-  plum:   { type: 'sine',     base: 493.88, gain: 0.05 },  // B4, mellow
-  mono:   { type: 'sine',     base: 660.0,  gain: 0.04 },  // E5, flat
-  matrix: { type: 'square',   base: 880.0,  gain: 0.022 }, // A5, phosphor blip
+  clay:   { type: 'triangle', base: 523.25, gain: 0.15 },  // C5, warm
+  slate:  { type: 'sine',     base: 440.0,  gain: 0.17 },  // A4, cool
+  sage:   { type: 'triangle', base: 392.0,  gain: 0.15 },  // G4, soft
+  plum:   { type: 'sine',     base: 493.88, gain: 0.15 },  // B4, mellow
+  mono:   { type: 'sine',     base: 660.0,  gain: 0.13 },  // E5, flat
+  matrix: { type: 'square',   base: 880.0,  gain: 0.07 },  // A5, phosphor blip
 }
 const DEFAULT_VOICE = 'clay'
 
@@ -86,6 +87,7 @@ export function shouldChimeUtterance(utt, selfId) {
 // --- the impure half: one lazily-created AudioContext -----------------------
 
 let ctx = null
+let unlockArmed = false
 
 function audioContext() {
   if (ctx) return ctx
@@ -93,6 +95,32 @@ function audioContext() {
   if (!AC) return null
   ctx = new AC()
   return ctx
+}
+
+/**
+ * Autoplay policy is the whole reason chimes "barely work" without this: the
+ * context is created lazily, typically minutes after the last click, and a
+ * `resume()` issued outside a user gesture never settles (Safari always,
+ * Chrome depending on engagement) — the chime is dropped silently and every
+ * later one meets the same suspended context. So while the context is
+ * suspended, the next click or keypress anywhere on the page retries the
+ * resume. Entering and using a kelabo is clicks all the way down, so the
+ * context is unlocked long before the first event worth a chime.
+ */
+function armUnlock(ac) {
+  if (unlockArmed) return
+  unlockArmed = true
+  const tryResume = () => {
+    if (ac.state === 'running') {
+      window.removeEventListener('pointerdown', tryResume)
+      window.removeEventListener('keydown', tryResume)
+      unlockArmed = false
+      return
+    }
+    ac.resume().catch(() => {})
+  }
+  window.addEventListener('pointerdown', tryResume)
+  window.addEventListener('keydown', tryResume)
 }
 
 export function soundsEnabled() {
@@ -127,10 +155,16 @@ export function playEventSound(kind) {
       osc.stop(t0 + n.at + n.dur + 0.02)
     }
   }
-  // The context starts suspended until the page has seen a user gesture, and
-  // entering a kelabo is clicks all the way down, so resume() succeeds in
-  // practice. If it does not, the sound is skipped rather than queued to fire
-  // late over some unrelated click.
-  if (ac.state === 'running') start()
-  else ac.resume().then(start).catch(() => {})
+  if (ac.state === 'running') {
+    start()
+    return
+  }
+  // Suspended: try to resume, and keep retrying on the next user gesture. If
+  // the resume takes longer than a moment the event is stale — a join chime
+  // arriving thirty seconds after the join reads as a ghost, so it is dropped.
+  armUnlock(ac)
+  const attemptedAt = performance.now()
+  ac.resume()
+    .then(() => { if (performance.now() - attemptedAt < 1500) start() })
+    .catch(() => {})
 }

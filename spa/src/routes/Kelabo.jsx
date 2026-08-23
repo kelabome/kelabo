@@ -268,9 +268,9 @@ function KelaboRoom() {
   const myIdentityRef = useRef('')
   myIdentityRef.current = kelabo?.me || identity?.email || ''
   // Baseline for join/leave sounds: `null` until the first roster arrives.
-  // That snapshot is "who was already here", not a wave of joins — and after a
-  // resubscribe the same holds again, which is also what swallows your own
-  // reconnect flapping inside the server's grace window.
+  // This ref survives the SSE stream's internal resubscribes (those live
+  // inside useBoard; this component does not remount), so the `!prev` branch
+  // below runs exactly once per entry into the room.
   const rosterIdsRef = useRef(null)
 
   const onRosterEvent = useCallback(r => {
@@ -278,7 +278,15 @@ function KelaboRoom() {
     const next = Array.isArray(r?.participants) ? r.participants : []
     const prev = rosterIdsRef.current
     rosterIdsRef.current = next
-    if (!prev) return
+    if (!prev) {
+      // The first roster is "who was already here", so nobody already in the
+      // room chimes for the people in it — but it is also the one signal the
+      // JOINER gets, and it always includes their own just-opened stream.
+      // Everyone else heard their arrival from the diff below; this is the
+      // joiner's own "you're in", so every participant hears a join chime.
+      playEventSound('join')
+      return
+    }
     const { joined, left } = rosterDiff(prev, next, myIdentityRef.current)
     if (joined.length) playEventSound('join')
     if (left.length) playEventSound('leave')
