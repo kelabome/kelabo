@@ -1,3 +1,5 @@
+import { Fragment } from 'react'
+
 const INLINE_RE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(\[[^\]\n]+\]\([^)\s]+\))/g
 
 export function renderInline(text) {
@@ -74,7 +76,14 @@ function normalize(src) {
     .replace(/\\\|/g, '|')
 }
 
-export function Markdown({ text }) {
+// `hardBreaks`: CommonMark treats a single newline inside a paragraph as a
+// soft wrap (joined with a space) — correct for LLM-authored prose (reports,
+// descriptions, contribution answers), which relies on that to reflow long
+// paragraphs. Pasted documents (docs 20 §8) are not authored that way: a
+// person's line breaks are meaningful, so callers rendering raw pasted text
+// pass `hardBreaks` to keep every `\n` as a visible break instead of
+// collapsing the whole paragraph onto one line.
+export function Markdown({ text, hardBreaks = false }) {
   const src = normalize(String(text || ''))
   // Split on fenced code blocks first (odd segments are code).
   const segments = src.split('```')
@@ -87,7 +96,7 @@ export function Markdown({ text }) {
       if (code) nodes.push(<pre key={`pre-${key++}`}>{code}</pre>)
       return
     }
-    parseBlocks(segment, nodes, () => key++)
+    parseBlocks(segment, nodes, () => key++, hardBreaks)
   })
 
   if (nodes.length === 0) return null
@@ -96,7 +105,7 @@ export function Markdown({ text }) {
 
 // Turn a code-free chunk of markdown into block nodes (tables, headings, lists,
 // paragraphs). `nextKey` yields a fresh unique key each call.
-function parseBlocks(chunk, nodes, nextKey) {
+function parseBlocks(chunk, nodes, nextKey, hardBreaks) {
   const lines = chunk.split('\n')
   let i = 0
   const margin = () => (nodes.length === 0 ? { margin: 0 } : { margin: '8px 0 0' })
@@ -193,7 +202,16 @@ function parseBlocks(chunk, nodes, nextKey) {
     }
     if (para.length) {
       nodes.push(
-        <p key={`p-${nextKey()}`} style={margin()}>{renderInline(para.join(' '))}</p>
+        <p key={`p-${nextKey()}`} style={margin()}>
+          {hardBreaks
+            ? para.map((line, li) => (
+                <Fragment key={li}>
+                  {li > 0 && <br />}
+                  {renderInline(line)}
+                </Fragment>
+              ))
+            : renderInline(para.join(' '))}
+        </p>
       )
     }
   }

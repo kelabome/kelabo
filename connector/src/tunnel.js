@@ -104,9 +104,16 @@ export function createTunnel({
         }
         return;
       }
-      case "history": {
-        // Resolved with the whole frame: `enabled` matters as much as the
-        // entries (host never opted in vs opted in with nothing recorded).
+      case "history":
+      case "journey_info":
+      case "journey_timeline":
+      case "journey_board":
+      case "journey_report_submitted":
+      case "journey_posted": {
+        // Resolved with the whole frame in every one of these, not a
+        // sub-field: `enabled` on `history` and `resolved` on the journey
+        // frames matter as much as the payload (opted-out vs. empty; no
+        // journey vs. ambiguous vs. the answer itself).
         const resolve = pending.get(frame.requestId);
         if (resolve) {
           pending.delete(frame.requestId);
@@ -181,6 +188,50 @@ export function createTunnel({
     });
   }
 
+  /** Shared request/response shape for every `journey_*` tool (docs 20
+   *  §12.2) — mint a requestId, track it in `pending` exactly like
+   *  `requestBoard`/`requestHistory` above, resolve with the whole frame
+   *  (never a sub-field) on arrival, `null` on timeout or a dead socket. */
+  function requestJourney(upType, kelaboId, extra = {}, timeoutMs = 10000) {
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pending.delete(requestId);
+        resolve(null);
+      }, timeoutMs);
+      timer.unref?.();
+      pending.set(requestId, (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      });
+      if (!send({ type: upType, requestId, kelaboId, ...extra })) {
+        pending.delete(requestId);
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+  }
+
+  const requestJourneyInfo = (kelaboId, journeyId) =>
+    requestJourney("journey_info_request", kelaboId, journeyId ? { journeyId } : {});
+
+  const requestJourneyTimeline = (kelaboId, { journeyId, entryType, before, limit } = {}) =>
+    requestJourney("journey_timeline_request", kelaboId, {
+      ...(journeyId ? { journeyId } : {}),
+      ...(entryType ? { entryType } : {}),
+      ...(typeof before === "number" ? { before } : {}),
+      ...(typeof limit === "number" ? { limit } : {}),
+    });
+
+  const requestJourneyBoard = (kelaboId, journeyId) =>
+    requestJourney("journey_board_request", kelaboId, journeyId ? { journeyId } : {});
+
+  const submitJourneyReport = (kelaboId, { journeyId, question, answer } = {}) =>
+    requestJourney("journey_report_submit", kelaboId, { ...(journeyId ? { journeyId } : {}), question, answer });
+
+  const postJourneyMessage = (kelaboId, { journeyId, content, msgId } = {}) =>
+    requestJourney("journey_post", kelaboId, { ...(journeyId ? { journeyId } : {}), content, ...(msgId ? { msgId } : {}) });
+
   function stop() {
     stopped = true;
     clearInterval(heartbeat);
@@ -196,6 +247,11 @@ export function createTunnel({
     detach,
     requestBoard,
     requestHistory,
+    requestJourneyInfo,
+    requestJourneyTimeline,
+    requestJourneyBoard,
+    submitJourneyReport,
+    postJourneyMessage,
     stop,
     attachedKelabo: () => attachment?.kelaboId || "",
     isConnected: () => ws?.readyState === 1,

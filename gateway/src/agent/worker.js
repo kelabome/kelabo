@@ -113,6 +113,7 @@ function makeMainAgent(ctx) {
     maxDispatchPerTurn: runtime.maxDispatchPerTurn,
     hostLanguage: ctx.hostLanguage,
     history: ctx.history,
+    journeys: ctx.journeys,
     log,
     debug,
   });
@@ -129,6 +130,9 @@ function initContext(msg) {
     // (notes #3). Fixed for the life of the context: it is history, and nothing
     // that happens in this kelabo can change what happened in an earlier one.
     history: msg.history ?? [],
+    // Journey(s) this kelabo is linked to (docs 20 §12.1) — independent of
+    // `history` above and, like it, fixed for the life of this context.
+    journeys: msg.journeys ?? [],
     mainAgent: null,
   };
   ctx.mainAgent = makeMainAgent(ctx);
@@ -138,7 +142,7 @@ function initContext(msg) {
 function ensureCtx(kelaboId) {
   let ctx = contexts.get(kelaboId);
   if (!ctx) {
-    ctx = { kelaboId, transcript: [], mcp: { servers: [] }, capabilities: [], hostLanguage: "", history: [], mainAgent: null };
+    ctx = { kelaboId, transcript: [], mcp: { servers: [] }, capabilities: [], hostLanguage: "", history: [], journeys: [], mainAgent: null };
     ctx.mainAgent = makeMainAgent(ctx);
     contexts.set(kelaboId, ctx);
   }

@@ -122,7 +122,8 @@ make deploy env=dev      # docker push -> cdk deploy --all -> force ECS redeploy
 make docker env=dev      # build + push gateway image to ECR
 make restart env=dev     # force-new-deployment only (re-pull :latest)
 make gateway|backend|frontend|infra|synth env=dev
-make secrets env=dev DEEPGRAM_API_KEY=... LLM_API_KEY=...
+make secrets env=dev STT_PROVIDER=... STT_API_KEY=... LLM_API_KEY=...
+make mail-secret env=dev provider=mailersend key=...   # only if not sending via SES
 make rtc-secrets env=dev CF_SFU_APP_ID=... CF_SFU_APP_SECRET=... CF_TURN_KEY_ID=... CF_TURN_KEY_TOKEN=...
 ```
 
@@ -242,6 +243,17 @@ Order matters and is non-obvious:
   (`state.rtcRooms`); the durable half is `rtcMode` on the kelabo META.
   `make rtc-secrets` is separate from `make secrets` because the feature degrades
   cleanly (`rtc_unavailable`) without it.
+- **Outbound mail** (`rest-api/src/mail/`): `messages.js` says what a mail
+  contains, a transport (`ses.js`, `mailersend.js`) says how it travels, and
+  `index.js` picks one per send. `mail.provider` in config selects it — SES is
+  the default and needs no key (IAM role), everything else reads
+  `kelabo/<env>/mail`. The boundary between the two halves is a *message
+  object*, never a MIME string: MIME is an SES workaround for `Simple` content
+  not carrying a part, and MailerSend takes the same inline logo as a JSON
+  attachment. `mime.js` is therefore SES-only. Adding a provider is one file
+  exporting `{ id, send(message) }` plus a line in `FACTORIES` and in
+  `MAIL_PROVIDERS` (restated in `config/loadConfig.mjs`, so a typo fails at
+  config load rather than at somebody's sign-in).
 
 ## Domain conventions (enforced in code, easy to break)
 
@@ -270,6 +282,13 @@ Order matters and is non-obvious:
   `kelabo_post` is the only route out) goes in the system prompt, and the full
   `PERSONA` is returned by `kelabo_join`. Keep the injection gate in the core —
   a security control that only arrives in a tool result can be compacted away.
+- **A provider that accepts a message has not necessarily sent it.** MailerSend
+  answers `202 Accepted` for a suppressed recipient or a paused account, with a
+  warning in the body and no `x-message-id`. Taken at face value that is the
+  worst failure here: the person is told a code was sent, the log records a
+  send, and nothing arrives. `mailersend.js` reads the body on success, not
+  only on failure, and turns those into `email_suppressed` /
+  `mail_not_configured`. Any new transport owes the same.
 - **A prep binding cannot receive transcript.** An agent attached to a *scheduled*
   kelabo lives in `state.prepByKelabo`; `caption.js` reads only
   `state.tunnelByKelabo`. Attending is a second, deliberate attach after the
@@ -298,4 +317,9 @@ Order matters and is non-obvious:
 - **Message boundaries belong to the speaker.** `messageId` is the only grouping
   key; nothing downstream re-derives boundaries from speaker, adjacency or time.
 - **A kelabo's `rtcMode` never changes after creation**, and a full `mesh` room
-  refuses joiners (`mesh_room_full`) instead of falling back to the SFU.
+  refuses joiners (`mesh_room_full`) instead of falling back to the SFU. The one
+  exception is `rtcRoom.demote()` (docs 15 §1.1), `sfu` → `mesh` and never the
+  other way: the rule guards against a participant being moved to a *weaker*
+  promise, and mesh is the stronger one. It refuses rather than degrades when
+  the room is larger than `meshMaxParticipants` — mesh is N−1 uplinks per
+  person, not a cheaper SFU.

@@ -131,7 +131,30 @@ export const ERROR_CODES = [
   // accepted contact; nobody rung must be offline for the ring to reach them.
   "no_contact",
   "no_targets",
+  // Journey (docs 20). `not_journey_owner` guards owner-only actions (delete,
+  // visibility, complete/reopen, accessor management); `forbidden` covers the
+  // broader member-required check. `kelabo_in_journey` is the purge guard —
+  // a kelabo linked into any journey survives a host purge until unlinked.
+  "journey_not_found",
+  "not_journey_owner",
+  "journey_completed",
+  "not_completed",
+  "not_private",
+  "kelabo_in_journey",
+  "not_kelabo_member",
+  "board_message_not_found",
+  "document_not_found",
+  "already_archived",
+  "report_not_found",
 ];
+
+// Journey visibility (docs 20 §3.2): `public` grants full rights to every
+// identity sharing the journey's `tenantId`, computed fresh, never stored —
+// the same derivation doc 18 uses for "same org". `private` keeps an
+// explicit ACCESSOR# roster instead.
+export const JOURNEY_VISIBILITIES = ["public", "private"];
+// `completed` freezes every write until an owner `reopen`s it (docs 20 §3.1).
+export const JOURNEY_STATUSES = ["active", "completed"];
 
 // A developer's local agent attached or detached. Makes a change that used to
 // be invisible visible: a dropped bridge silently handed the kelabo back to

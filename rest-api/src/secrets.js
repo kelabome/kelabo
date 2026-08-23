@@ -97,6 +97,25 @@ export function createSecrets({ region } = {}) {
       if (!key) throw new Error(`no key for stt provider ${config.stt?.provider} in secret`);
       return key;
     },
+    // The outbound-mail key, when the deployment sends through an HTTP
+    // provider. SES needs none of this — it authenticates with the Lambda's
+    // own IAM role — so on an SES deployment this secret does not have to
+    // exist and is never read.
+    //
+    // Shaped like the STT secret above, for the same reason: one secret holds
+    // a key per provider, so switching provider (or rolling back after a
+    // switch) is a config change and a redeploy, never a trip to Secrets
+    // Manager to re-enter a credential that is still perfectly good.
+    //
+    //   { "mailersend": "…" }   or   { "apiKey": "…" }
+    getMailApiKey: async (config) => {
+      const name = config.secrets?.mail;
+      if (!name) throw new Error("no mail secret configured (config.secrets.mail)");
+      const s = await getSecretJson(name);
+      const key = s[config.mail?.provider] || s.apiKey || s.key || s.value;
+      if (!key) throw new Error(`no key for mail provider ${config.mail?.provider} in secret ${name}`);
+      return key;
+    },
     getOidcSecret: (config, provider) =>
       getSecretJson(provider === "google" ? config.secrets.oidcGoogle : config.secrets.oidcApple),
   };

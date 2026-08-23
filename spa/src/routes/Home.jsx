@@ -103,7 +103,7 @@ export default function Home() {
   const first = name?.split(/[\s.]/)[0] || 'there'
   // Fetched once by the shell (the rail shows the same lists) instead of each
   // route polling the same two endpoints on its own.
-  const { kelabos, records, scheduled, kelabosError, endLiveKelabo, respondToInvite, cancelScheduled } = useAppData()
+  const { kelabos, records, scheduled, kelabosError, pendingArchive, endLiveKelabo, respondToInvite, cancelScheduled } = useAppData()
 
   // Invitations are kelabos somebody else scheduled and put you in. A host's
   // own kelabos are not invitations — they never need an answer, and listing
@@ -193,6 +193,9 @@ export default function Home() {
         {(kelabos || []).map((m, i) => {
           const live = m.status === 'active'
           const isHost = !!(identity && m.hostIdentity && m.hostIdentity === identity.email)
+          // Ended here a moment ago, record not written yet: keep the row,
+          // but "View" would open a record that does not exist.
+          const archiving = !live && pendingArchive?.has(m.kelaboId)
           return (
             <div className={'row anim-in' + (i ? ` anim-in-d${Math.min(i, 4)}` : '')} key={m.kelaboId}>
               <Icon name={kelaboKindIcon(m)} size={15} className={'kind-icon' + (live ? ' kind-icon-live' : '')} />
@@ -201,7 +204,9 @@ export default function Home() {
                   {m.title}
                   {live
                     ? <span className="chip chip-live"><span className="dot"></span>live</span>
-                    : <span className="chip chip-ended">ended</span>}
+                    : archiving
+                      ? <span className="chip">archiving…</span>
+                      : <span className="chip chip-ended">ended</span>}
                 </div>
                 <div className="row-sub">
                   {m.participantCount ?? 0} participants
@@ -213,7 +218,7 @@ export default function Home() {
               <div className="row-actions row-actions-tight">
                 {live
                   ? <Button as={Link} size="sm" to={`/join/${m.kelaboId}`}>Open</Button>
-                  : <Button as={Link} size="sm" to={`/kelabos/${m.kelaboId}`}>View</Button>}
+                  : !archiving && <Button as={Link} size="sm" to={`/kelabos/${m.kelaboId}`}>View</Button>}
                 {/* Ending a kelabo you are not in (notes #6). The one that gets
                     left running is the one everybody already walked away from,
                     and rejoining it — mic, camera, conference audio — just to

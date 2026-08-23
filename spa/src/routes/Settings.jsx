@@ -741,10 +741,14 @@ export default function Settings() {
                     id="purge-value"
                     type="number"
                     min={1}
-                    max={1000}
+                    max={99}
                     aria-label="Older than"
                     value={purgeValue}
-                    onChange={e => { setPurgeValue(Math.max(1, Number(e.target.value) || 1)); setPurgePreview(null) }}
+                    // The `max` attribute alone doesn't block a typed-in value above it
+                    // (only the spinner arrows respect it), so clamp in JS too — same
+                    // 1..99 bound purgeRecordsBodySchema enforces server-side, regardless
+                    // of unit.
+                    onChange={e => { setPurgeValue(Math.min(99, Math.max(1, Number(e.target.value) || 1))); setPurgePreview(null) }}
                   />
                   <Select
                     id="purge-unit"

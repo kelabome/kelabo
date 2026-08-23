@@ -711,6 +711,24 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         return
       }
 
+      // The Gateway moved the whole room onto another transport (see
+      // `demote` in gateway/src/rtc/room.js). A transport object cannot become
+      // a different kind of transport, so the call is rebuilt rather than
+      // patched: the rejoin re-reads the mode, re-mints ICE — which is also
+      // how a withdrawn relay actually goes away — and keeps this seat,
+      // because `rebuildingRef` is what stops the teardown reporting a leave.
+      //
+      // Guarded on the mode actually differing, so the announcement arriving
+      // twice, or arriving to a tab that has already rebuilt, is not a second
+      // rebuild.
+      if (payload.kind === 'mode') {
+        if (!payload.mode || payload.mode === transport.mode) return
+        callLog.warn(LOG, `gateway moved the call to ${payload.mode} — rebuilding`, { reason: payload.reason })
+        rebuildingRef.current = true
+        setGeneration(g => g + 1)
+        return
+      }
+
       // A peer's stream dropped and the Gateway is holding their seat through
       // the grace window; their tile reads "reconnecting" instead of the whole
       // room churning through a leave/join.

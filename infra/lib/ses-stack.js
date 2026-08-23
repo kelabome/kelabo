@@ -22,6 +22,22 @@ export class SesStack extends Stack {
 
     this.identity = new ses.EmailIdentity(this, "DomainIdentity", {
       identity: ses.Identity.publicHostedZone(sesZone),
+      // Custom MAIL FROM (cfg.ses.mailFrom, derived in loadConfig): the
+      // envelope sender becomes this subdomain instead of amazonses.com, so
+      // SPF authenticates our own mail and aligns for DMARC. The CDK construct
+      // publishes the two records the subdomain needs — the MX pointing at
+      // feedback-smtp.<region>.amazonses.com and its own SPF TXT — because the
+      // identity above is built from the hosted zone. Bounce handling is
+      // unchanged: the MX keeps routing async bounces back into SES, which is
+      // why USE_DEFAULT_VALUE (fall back to amazonses.com if the MX ever
+      // disappears) is the right failure mode for transactional mail —
+      // REJECT_MESSAGE would stop sending outright over a DNS mistake.
+      ...(cfg.ses.mailFrom
+        ? {
+            mailFromDomain: cfg.ses.mailFrom,
+            mailFromBehaviorOnMxFailure: ses.MailFromBehaviorOnMxFailure.USE_DEFAULT_VALUE,
+          }
+        : {}),
     });
 
     // DMARC tells a receiving mailbox what to do when a message claiming this
@@ -95,5 +111,8 @@ export class SesStack extends Stack {
 
     new CfnOutput(this, "SesIdentityDomain", { value: sesZone.zoneName });
     new CfnOutput(this, "SesFromAddress", { value: cfg.ses.fromAddress });
+    if (cfg.ses.mailFrom) {
+      new CfnOutput(this, "SesMailFromDomain", { value: cfg.ses.mailFrom });
+    }
   }
 }

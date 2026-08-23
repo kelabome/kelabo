@@ -1,14 +1,16 @@
-import { Stack, CfnOutput } from "aws-cdk-lib";
+import { Stack, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { ApplicationLoadBalancedFargateService } from "aws-cdk-lib/aws-ecs-patterns";
 import { execSync } from "node:child_process";
+import { logRetention } from "./log-retention.js";
 
 function credentialsAccount() {
   try {
@@ -62,6 +64,22 @@ export class GatewayEcsStack extends Stack {
       clusterName: `${cfg.app}-${cfg.endpoint}`,
     });
 
+    // Same reason as the Lambda's: the pattern would otherwise create this group
+    // with a generated name and no expiry. The Gateway logs every join, caption
+    // append and agent attach, each carrying the participant's identity, so
+    // leaving it unset keeps a permanent index of who was in which room.
+    //
+    // Named to match the Lambda's, so both halves of the service are in one
+    // place under `/kelabo/<env>/` rather than one under `/aws/lambda` and one
+    // under a random construct id. The pattern's own generated group is
+    // abandoned by this change and can be deleted once nothing needs its
+    // history.
+    const logGroup = new logs.LogGroup(this, "GatewayLogs", {
+      logGroupName: `/${cfg.app}/${cfg.endpoint}/gateway`,
+      retention: logRetention(cfg.logRetentionDays),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     this.service = new ApplicationLoadBalancedFargateService(this, "GatewayService", {
       cluster,
       serviceName: `${cfg.app}-${cfg.endpoint}-gateway`,
@@ -80,15 +98,15 @@ export class GatewayEcsStack extends Stack {
       publicLoadBalancer: true,
       certificate,
       redirectHTTP: true,
-      // The pattern's default is to open the listener to 0.0.0.0/0. When
-      // `allowIps` is set that rule has to be absent rather than merely joined
-      // by narrower ones — a security group is a union, so an open rule beside
-      // an allowlist is just an open rule. The replacements go in below.
-      openListener: cfg.allowIps.length === 0,
+      // Always 0.0.0.0/0 at layer 4. `allowIps` is enforced one layer up, in
+      // listener rules, because it has to admit one caller that has no address
+      // to allow: the control plane. See the block below.
+      openListener: true,
       circuitBreaker: { rollback: true },
       taskImageOptions: {
         image: ecs.ContainerImage.fromEcrRepository(this.repo, cfg.gateway.imageTag),
         containerPort: 8080,
+        logDriver: ecs.LogDrivers.awsLogs({ streamPrefix: "gateway", logGroup }),
         environment: {
           KELABO_ENV: cfg.endpoint,
           KELABO_REGION: cfg.region,
@@ -106,6 +124,10 @@ export class GatewayEcsStack extends Stack {
           // to scope presence fan-out (docs 18 §5). It must never mutate a link.
           KELABO_TABLE_CONTACTS: names.contacts,
           KELABO_CONTACTS_EXTERNAL: String(cfg.contacts.external),
+          // Read: journey context for a report. Write: the report result and
+          // (docs 20 §10) the contributor rollup counters — the only table
+          // besides its own kelabos/history the Gateway needs read+write on.
+          KELABO_TABLE_JOURNEYS: names.journeys,
           KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
           KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
           KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
@@ -140,29 +162,72 @@ export class GatewayEcsStack extends Stack {
     this.service.loadBalancer.setAttribute("idle_timeout.timeout_seconds", "240");
 
     // `allowIps` — the Gateway's half of it (the portal's is a WAF WebACL, see
-    // waf-stack.js). A security group rather than WAF because the ALB is
-    // regional and already has one: refusing the connection is stronger than
-    // accepting it and answering 403, and it costs nothing.
+    // waf-stack.js).
     //
-    // Port 80 is listed as well as 443 only because `redirectHTTP` above opens
-    // it. Leaving it out would not be safer — it would make an allowlisted
-    // browser typing `http://` hang instead of being redirected, which reads as
-    // the service being down.
+    // This used to be a security group, which is the stronger mechanism and
+    // costs nothing — and which silently broke the product. `/internal/*` is
+    // the REST API calling the Gateway server to server: ending a kelabo
+    // (archive + record + minutes), ringing a contact, cancelling a scheduled
+    // one. The Lambda is not in the VPC, so it arrives over the public internet
+    // from an AWS-owned address that changes per invocation and cannot be
+    // allowlisted. A closed security group therefore dropped every one of those
+    // calls at layer 4, and `rest-api` logged a warning and carried on: kelabos
+    // ended with no record, no minutes and no error. Nothing else was affected,
+    // because the browser's own traffic comes from an allowlisted address —
+    // which is exactly why it survived so long.
+    //
+    // Listener rules instead, because they can make the one exemption a
+    // security group cannot express: a path. `/internal/*` is already
+    // authenticated by the internal JWT, which is signed with the cookie key
+    // and carries its own `aud` (INTERNAL_JWT_AUD) — filtering it by source
+    // address as well bought nothing and cost the archive.
+    //
+    // The default action becomes a 403 and each allowed thing gets a rule. An
+    // ALB rule holds at most five condition values, so the addresses are
+    // chunked; the rule ARNs are output because `make allow-ip` rewrites them
+    // live, the way it rewrites the WAF IPSets.
     if (cfg.allowIps.length) {
-      const lb = this.service.loadBalancer;
-      const open = (peer, label) => {
-        lb.connections.allowFrom(peer, ec2.Port.tcp(443), `allowIps ${label}`);
-        lb.connections.allowFrom(peer, ec2.Port.tcp(80), `allowIps ${label} (http redirect)`);
-      };
-      for (const cidr of cfg.allowIpsV4) open(ec2.Peer.ipv4(cidr), cidr);
-      for (const cidr of cfg.allowIpsV6) open(ec2.Peer.ipv6(cidr), cidr);
-    }
+      const listener = this.service.listener;
+      const forward = elbv2.ListenerAction.forward([this.service.targetGroup]);
 
-    // `make allow-ip` edits this group live, so it has to be findable without
-    // guessing at a name CloudFormation generated.
-    new CfnOutput(this, "GatewayAlbSecurityGroupId", {
-      value: this.service.loadBalancer.connections.securityGroups[0].securityGroupId,
-    });
+      new elbv2.ApplicationListenerRule(this, "InternalBypass", {
+        listener,
+        priority: 10,
+        conditions: [elbv2.ListenerCondition.pathPatterns(["/internal/*"])],
+        action: forward,
+      });
+
+      const chunks = [];
+      for (let i = 0; i < cfg.allowIps.length; i += 5) chunks.push(cfg.allowIps.slice(i, i + 5));
+      const ruleArns = chunks.map((chunk, i) => {
+        const rule = new elbv2.ApplicationListenerRule(this, `AllowIps${i}`, {
+          listener,
+          priority: 20 + i,
+          // Source-ip matches the connection's address and ignores
+          // X-Forwarded-For, which is what we want: nothing sits in front of
+          // this ALB, so a header here would be the caller's to forge.
+          conditions: [elbv2.ListenerCondition.sourceIps(chunk)],
+          action: forward,
+        });
+        return rule.listenerRuleArn;
+      });
+
+      // The pattern set the default action to "forward"; replace it, or every
+      // rule above is decoration. No L2 for this — `addAction` without a
+      // priority refuses to set a second default.
+      listener.node.defaultChild.addPropertyOverride("DefaultActions", [
+        {
+          Type: "fixed-response",
+          FixedResponseConfig: {
+            StatusCode: "403",
+            ContentType: "application/json",
+            MessageBody: JSON.stringify({ error: "forbidden" }),
+          },
+        },
+      ]);
+
+      new CfnOutput(this, "GatewayAllowIpRuleArns", { value: ruleArns.join(",") });
+    }
 
     const taskRole = this.service.taskDefinition.taskRole;
     tables.kelabos.grantReadWriteData(taskRole);
@@ -177,6 +242,10 @@ export class GatewayEcsStack extends Stack {
     // Presence fan-out reads a subscriber's accepted external peers (docs 18
     // §5). Read only — links are created and destroyed by the REST API alone.
     tables.contacts.grantReadData(taskRole);
+    // Journey reports (docs 20 §6): reads a journey's description/board/
+    // documents/linked-kelabo-minutes to build the prompt, writes the
+    // finished report back onto the same item rest-api created.
+    tables.journeys.grantReadWriteData(taskRole);
     // The gateway is the only component that sees a 401 from an MCP server, so
     // it owns the OAuth refresh grant and must persist the rotated tokens.
     // Deliberately PutItem only — not grantReadWriteData — so a compromised

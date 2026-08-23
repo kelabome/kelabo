@@ -49,6 +49,32 @@ const foreignMeta = { ...scheduledMeta, PK: `KELABO#${FOREIGN}`, hostIdentity: "
 const AGENT_JTI = "jti-1";
 const agentTokenRow = { PK: `AGT#${AGENT_JTI}`, jti: AGENT_JTI, revoked: false, expiresAt: NOW + 86_400_000 };
 
+// A journey the live kelabo is linked to (docs 20 §12.2's pull tools). Kept
+// mutable so one test can add a second link to exercise "ambiguous".
+const JOURNEY = "j-smoke";
+const JOURNEY2 = "j-smoke-2";
+const journeyMetaItem = {
+  PK: `JOURNEY#${JOURNEY}`,
+  SK: "META",
+  journeyId: JOURNEY,
+  title: "Smoke Journey",
+  visibility: "public",
+  status: "active",
+  aiCanPost: false,
+  kelaboCount: 1,
+};
+const journeyMetaItem2 = {
+  PK: `JOURNEY#${JOURNEY2}`,
+  SK: "META",
+  journeyId: JOURNEY2,
+  title: "Second Journey",
+  visibility: "private",
+  status: "active",
+};
+let kelaboJourneyLinks = [
+  { PK: `KELABO#${KELABO}`, SK: `JOURNEY#${JOURNEY}`, journeyId: JOURNEY, journeyTitleSnapshot: "Smoke Journey" },
+];
+
 const calls = { puts: [], updates: [], deletes: [], s3Puts: [] };
 const db = {
   send: async (cmd) => {
@@ -62,6 +88,8 @@ const db = {
         return { Item: { title: "Sprint planning", summary: "We picked the blue design.", decisions: ["Blue, not green"], actionItems: [{ text: "Ship it", owner: "bo" }] } };
       }
       if (input.Key.PK === `AGT#${AGENT_JTI}`) return { Item: agentTokenRow };
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "META") return { Item: journeyMetaItem };
+      if (input.Key.PK === `JOURNEY#${JOURNEY2}` && input.Key.SK === "META") return { Item: journeyMetaItem2 };
       return {};
     }
     if (name === "QueryCommand") {
@@ -69,6 +97,10 @@ const db = {
       const sk = input.ExpressionAttributeValues?.[":sk"];
       if (sk === "INVITE#" && typeof pk === "string") {
         return { Items: invites[pk.slice("KELABO#".length)] ?? [] };
+      }
+      if (sk === "JOURNEY#" && pk === `KELABO#${KELABO}`) return { Items: kelaboJourneyLinks };
+      if ((sk === "TL#" || sk === "BOARDMSG#") && typeof pk === "string" && pk.startsWith("JOURNEY#")) {
+        return { Items: [] };
       }
       // Serve transcript queries from what the test actually persisted, so the
       // history endpoint reads exactly the rows the caption handler wrote —
@@ -105,7 +137,7 @@ const config = {
   tenantId: "example.com",
   allowedEmailDomain: "example.com",
   portalUrl: "http://portal.test",
-  tableNames: { kelabos: "t-kelabos", history: "t-history", mcp: "t-mcp", refresh: "t-refresh" },
+  tableNames: { kelabos: "t-kelabos", history: "t-history", mcp: "t-mcp", refresh: "t-refresh", journeys: "t-journeys" },
   archiveBucket: "t-bucket",
   archiveKeyPrefix: "archives",
   secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
@@ -240,8 +272,15 @@ async function main() {
     assert.equal(res.status, 202);
     const utt = calls.puts.find((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#"));
     assert.ok(utt, "UTT appended");
-    assert.equal(utt.Item.speaker, "alice@example.com");
+    // No `displayName` was sent, so this is the identity fallback — and it is
+    // the local part, not the address. The persisted label is what the language
+    // model and any attached agent receive (`speakerLabel`), so an address here
+    // would be a disclosure to a third party nobody in the room chose.
+    assert.equal(utt.Item.speaker, "alice");
     const note = await waitFor(() => sse.events.find((e) => e.event === "contribution" && e.data.tag === "note"));
+    // The board author is a different field and stays the full identity: it is
+    // shown to participants, who are entitled to know who posted, and it never
+    // goes to a supplier.
     assert.equal(note.data.author, "alice@example.com");
     assert.equal(note.data.markdown, "remember to ship Friday");
     const contrib = calls.puts.find((p) => String(p.Item.SK).startsWith("CONTRIB#"));
@@ -698,6 +737,76 @@ async function main() {
   }
 
   {
+    // journey_info_request: this kelabo has exactly one linked journey, so no
+    // journeyId is needed at all (docs 20 §12.2's "enumerate rather than
+    // guess" only kicks in once there is something to disambiguate).
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_info_request", requestId: "ji1", kelaboId: KELABO }));
+    const info = await nextFrame((f) => f.type === "journey_info" && f.requestId === "ji1", 5000, base);
+    assert.equal(info.resolved, "ok");
+    assert.equal(info.journeyId, JOURNEY);
+    assert.equal(info.title, "Smoke Journey");
+    assert.equal(info.visibility, "public");
+    console.log("ok: journey_info_request → the kelabo's one linked journey, no journeyId needed");
+
+    // An explicit journeyId this kelabo is not actually linked to is refused,
+    // not trusted — an attached agent must not be able to read an arbitrary
+    // journey in the deployment by guessing an id.
+    const badBase = frames.length;
+    ws.send(JSON.stringify({ type: "journey_info_request", requestId: "ji2", kelaboId: KELABO, journeyId: "not-linked" }));
+    const bad = await nextFrame((f) => f.type === "journey_info" && f.requestId === "ji2", 5000, badBase);
+    assert.equal(bad.resolved, "journey_not_found");
+    console.log("ok: journey_info_request with an unlinked journeyId → journey_not_found, never trusted");
+  }
+
+  {
+    // journey_post is gated by the owner-controlled aiCanPost (docs 20 §7),
+    // off by default here — a real refusal, not a silently dropped write.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_post", requestId: "jp1", kelaboId: KELABO, content: "Freeze is Friday" }));
+    const off = await nextFrame((f) => f.type === "journey_posted" && f.requestId === "jp1", 5000, base);
+    assert.equal(off.resolved, "ai_posting_disabled");
+    assert.equal(calls.puts.find((p) => p.TableName === "t-journeys" && String(p.Item.SK).startsWith("BOARDMSG#")), undefined);
+    console.log("ok: journey_post refuses with ai_posting_disabled while the owner has not turned it on");
+
+    journeyMetaItem.aiCanPost = true;
+    const base2 = frames.length;
+    ws.send(JSON.stringify({ type: "journey_post", requestId: "jp2", kelaboId: KELABO, content: "Freeze is Friday" }));
+    const on = await nextFrame((f) => f.type === "journey_posted" && f.requestId === "jp2", 5000, base2);
+    delete journeyMetaItem.aiCanPost;
+    assert.equal(on.resolved, "ok");
+    assert.equal(on.version, 1);
+    assert.ok(on.msgId);
+    const written = calls.puts.find((p) => p.TableName === "t-journeys" && String(p.Item.SK) === `BOARDMSG#${on.msgId}`);
+    assert.equal(written.Item.content, "Freeze is Friday");
+    console.log("ok: journey_post writes a BOARDMSG# item once aiCanPost is on");
+  }
+
+  {
+    // Linking a second journey makes the kelabo's journey ambiguous: no
+    // journeyId means enumerate the candidates rather than guess one.
+    kelaboJourneyLinks = [
+      ...kelaboJourneyLinks,
+      { PK: `KELABO#${KELABO}`, SK: `JOURNEY#${JOURNEY2}`, journeyId: JOURNEY2, journeyTitleSnapshot: "Second Journey" },
+    ];
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_board_request", requestId: "jb1", kelaboId: KELABO }));
+    const ambiguous = await nextFrame((f) => f.type === "journey_board" && f.requestId === "jb1", 5000, base);
+    assert.equal(ambiguous.resolved, "ambiguous");
+    assert.equal(ambiguous.journeys.length, 2);
+    assert.ok(ambiguous.journeys.some((j) => j.journeyId === JOURNEY));
+    assert.ok(ambiguous.journeys.some((j) => j.journeyId === JOURNEY2));
+
+    // Naming one resolves it.
+    const base2 = frames.length;
+    ws.send(JSON.stringify({ type: "journey_board_request", requestId: "jb2", kelaboId: KELABO, journeyId: JOURNEY2 }));
+    const resolved = await nextFrame((f) => f.type === "journey_board" && f.requestId === "jb2", 5000, base2);
+    assert.equal(resolved.resolved, "ok");
+    console.log("ok: two linked journeys → ambiguous without a journeyId, resolved with one");
+    kelaboJourneyLinks = kelaboJourneyLinks.slice(0, 1); // back to one link for the tests below
+  }
+
+  {
     const pending = req(port, {
       method: "POST",
       path: `/internal/kelabos/${KELABO}/minutes`,
@@ -774,6 +883,27 @@ async function main() {
     // kelabo event is how the bridge learns to stop.
     await nextFrame((f) => f.type === "kelabo" && f.event === "ended", 5000, base);
     console.log("ok: internal end (dev mode) → fast end + archive request, S3 + history + participant-index, SSE ended, async minutes, kelabo ended");
+  }
+
+  {
+    // A kelabo can be "ended" here and still have no record: the control plane
+    // marks it ended whether or not this call landed, so an unreachable Gateway
+    // does not strand it live. `retry` is how it asks again — but only for a
+    // kelabo the control plane itself flagged. `retry` alone must not reopen an
+    // archived kelabo, or a replayed end would rewrite a record.
+    metaItem.status = "ended";
+    const headers = { authorization: `Bearer ${internalJwt}` };
+    const again = await req(port, { method: "POST", path: `/internal/kelabos/${KELABO}/end`, headers });
+    assert.equal(again.status, 409);
+
+    const retryUnflagged = await req(port, {
+      method: "POST",
+      path: `/internal/kelabos/${KELABO}/end`,
+      headers,
+      body: { retry: true },
+    });
+    assert.equal(retryUnflagged.status, 409, "retry is not a bypass; archivePending is the permission");
+    console.log("ok: a second end is a conflict, and `retry` alone does not reopen an archived kelabo");
   }
 
   server.close();

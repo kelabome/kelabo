@@ -21,6 +21,8 @@ import Kelabo from './routes/Kelabo'
 import Records from './routes/Records'
 import { RecordRedirect } from './routes/RecordRedirect'
 import RecordDetail from './routes/RecordDetail'
+import Journeys from './routes/Journeys'
+import JourneyDetail from './routes/JourneyDetail'
 import Contacts from './routes/Contacts'
 import Settings from './routes/Settings'
 
@@ -71,6 +73,8 @@ export default function App() {
                   <Route path="/scheduled/:id" element={<ScheduledKelabo />} />
                   <Route path="/kelabos" element={<Records />} />
                   <Route path="/kelabos/:id" element={<RecordDetail />} />
+                  <Route path="/journeys" element={<Journeys />} />
+                  <Route path="/journeys/:id" element={<JourneyDetail />} />
                   <Route path="/contacts" element={<Contacts />} />
                   {/* Links already sent out — in notification payloads, in
                       "here's the record" messages — keep working. */}

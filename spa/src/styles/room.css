@@ -113,20 +113,26 @@
 }
 .room-back:hover { color: var(--text); background: var(--surface); text-decoration: none; }
 
+/* One line, title and state chips side by side: the pill floats over the
+   tiles, and a two-line block spent its second row on a handful of small
+   chips while the title sat alone above them. It matches the back button's
+   circle height, so the whole top-left cluster reads as one row. */
 .room-id {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px var(--space-4) 7px;
+  align-items: center;
+  gap: var(--space-3);
+  height: 2.125rem;
+  padding: 0 var(--space-4);
   min-width: 0;
-  border-radius: var(--radius-lg);
+  max-width: calc(100vw - 11rem);
+  border-radius: 999px;
 }
 
 .room-title {
   font-weight: 600;
   font-size: var(--text-md);
   line-height: 1.2;
-  max-width: 34vw;
+  max-width: 30vw;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -136,7 +142,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .room-top-right .btn {
@@ -201,6 +208,12 @@
   flex: 0 0 auto;
   width: var(--tile-w);
   aspect-ratio: 16 / 9;
+  /* Opt out of `align-items: stretch`: Safari resolves the stretched cross
+     size before the aspect ratio, so without this every tile there fills the
+     whole stage height and the "grid" is a row of near-squares, while Chrome
+     (ratio wins) lays out correctly. `center` keeps the ratio in charge in
+     both. */
+  align-self: center;
 }
 
 /* --- focus / spotlight: one stage cell + a rail column -------------------
@@ -1202,7 +1215,7 @@
     --rail-w: 120px;
   }
   .stage { padding: calc(var(--stage-pad) + 52px) var(--stage-pad) calc(var(--stage-pad) + 84px); }
-  .room-title { max-width: 46vw; }
+  .room-title { max-width: 30vw; }
   .captions { width: calc(100vw - 2 * var(--space-4)); bottom: 106px; }
   /* The panel takes the room on a phone: 22% of a 390px screen is not a panel. */
   .side {

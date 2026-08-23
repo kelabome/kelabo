@@ -13,7 +13,10 @@ const mcpTable = (c) => c.config.tableNames.mcp;
 
 export const kelaboPk = (kelaboId) => `KELABO#${kelaboId}`;
 export const pad = (n, w = 12) => String(Math.max(0, Math.floor(n))).padStart(w, "0");
-const randSeq = () => Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+// Exported for gateway/src/journeys.js's own TL#/CONTRIBUTOR# writes (docs
+// 20 §4.1/§10) — same non-secret same-millisecond tie-breaker, not a second
+// implementation of it.
+export const randSeq = () => Math.random().toString(36).slice(2, 8).padEnd(6, "0");
 
 export async function getMeta(c, kelaboId) {
   const out = await c.db.send(
@@ -22,25 +25,37 @@ export async function getMeta(c, kelaboId) {
   return out.Item ?? null;
 }
 
+// `null` means REMOVE the attribute, matching rest-api's `updateKelaboMeta`.
+// Two helpers writing the same item with different meanings for the same value
+// is how a flag comes back from the dead: SET-to-null still satisfies
+// `attribute_exists`, and reads as absent to some callers and present to others.
 export async function updateMeta(c, kelaboId, fields) {
   const names = {};
   const values = {};
   const sets = [];
+  const removes = [];
   let i = 0;
   for (const [k, v] of Object.entries(fields)) {
     names[`#f${i}`] = k;
-    values[`:v${i}`] = v;
-    sets.push(`#f${i} = :v${i}`);
+    if (v === null) {
+      removes.push(`#f${i}`);
+    } else {
+      values[`:v${i}`] = v;
+      sets.push(`#f${i} = :v${i}`);
+    }
     i++;
   }
-  if (!sets.length) return;
+  if (!sets.length && !removes.length) return;
+  const expr = [sets.length ? `SET ${sets.join(", ")}` : "", removes.length ? `REMOVE ${removes.join(", ")}` : ""]
+    .filter(Boolean)
+    .join(" ");
   await c.db.send(
     new UpdateCommand({
       TableName: kelabosTable(c),
       Key: { PK: kelaboPk(kelaboId), SK: "META" },
-      UpdateExpression: `SET ${sets.join(", ")}`,
+      UpdateExpression: expr,
       ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
+      ...(sets.length ? { ExpressionAttributeValues: values } : {}),
     })
   );
 }

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { Tabs } from '../components/ui/Tabs'
 import { SkeletonRows, Skeleton } from '../components/ui/Skeleton'
@@ -211,6 +211,16 @@ export default function RecordDetail() {
             <span className="chip">{fmtDateLong(record.endedAt || record.startedAt)}</span>
             {mins && <span className="chip">{mins} min</span>}
             <span className="chip">{(record.participants || []).length} participants</span>
+            {(record.journeys || []).map(j => (
+              <Link
+                key={j.id}
+                className="chip chip-accent"
+                to={`/journeys/${j.id}`}
+                title={`Part of the journey "${j.title || 'Untitled journey'}"`}
+              >
+                <Icon name="link" size={12} />{j.title || 'Untitled journey'}
+              </Link>
+            ))}
           </div>
           <p className="page-sub">
             Host: {record.host || '—'} · archived transcript, board and minutes

@@ -233,16 +233,92 @@ test("history is requestId-correlated and distinguishes off from empty", () => {
   assert.equal(full.frame.entries[0].decisions[0], "d");
 });
 
+// --- journey pull tools (docs 20 §12.2) --------------------------------------
+
+test("journey_*_request frames require a requestId and kelaboId but not a journeyId", () => {
+  assert.equal(up({ type: "journey_info_request", requestId: "r", kelaboId: "m" }).ok, true);
+  assert.equal(up({ type: "journey_info_request", kelaboId: "m" }).ok, false);
+  assert.equal(up({ type: "journey_info_request", requestId: "r" }).ok, false);
+  const withId = up({ type: "journey_info_request", requestId: "r", kelaboId: "m", journeyId: "j1" });
+  assert.equal(withId.ok, true);
+  assert.equal(withId.frame.journeyId, "j1");
+});
+
+test("journey_timeline_request's entryType is distinct from the frame's own type", () => {
+  const r = up({ type: "journey_timeline_request", requestId: "r", kelaboId: "m", entryType: "report", before: 5, limit: 10 });
+  assert.equal(r.ok, true);
+  assert.equal(r.frame.type, "journey_timeline_request");
+  assert.equal(r.frame.entryType, "report");
+});
+
+test("journey_report_submit requires both question and answer", () => {
+  assert.equal(up({ type: "journey_report_submit", requestId: "r", kelaboId: "m", question: "q" }).ok, false);
+  assert.equal(up({ type: "journey_report_submit", requestId: "r", kelaboId: "m", question: "q", answer: "a" }).ok, true);
+});
+
+test("journey_post requires content; msgId is optional (present means edit)", () => {
+  assert.equal(up({ type: "journey_post", requestId: "r", kelaboId: "m" }).ok, false);
+  const post = up({ type: "journey_post", requestId: "r", kelaboId: "m", content: "note" });
+  assert.equal(post.ok, true);
+  assert.equal(post.frame.msgId, undefined);
+  const edit = up({ type: "journey_post", requestId: "r", kelaboId: "m", content: "note", msgId: "msg1" });
+  assert.equal(edit.frame.msgId, "msg1");
+});
+
+test("journey resolution responses distinguish ok/no_journey/ambiguous/journey_not_found", () => {
+  const none = down({ type: "journey_info", requestId: "r", kelaboId: "m", resolved: "no_journey" });
+  assert.equal(none.ok, true);
+  assert.deepEqual(none.frame.journeys, []);
+  const ambiguous = down({
+    type: "journey_info",
+    requestId: "r",
+    kelaboId: "m",
+    resolved: "ambiguous",
+    journeys: [{ journeyId: "j1", title: "Q3 Launch" }, { journeyId: "j2", title: "Q4 Launch" }],
+  });
+  assert.equal(ambiguous.ok, true);
+  assert.equal(ambiguous.frame.journeys.length, 2);
+  const ok = down({
+    type: "journey_info",
+    requestId: "r",
+    kelaboId: "m",
+    resolved: "ok",
+    journeyId: "j1",
+    title: "Q3 Launch",
+    visibility: "public",
+    status: "active",
+    health: "yellow",
+    progress: 40,
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.frame.description, "", "description defaults to empty, not undefined");
+  assert.equal(ok.frame.health, "yellow");
+  assert.equal(down({ type: "journey_info", requestId: "r", kelaboId: "m", resolved: "not_a_real_reason" }).ok, false);
+});
+
+test("journey_posted carries the aiCanPost gate and edit-target failures as resolved outcomes, not errors", () => {
+  assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "ai_posting_disabled" }).ok, true);
+  assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "message_not_found" }).ok, true);
+  assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "already_archived" }).ok, true);
+  const ok = down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "ok", msgId: "msg1", version: 2 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.frame.version, 2);
+});
+
 // --- union completeness -----------------------------------------------------
 
 test("every declared frame type parses", () => {
   const upTypes = new Set(upFrameSchema.options.map((o) => o.shape.type.value));
   const downTypes = new Set(downFrameSchema.options.map((o) => o.shape.type.value));
   assert.deepEqual([...upTypes].sort(), [
-    "archive", "attach", "board_request", "contribution", "detach", "heartbeat", "history_request", "register", "rename", "summary",
+    "archive", "attach", "board_request", "contribution", "detach", "heartbeat", "history_request",
+    "journey_board_request", "journey_info_request", "journey_post", "journey_report_submit",
+    "journey_timeline_request", "register", "rename", "summary",
   ]);
   assert.deepEqual([...downTypes].sort(), [
-    "board", "briefing", "history", "kelabo", "ping", "registered", "rejected", "request", "transcript",
+    "board", "briefing", "history", "journey_board", "journey_info", "journey_posted",
+    "journey_report_submitted", "journey_timeline", "kelabo", "ping", "registered", "rejected", "request",
+    "transcript",
   ]);
   // No type may appear in both directions: the bridge and the Gateway each
   // parse exactly one union, so an overlap would be ambiguous at one end.

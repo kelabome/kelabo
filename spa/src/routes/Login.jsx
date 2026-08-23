@@ -29,8 +29,18 @@ function otpErrorMessage(err) {
         : "This deployment only allows your organization's email domain."
     case 'rate_limited':
       return 'Too many attempts — wait a moment and try again.'
+    // The mail never went out, and which of these it is decides who can do
+    // anything about it. The server's own message is used when it sent one:
+    // the useful part is always provider-specific (an SES sandbox wants a
+    // verification email, an unverified MailerSend domain wants DNS records),
+    // and a message written here would have to be wrong for one of them.
     case 'email_not_verified':
-      return 'This deployment is in email sandbox — verify your address via the AWS email first, then resend.'
+      return err.message || 'This deployment cannot email your address yet — ask whoever runs it to finish setting up sending.'
+    case 'email_suppressed':
+      return 'The email provider is blocking messages to this address, usually after an earlier one bounced or was marked as spam.'
+    case 'mail_not_configured':
+    case 'mail_failed':
+      return 'Sign-in email is not working on this deployment — nothing you can do from here, tell whoever runs it.'
     default:
       return 'Something went wrong — try again.'
   }

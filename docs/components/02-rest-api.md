@@ -312,7 +312,8 @@ Manager under `kelabo/<env>/mcp/<identity>/<name>`; items store only `secretRef`
 | `router` | method+path dispatch over `/{proxy+}` (`:param` segments) |
 | `cookies` | sign/verify/parse cookies (HS256, key from Secrets Manager) |
 | `authProvider` | interface with `otp` + `oidcSocial` backends; both `establishSession` |
-| `otp` | generate/store/verify codes; SES send; rate-limit counters |
+| `otp` | generate/store/verify codes; rate-limit counters |
+| `mail/` | every outbound mail. `messages.js` says what each one contains, a transport (`ses.js`, `mailersend.js`) says how it travels, `index.js` picks one per send and supplies the from-address. `mime.js` is SES-only — its `Simple` content cannot carry the inline logo |
 | `oidc` | social login start/callback (Google/Apple); PKCE; token exchange; domain enforce |
 | `sessions` | `establishSession`, refresh-token issue/rotate/revoke; `logout-all` |
 | `jwt` | mint/verify the app JWT embedded in cookies |
@@ -349,7 +350,10 @@ record_not_found, stt_unavailable`.
   read S3 archive bucket. Plus a deliberately narrow `dynamodb:DeleteItem` on
   history and `s3:DeleteObject` on archive objects (for `POST /records/purge`) —
   the API still cannot *write* history rows or archives, which stay gateway-owned.
-- SES: `ses:SendEmail` (OTP).
+- SES: `ses:SendEmail`, fenced by a `ses:FromAddress` condition — and granted
+  **only when `mail.provider` is `ses`**. A deployment sending through another
+  provider gets a read grant on `kelabo/<env>/mail` instead, so it cannot still
+  send from the SES identity long after it stopped meaning to.
 - Secrets Manager: read Deepgram key, cookie/JWT signing key, social OIDC client
   secrets (Google/Apple); Create/Put/Get/Delete/Describe on secrets under the
   `kelabo/<env>/mcp/` prefix (host-pasted MCP bearer tokens).

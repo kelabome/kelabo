@@ -10,8 +10,15 @@ export function createDb() {
   const mcp = new Map();
   const history = new Map();
   const contacts = new Map();
+  const journeys = new Map();
 
   const mkey = (PK, SK) => `${PK}|${SK}`;
+  const padVersion = (n) => String(Math.max(0, Math.floor(n))).padStart(6, "0");
+  const conditionFailed = () => {
+    const e = new Error("ConditionalCheckFailedException");
+    e.name = "ConditionalCheckFailedException";
+    return e;
+  };
 
   return {
     async getKelaboMeta(kelaboId) {
@@ -93,9 +100,23 @@ export function createDb() {
     async getInvite(kelaboId, inviteKey) {
       return kelabos.get(mkey(`KELABO#${kelaboId}`, `INVITE#${inviteKey}`)) || null;
     },
+    async removeInvite(kelaboId, inviteKey) {
+      kelabos.delete(mkey(`KELABO#${kelaboId}`, `INVITE#${inviteKey}`));
+    },
     async listInvites(kelaboId) {
       return [...kelabos.values()].filter(
         (i) => i.PK === `KELABO#${kelaboId}` && String(i.SK).startsWith("INVITE#")
+      );
+    },
+    // Mirrors `invitee-index`, sparse on `inviteKey` for the same reason
+    // `listKelabosByStatus` below models `status-index` as sparse on
+    // `tenantStatus`: only an INVITE# item ever carries either attribute.
+    async listInvitesByIdentity(identity) {
+      return [...kelabos.values()].filter(
+        (i) =>
+          String(i.SK).startsWith("INVITE#") &&
+          i.inviteKey === identity &&
+          typeof i.invitedAt === "number"
       );
     },
     // Mirrors the users table's `tenant-index`: registered users at one
@@ -145,6 +166,26 @@ export function createDb() {
           // The sparse-index rule, enforced rather than assumed.
           typeof i.startedAt === "number"
       );
+    },
+    // Mirrors src/db.js's composition of the same two GSIs: same-tenant by
+    // status-index, plus any kelabo elsewhere where identity holds an
+    // INVITE# row, via invitee-index.
+    async listKelabosByStatusForIdentity(identity, status) {
+      const tenantId = identity.split("@")[1]?.toLowerCase();
+      const sameTenant = [...kelabos.values()].filter(
+        (i) => i.SK === "META" && i.tenantStatus === `${tenantId}#${status}` && typeof i.startedAt === "number"
+      );
+      const known = new Set(sameTenant.map((m) => m.kelaboId));
+      const myInvites = [...kelabos.values()].filter(
+        (i) => String(i.SK).startsWith("INVITE#") && i.inviteKey === identity && typeof i.invitedAt === "number"
+      );
+      const otherIds = [
+        ...new Set(myInvites.map((i) => String(i.PK).slice("KELABO#".length)).filter((id) => id && !known.has(id))),
+      ];
+      const crossTenant = otherIds
+        .map((id) => kelabos.get(mkey(`KELABO#${id}`, "META")))
+        .filter((m) => m && m.status === status);
+      return { sameTenant, crossTenant };
     },
     async updateKelaboMeta(kelaboId, updates) {
       const k = mkey(`KELABO#${kelaboId}`, "META");
@@ -397,6 +438,271 @@ export function createDb() {
     },
     async putMcpClient(issuer, registration) {
       mcp.set(mkey("MCP#client", `AS#${issuer}`), { PK: "MCP#client", SK: `AS#${issuer}`, ...registration });
+    },
+
+    // --- journeys (docs 20), mirroring src/db.js -----------------------------
+
+    async createJourney(meta) {
+      const k = mkey(`JOURNEY#${meta.journeyId}`, "META");
+      if (journeys.has(k)) throw conditionFailed();
+      journeys.set(k, { PK: `JOURNEY#${meta.journeyId}`, SK: "META", ...meta });
+    },
+    async getJourneyMeta(journeyId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, "META")) || null;
+    },
+    async updateJourneyMeta(journeyId, updates) {
+      const item = journeys.get(mkey(`JOURNEY#${journeyId}`, "META"));
+      if (!item) return;
+      for (const [key, v] of Object.entries(updates)) {
+        if (v === null) delete item[key];
+        else item[key] = v;
+      }
+    },
+    async completeJourney({ journeyId, tenantId, completedAt, completedBy }) {
+      const k = mkey(`JOURNEY#${journeyId}`, "META");
+      const meta = journeys.get(k);
+      if (!meta || meta.status !== "active") throw conditionFailed();
+      Object.assign(meta, {
+        status: "completed",
+        tenantStatus: `${tenantId}#completed`,
+        completedAt,
+        completedBy,
+        updatedAt: completedAt,
+      });
+    },
+    async reopenJourney({ journeyId, tenantId, reopenedAt }) {
+      const k = mkey(`JOURNEY#${journeyId}`, "META");
+      const meta = journeys.get(k);
+      if (!meta || meta.status !== "completed") throw conditionFailed();
+      Object.assign(meta, { status: "active", tenantStatus: `${tenantId}#active`, reopenedAt, updatedAt: reopenedAt });
+    },
+    // Sparse on `tenantStatus`, like `listKelabosByStatus` above: only a META
+    // item ever carries it.
+    async listJourneysByTenantStatus(tenantId, status) {
+      return [...journeys.values()].filter(
+        (i) => i.SK === "META" && i.tenantStatus === `${tenantId}#${status}`
+      );
+    },
+    // Sparse on `accessorIdentity`, like `listInvitesByIdentity` above: only
+    // an ACCESSOR# item ever carries it.
+    async listAccessorJourneys(identity) {
+      return [...journeys.values()].filter(
+        (i) => String(i.SK).startsWith("ACCESSOR#") && i.accessorIdentity === identity
+      );
+    },
+    async putJourneyDescriptionVersion(journeyId, version) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `DESC#${padVersion(version.version)}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `DESC#${padVersion(version.version)}`,
+        ...version,
+      });
+    },
+    async listJourneyDescriptionVersions(journeyId) {
+      return [...journeys.values()]
+        .filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("DESC#"))
+        .sort((a, b) => (a.SK < b.SK ? 1 : -1));
+    },
+    async putJourneyStatusVersion(journeyId, version) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `STATUS#${padVersion(version.version)}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `STATUS#${padVersion(version.version)}`,
+        ...version,
+      });
+    },
+    async listJourneyStatusVersions(journeyId) {
+      return [...journeys.values()]
+        .filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("STATUS#"))
+        .sort((a, b) => (a.SK < b.SK ? 1 : -1));
+    },
+    // Timeline (docs 20 §9) — `pad13` mirrors CONTRIB_KEY_WIDTH so `before`
+    // comparisons behave the same way `queryContributions`'s `since` does.
+    async putJourneyTimelineEntry(journeyId, entry) {
+      const at = entry.at ?? Date.now();
+      const sk = `TL#${pad(at)}#${Math.random().toString(36).slice(2, 8)}`;
+      journeys.set(mkey(`JOURNEY#${journeyId}`, sk), { PK: `JOURNEY#${journeyId}`, SK: sk, ...entry, at });
+    },
+    async listJourneyTimeline(journeyId, { type, before, limit }) {
+      let items = [...journeys.values()]
+        .filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("TL#"))
+        .sort((a, b) => (a.SK < b.SK ? 1 : -1)); // newest first
+      if (before) items = items.filter((i) => i.SK < `TL#${pad(before)}`);
+      if (type) items = items.filter((i) => i.type === type);
+      return items.slice(0, limit);
+    },
+    async putAccessor(journeyId, accessor) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `ACCESSOR#${accessor.identity}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `ACCESSOR#${accessor.identity}`,
+        accessorIdentity: accessor.identity,
+        ...accessor,
+      });
+    },
+    async getAccessor(journeyId, identity) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `ACCESSOR#${identity}`)) || null;
+    },
+    async removeAccessor(journeyId, identity) {
+      journeys.delete(mkey(`JOURNEY#${journeyId}`, `ACCESSOR#${identity}`));
+    },
+    async listAccessors(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("ACCESSOR#")
+      );
+    },
+    // --- message board (docs 20 §7) — heads and #V# versions share the
+    // BOARDMSG# prefix, told apart by whether the SK contains "#V#",
+    // mirroring src/db.js exactly.
+    async createBoardMessageHead(journeyId, head) {
+      const k = mkey(`JOURNEY#${journeyId}`, `BOARDMSG#${head.msgId}`);
+      if (journeys.has(k)) throw conditionFailed();
+      journeys.set(k, { PK: `JOURNEY#${journeyId}`, SK: `BOARDMSG#${head.msgId}`, ...head });
+    },
+    async putBoardMessageHead(journeyId, head) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `BOARDMSG#${head.msgId}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `BOARDMSG#${head.msgId}`,
+        ...head,
+      });
+    },
+    async getBoardMessageHead(journeyId, msgId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `BOARDMSG#${msgId}`)) || null;
+    },
+    async listBoardMessageHeads(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("BOARDMSG#") && !String(i.SK).includes("#V#")
+      );
+    },
+    async putBoardMessageVersion(journeyId, version) {
+      const sk = `BOARDMSG#${version.msgId}#V#${padVersion(version.version)}`;
+      journeys.set(mkey(`JOURNEY#${journeyId}`, sk), { PK: `JOURNEY#${journeyId}`, SK: sk, ...version });
+    },
+    async listBoardMessageVersions(journeyId, msgId) {
+      return [...journeys.values()]
+        .filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith(`BOARDMSG#${msgId}#V#`))
+        .sort((a, b) => (a.SK < b.SK ? 1 : -1));
+    },
+    // --- documents (docs 20 §8) — one item per document, never versioned.
+    async createDocument(journeyId, item) {
+      const k = mkey(`JOURNEY#${journeyId}`, `DOC#${item.docId}`);
+      if (journeys.has(k)) throw conditionFailed();
+      journeys.set(k, { PK: `JOURNEY#${journeyId}`, SK: `DOC#${item.docId}`, ...item });
+    },
+    async putDocument(journeyId, item) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `DOC#${item.docId}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `DOC#${item.docId}`,
+        ...item,
+      });
+    },
+    async getDocument(journeyId, docId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `DOC#${docId}`)) || null;
+    },
+    async listDocuments(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("DOC#")
+      );
+    },
+    // Models the real TransactWriteCommand as a check-then-write, which is
+    // safe here because the stub is single-threaded: both conditions
+    // (LINK# absent, journey active) are checked before anything is written,
+    // matching the all-or-nothing shape the real transaction guarantees.
+    async linkKelaboToJourney({ journeyId, kelaboId, link, mirror }) {
+      const linkKey = mkey(`JOURNEY#${journeyId}`, `LINK#${kelaboId}`);
+      const metaKey = mkey(`JOURNEY#${journeyId}`, "META");
+      const meta = journeys.get(metaKey);
+      if (journeys.has(linkKey) || !meta || meta.status !== "active") throw conditionFailed();
+      journeys.set(linkKey, { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}`, ...link });
+      meta.kelaboCount = (meta.kelaboCount || 0) + 1;
+      meta.updatedAt = link.linkedAt;
+      kelabos.set(mkey(`KELABO#${kelaboId}`, `JOURNEY#${journeyId}`), {
+        PK: `KELABO#${kelaboId}`,
+        SK: `JOURNEY#${journeyId}`,
+        ...mirror,
+      });
+    },
+    async unlinkKelaboFromJourney({ journeyId, kelaboId, now }) {
+      journeys.delete(mkey(`JOURNEY#${journeyId}`, `LINK#${kelaboId}`));
+      const meta = journeys.get(mkey(`JOURNEY#${journeyId}`, "META"));
+      if (meta) {
+        meta.kelaboCount = Math.max(0, (meta.kelaboCount || 0) - 1);
+        meta.updatedAt = now;
+      }
+      kelabos.delete(mkey(`KELABO#${kelaboId}`, `JOURNEY#${journeyId}`));
+    },
+    async getJourneyLink(journeyId, kelaboId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `LINK#${kelaboId}`)) || null;
+    },
+    async listJourneyLinks(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("LINK#")
+      );
+    },
+    // The mirror on the KELABO's own partition (docs 20 §4.3) — reuses the
+    // same `kelabos` map every other kelabo-partition item lives in.
+    async listKelaboJourneyLinks(kelaboId) {
+      return [...kelabos.values()].filter(
+        (i) => i.PK === `KELABO#${kelaboId}` && String(i.SK).startsWith("JOURNEY#")
+      );
+    },
+    async deleteKelaboJourneyMirror(kelaboId, journeyId) {
+      kelabos.delete(mkey(`KELABO#${kelaboId}`, `JOURNEY#${journeyId}`));
+    },
+    async deleteJourneyChildren(journeyId) {
+      const prefix = `JOURNEY#${journeyId}|`;
+      let n = 0;
+      for (const k of [...journeys.keys()]) {
+        if (k.startsWith(prefix) && k !== `${prefix}META`) {
+          journeys.delete(k);
+          n++;
+        }
+      }
+      return n;
+    },
+    async deleteJourneyMeta(journeyId) {
+      journeys.delete(mkey(`JOURNEY#${journeyId}`, "META"));
+    },
+    async putJourneyReport(journeyId, report) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `REPORT#${report.reportId}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `REPORT#${report.reportId}`,
+        ...report,
+      });
+    },
+    async getJourneyReport(journeyId, reportId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`)) || null;
+    },
+    async listJourneyReports(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("REPORT#")
+      );
+    },
+    async markJourneyReportFailed(journeyId, reportId, error) {
+      const item = journeys.get(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`));
+      if (item) Object.assign(item, { status: "failed", error });
+    },
+    async bumpContributor(journeyId, identity, field) {
+      const k = mkey(`JOURNEY#${journeyId}`, `CONTRIBUTOR#${identity}`);
+      const now = Date.now();
+      const item = journeys.get(k) || {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `CONTRIBUTOR#${identity}`,
+        contributorIdentity: identity,
+        firstSeenAt: now,
+      };
+      item[field] = (item[field] || 0) + 1;
+      item.lastActiveAt = now;
+      journeys.set(k, item);
+    },
+    async listContributors(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("CONTRIBUTOR#")
+      );
+    },
+    // Test-only seams for arranging journey state.
+    __journeySize() {
+      return journeys.size;
+    },
+    __putJourneyItem(journeyId, SK, item) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, SK), { PK: `JOURNEY#${journeyId}`, SK, ...item });
     },
   };
 }

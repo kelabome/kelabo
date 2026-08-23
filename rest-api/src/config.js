@@ -93,6 +93,7 @@ function fromEnv() {
       history: env.KELABO_TABLE_HISTORY,
       mcp: env.KELABO_TABLE_MCP,
       contacts: env.KELABO_TABLE_CONTACTS,
+      journeys: env.KELABO_TABLE_JOURNEYS,
     },
     contacts: { external: env.KELABO_CONTACTS_EXTERNAL === "true" },
     archiveBucket: env.KELABO_ARCHIVE_BUCKET,
@@ -103,6 +104,7 @@ function fromEnv() {
       oidcGoogle: env.KELABO_SECRET_OIDC_GOOGLE,
       oidcApple: env.KELABO_SECRET_OIDC_APPLE,
       mcpPrefix: env.KELABO_SECRET_MCP_PREFIX || "",
+      mail: env.KELABO_SECRET_MAIL || "",
       // Existence-probed only, for the capability map (docs 19 §3). The API
       // holds no read grant on these values — they stay gateway-owned.
       llm: env.KELABO_SECRET_LLM,
@@ -130,13 +132,18 @@ function fromEnv() {
       language: env.KELABO_STT_LANGUAGE || "en",
       providers: parseJson(env.KELABO_STT_PROVIDERS, {}),
     },
-    // `region` falls back to the Lambda's own region: an environment that never
-    // moved its mail has no KELABO_SES_REGION, and the identity is where the
-    // rest of it lives.
-    ses: {
-      fromAddress: env.KELABO_SES_FROM_ADDRESS,
-      region: env.KELABO_SES_REGION || env.AWS_REGION || "us-east-1",
-      configurationSet: env.KELABO_SES_CONFIG_SET || "",
+    // Outbound mail. `provider` decides which transport in `src/mail/` carries
+    // it; the SES `region` falls back to the Lambda's own, because an
+    // environment that never moved its mail has no KELABO_SES_REGION and the
+    // identity is where the rest of it lives.
+    mail: {
+      provider: env.KELABO_MAIL_PROVIDER || "ses",
+      fromAddress: env.KELABO_MAIL_FROM_ADDRESS || env.KELABO_SES_FROM_ADDRESS || "",
+      ses: {
+        region: env.KELABO_SES_REGION || env.AWS_REGION || "us-east-1",
+        configurationSet: env.KELABO_SES_CONFIG_SET || "",
+      },
+      mailersend: { apiBase: env.KELABO_MAILERSEND_API_BASE || undefined },
     },
     // The control plane only stamps the kelabo's transport and reports it back;
     // all Cloudflare credentials and signalling live in the Gateway (docs 15).
@@ -184,6 +191,7 @@ function fromLoadConfig(c) {
       oidcGoogle: c.secrets.oidcGoogle,
       oidcApple: c.secrets.oidcApple,
       mcpPrefix: c.secrets.mcpPrefix || "",
+      mail: c.secrets.mail || "",
       llm: c.secrets.llm,
       cloudflareRealtime: c.secrets.cloudflareRealtime,
       apiOrigin: c.secrets.apiOrigin,
@@ -205,10 +213,14 @@ function fromLoadConfig(c) {
       language: c.stt?.language ?? "en",
       providers: c.stt?.providers ?? {},
     },
-    ses: {
-      fromAddress: c.ses?.fromAddress,
-      region: c.ses?.region || c.region,
-      configurationSet: c.ses?.configurationSetName || "",
+    mail: {
+      provider: c.mail?.provider || "ses",
+      fromAddress: c.mail?.fromAddress || c.ses?.fromAddress || "",
+      ses: {
+        region: c.mail?.ses?.region || c.ses?.region || c.region,
+        configurationSet: c.mail?.ses?.configurationSet || c.ses?.configurationSetName || "",
+      },
+      mailersend: { apiBase: c.mail?.mailersend?.apiBase || undefined },
     },
     rtc: { ...DEFAULTS.rtc, ...(c.rtc || {}) },
     otp: { ...DEFAULTS.otp, ...(c.otp || {}) },

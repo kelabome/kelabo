@@ -21,6 +21,9 @@ A kelabo's transport is chosen by the host at creation, stored on the kelabo
 META as `rtcMode`, and **fixed for the life of the kelabo**. Changing it midway
 would revoke the guarantee participants joined under.
 
+The one exception is a **demotion**, `sfu` → `mesh`, and only ever in that
+direction: see [§1.1](#11-demotion-sfu--mesh-mid-call).
+
 | | `sfu` (default) | `mesh` ("secure kelabo") |
 |---|---|---|
 | Media path | browser → Cloudflare Realtime SFU → browsers | browser ↔ browser, direct |
@@ -42,6 +45,44 @@ not count against the cap.
 **TURN does not weaken mesh.** When direct connectivity fails, Cloudflare TURN
 relays the DTLS-SRTP packets — it cannot decrypt them, so a relayed mesh call is
 still end-to-end confidential between participants.
+
+### 1.1 Demotion: `sfu` → `mesh`, mid-call
+
+`rtcRoom.demote(kelaboId, { reason })` moves a live call off the SFU. It is the
+only thing that changes `rtcMode` after creation, and it is one-way.
+
+That does not contradict the rule above, because the rule is about *drift*: a
+participant must never be moved onto a transport with a **weaker** promise than
+the one they joined under. Mesh is the stronger promise — nobody but the
+participants can decrypt the media — so arriving at it is not a revocation.
+Promotion, `mesh` → `sfu`, is exactly the revocation the rule forbids and has no
+implementation.
+
+It is offered because the alternative to demoting is usually not "keep the SFU",
+it is "no call": the SFU is unreachable, or the operator has stopped paying to
+route this room. What it does:
+
+1. **Refuses if the room does not fit.** Mesh is not a cheaper SFU — every
+   participant sends their uplink to every other one. If `meshUnits` (people
+   plus live screen shares) exceeds `meshMaxParticipants`, `demote` answers
+   `{ ok: false, code: 'mesh_too_small' }` and changes nothing. Ending a call
+   cleanly beats handing back a room nobody can hear.
+2. Sets the in-process room's mode, then writes `rtcMode: 'mesh'` to META —
+   without the write, the next task restart reads `sfu` back and undoes it.
+3. Clears every peer's `sfuSessionId` and `tracks`. The sessions are abandoned;
+   a roster that still names them makes every peer pull tracks that no longer
+   exist.
+4. Fans `rtc { kind: 'mode', mode: 'mesh', reason }`.
+5. Retracts the abandoned Cloudflare tracks, detached and best-effort. Not
+   awaited: the room has already been told, and the SFU expires idle sessions
+   by itself.
+
+Clients rebuild rather than adapt (`useRtc`, on `kind: 'mode'`): a transport
+object cannot become a different kind of transport, so the call is torn down and
+rejoined. The rejoin re-reads the mode and **re-mints ICE**, which is how a
+withdrawn relay actually stops being used. The seat is kept across the rebuild,
+so the room sees no leave/join churn and the mesh cap is not re-tested against a
+room that has just been measured.
 
 **`mesh` is a media guarantee only.** Deepgram transcription, the shared board,
 the agent and persistence behave identically in both modes. A secure kelabo is

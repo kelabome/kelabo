@@ -4,6 +4,7 @@ import {
   captionPostSchema,
   captionRenameSchema,
   COOKIE_PARTICIPANT,
+  speakerLabel,
   SSE_EVENT_RENAME,
   stripAddress,
 } from "@kelabo/contracts";
@@ -62,14 +63,20 @@ export async function handleCaptionPost(c, req, res) {
   // - Diarized stream: the capturer sends the Deepgram A/B label; we then apply
   //   any host-assigned rename so it shows as a real name.
   // - Non-diarized: attribute to the capturing participant (their display name),
-  //   falling back to their identity.
+  //   falling back to what can be derived from their identity.
+  //
+  // Both branches go through `speakerLabel`, which is where the rule that a
+  // label is never a bare email address lives. This is the label that is
+  // persisted, fanned out, handed to the language model and tunnelled to an
+  // attached agent's machine, and the identity fallback used to be the verified
+  // address itself — reachable by any client that simply omitted `displayName`.
   const meta = await getMeta(c, post.kelaboId).catch(() => null);
   const nameMap = meta?.speakerNames ?? {};
   let speaker;
   if (post.diarized && DIARIZATION_LABEL.test(post.speaker ?? "")) {
-    speaker = nameMap[post.speaker] ?? post.speaker;
+    speaker = speakerLabel(nameMap[post.speaker] ?? post.speaker, null);
   } else {
-    speaker = (post.displayName ?? "").trim() || participant.identity;
+    speaker = speakerLabel(post.displayName, participant.identity);
   }
 
   // A delta is an append to a message the speaker is still producing: relay it
@@ -332,7 +339,13 @@ export async function handleCaptionRename(c, req, res) {
   // so repeated renames chain correctly.
   const existing = meta.speakerNames ?? {};
   const resolvedFrom = existing[from] || from;
-  const target = to.trim();
+  // Normalised exactly as a caption's label is, so a rename cannot introduce an
+  // address into the record and the prompt that a spoken line could not. Done
+  // here, at the write, because this value is persisted onto META and reused for
+  // every later caption — normalising on read would leave the stored copy dirty.
+  // An empty `to` still means "clear the rename", so it is left alone.
+  const trimmed = to.trim();
+  const target = trimmed ? speakerLabel(trimmed, null) : "";
 
   // 1) Retroactively rewrite persisted transcript rows.
   let updated = 0;

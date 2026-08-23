@@ -205,6 +205,43 @@ would otherwise fire a per-peer "left" fan-out into a room with no subscribers.
 - `typedefs.js`: `KelaboCreated.status` is already stale (cannot express
   `scheduled`) — widen to the real union and add `"cancelled"`.
 
+### 2.8 Cross-tenant invitees — the other half of "who can see this"
+
+Every kelabo list in this document — `listScheduled`, `listKelabos`,
+`joinableKelabos` (the agent bridge) — was, until now, a query against
+`status-index`, keyed on **`tenantStatus`**: `<hostTenant>#<status>`. That
+finds everything at the caller's own tenant, which covers the ordinary case
+(a host invites a colleague) by construction, and does not mention invitees
+at all — colleagues at one tenant are simply, tenant-wide, each other's
+audience.
+
+It does not cover the other ordinary case: a host inviting someone at a
+*different* domain — a contractor, a partner, a friend on open registration.
+That invitee's own tenant is not the host's, so `status-index` cannot reach
+the kelabo from their side no matter what they query — the kelabo was never
+indexed under their tenant, and no `#<status>` query for their own tenant
+will ever be indexed there either. The invitee gets the email, replies, and
+the host sees the reply; the invitee's own home page never shows it again.
+Reachable only by re-opening the original link, indefinitely — not a race,
+not eventual consistency, structurally absent.
+
+**The fix:** a second GSI, `invitee-index`, sparse on `inviteKey` — the same
+sparse-index trick `status-index` itself plays on `tenantStatus`, since only
+an `INVITE#` item carries either attribute. `db.listKelabosByStatusForIdentity`
+composes both: `status-index` for the caller's own tenant, `invitee-index` for
+every kelabo hosted anywhere else that has an `INVITE#` row naming the
+caller — returned as two separate arrays, not merged, because they carry
+different visibility rules. `listScheduled` and `joinableKelabos` already
+gate on "host or invited" uniformly, tenant or not, so widening their
+candidate set is the whole change. `listKelabos` does not — a non-`unlisted`
+kelabo is visible tenant-wide by default — and that default has no cross-
+tenant analogue: a kelabo hosted elsewhere is visible only because a specific
+`INVITE#` row names the caller, never because it merely isn't `unlisted`.
+
+No backfill: a new GSI is populated from every existing item that already
+carries the attribute, automatically, so an invite written before the index
+existed is reachable the moment the index finishes building.
+
 ---
 
 ## 3. Reschedule a scheduled kelabo
@@ -241,8 +278,45 @@ non-host row clear `respondedAt` and set `response: "pending"`, preserving
 
 `ScheduledKelabo.jsx`: a **Reschedule** button next to Cancel, opening a small
 inline form that reuses `DateTimePicker.jsx` — the same fields as `Schedule.jsx`
-minus invitees. (Adding invitees after scheduling is a separate future route,
-`POST /kelabos/:id/invitees`, out of scope here.)
+minus invitees. Editing invitees is a separate button and a separate route
+(§3.5), not folded into this form: they are different questions with
+different blast radius, and a host fixing a title typo should not be shown a
+list of people they could accidentally drop.
+
+### 3.5 Add and remove invitees
+
+The route named and deferred above, now built: `POST /kelabos/:id/invitees`,
+host-only, scheduled-only — the same guard §2 and §3 use. New
+`updateInviteesBodySchema` in contracts.
+
+**Shape: the full desired list, not an add list and a remove list.** The body
+is `{ invitees: [...] }`, the same field `scheduleKelaboBodySchema` already
+has. `scheduling.js` diffs it against `listInvites`, so the caller — in
+practice, `EmailPicker`'s controlled `value`, the same chip input
+`Schedule.jsx` already uses — never has to track what changed, only what the
+list looks like now. A client-computed diff can also be wrong in a way a
+server-computed one cannot (a chip removed and re-added in the same edit, a
+race with another open tab); a full-list PUT-shaped body sidesteps that
+entirely.
+
+The diff excludes the host's own row and any guest-only RSVP (`inviteKey`
+starting `g:`, someone who answered the link directly without an account):
+neither was ever something the host typed an address for, so neither is
+addable or removable here. Sending the host's own address back in the list is
+harmless, not an error — it is simply outside the set this route touches.
+
+**Added** addresses get exactly the create-time `putInvite` + `sendInvite`
+(`inviteMessage`) — a new invitee added after the fact is not a different kind
+of invitee. **Removed** addresses get `db.removeInvite` (an actual delete, the
+first place this partition needs one — `putInvite` had always been an
+unconditional full `Put` until now) and a new, deliberately short mail,
+`uninviteMessage`/`sendUninvite`: *"`{host}` removed you from `{title}`. It is
+still happening, just without you."* Distinct from `cancellationMessage` on
+purpose — the kelabo is not going away, only this person's place in it, and a
+cancellation-shaped email would say the wrong thing.
+
+An empty diff (the same list handed back) is `nothing_to_change`, same as an
+empty reschedule.
 
 ---
 

@@ -208,13 +208,19 @@ export function createAgent({ config, db, secrets }) {
   /**
    * Kelabos this identity may attach an agent to: active ones to attend, and
    * scheduled ones to prepare for. Host or invitee — preparing for a kelabo you
-   * were invited to is the ordinary case, not a privileged one.
+   * were invited to is the ordinary case, not a privileged one, including one
+   * hosted at a tenant this identity does not belong to (docs 18 §2.8) — the
+   * tenant this runs against is derived from `identity` itself for exactly
+   * that reason, not taken from the caller.
    */
-  async function joinableKelabos({ identity, tenantId }) {
-    const [active, scheduled] = await Promise.all([
-      db.listKelabosByStatus(tenantId, "active"),
-      db.listKelabosByStatus(tenantId, "scheduled"),
-    ]);
+  async function joinableKelabos({ identity }) {
+    const [{ sameTenant: activeSame, crossTenant: activeCross }, { sameTenant: schedSame, crossTenant: schedCross }] =
+      await Promise.all([
+        db.listKelabosByStatusForIdentity(identity, "active"),
+        db.listKelabosByStatusForIdentity(identity, "scheduled"),
+      ]);
+    const active = [...activeSame, ...activeCross];
+    const scheduled = [...schedSame, ...schedCross];
     const visible = await Promise.all(
       [...active, ...scheduled].map(async (meta) => {
         if (meta.hostIdentity === identity) return { meta, isHost: true };

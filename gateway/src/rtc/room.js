@@ -1,5 +1,5 @@
 import { RTC_MODES } from "@kelabo/contracts";
-import { getMeta } from "../db.js";
+import { getMeta, updateMeta } from "../db.js";
 import { meshHasRoom, meshUnits } from "./capacity.js";
 
 // Per-kelabo conference presence. Deliberately in-process and unpersisted, for
@@ -332,6 +332,96 @@ export function createRtcRoom(c) {
     c.log("rtc_peer_back", { kelaboId, participantId });
   }
 
+  /**
+   * Move a live call off the SFU and onto mesh, mid-call.
+   *
+   * The one sanctioned exception to "a kelabo's `rtcMode` never changes after
+   * creation". That rule exists so a *joiner* is never silently moved onto a
+   * transport the host did not choose — it is about drift, not about the
+   * operator. This is the opposite: a deliberate, announced, whole-room move,
+   * made when the alternative is not "keep the SFU" but "no call at all"
+   * (Cloudflare unreachable, or an operator policy that has stopped paying for
+   * routing). Downgrading is the generous half of that; it is never an upgrade,
+   * because mesh is the mode with the stronger promise and taking it away is
+   * what the invariant guards.
+   *
+   * **Refused when the room is too big for mesh**, and this is the whole
+   * reason the caller gets an answer rather than a promise. Mesh is not a
+   * cheaper SFU: every participant sends their uplink to every other one, so a
+   * nine-seat call demoted to mesh is nine times the uplink and, at
+   * `meshMaxParticipants`, explicitly more than the cap admits. A call that
+   * cannot be carried is left alone for the caller to deal with — ending it
+   * cleanly beats delivering a room nobody can hear.
+   *
+   * Cloudflare teardown is deliberately **not** awaited. The room has already
+   * been told, the peers have already stopped advertising sessions, and the
+   * SFU expires an idle session on its own; holding the caller — which on a
+   * metered deployment is a timer with a whole room's worth of work to do —
+   * behind two 10s third-party timeouts per peer buys nothing.
+   *
+   * @returns {Promise<{ok:true, peers:number, already?:boolean}
+   *                  | {ok:false, code:string, detail?:object}>}
+   */
+  async function demote(kelaboId, { reason = "demoted" } = {}) {
+    const r = room(kelaboId);
+    if (!r) return { ok: false, code: "rtc_no_room" };
+    if (r.mode === "mesh") return { ok: true, peers: r.peers.size, already: true };
+
+    const units = meshUnits(r.peers.values());
+    // `adding: 0` — nobody is joining. This asks whether the room as it stands
+    // fits, which is a different question from the one `join` asks.
+    if (!meshHasRoom({ mode: "mesh", meshMax, units, adding: 0 })) {
+      c.log("rtc_demote_refused", { kelaboId, units, meshMax, reason });
+      return { ok: false, code: "mesh_too_small", detail: { meshMax, units } };
+    }
+
+    r.mode = "mesh";
+    // Durable, and before anything else observable: a task that restarts after
+    // the announcement but before the write would read `sfu` back off the META
+    // and put the room straight onto the transport the caller just ruled out.
+    try {
+      await updateMeta(c, kelaboId, { rtcMode: "mesh" });
+    } catch (err) {
+      // The in-process room is already mesh and the announcement still goes
+      // out: a call that keeps working until the next restart is a better
+      // outcome than one that stays on a transport nobody wants because a
+      // single write failed.
+      c.logError("rtc_demote_meta_failed", err, { kelaboId });
+    }
+
+    // Every SFU session is abandoned by this, so the roster must stop naming
+    // them in the same breath. Peers pulling tracks off a session that is on
+    // its way out get `not_found_track_error` for the rest of the kelabo
+    // otherwise — the same failure `bindSfuSession` retracts tracks for. It is
+    // also what stops a metered deployment counting seat-seconds for a call
+    // that is no longer being routed.
+    const abandoned = [];
+    for (const p of r.peers.values()) {
+      if (p.sfuSessionId) abandoned.push({ participantId: p.participantId, sfuSessionId: p.sfuSessionId });
+      p.sfuSessionId = undefined;
+      p.tracks = {};
+    }
+
+    c.sseHub.rtc(kelaboId, { kind: "mode", mode: "mesh", reason });
+    c.log("rtc_demoted", { kelaboId, peers: r.peers.size, units, sessions: abandoned.length, reason });
+
+    for (const { participantId, sfuSessionId } of abandoned) {
+      closeSessionTracks(kelaboId, participantId, sfuSessionId).catch(() => {});
+    }
+    return { ok: true, peers: r.peers.size };
+  }
+
+  /** Best-effort: retract everything a session publishes. Never throws. */
+  async function closeSessionTracks(kelaboId, participantId, sfuSessionId) {
+    try {
+      const session = await c.rtc.getSession(sfuSessionId);
+      const mids = (session.tracks ?? []).filter((t) => t.mid).map((t) => ({ mid: t.mid }));
+      if (mids.length) await c.rtc.closeTracks(sfuSessionId, { tracks: mids, force: true });
+    } catch (err) {
+      c.logError("rtc_session_close_failed", err, { kelaboId, participantId });
+    }
+  }
+
   /** Kelabo ended: drop the whole room. The `ended` SSE event is sent separately. */
   function closeKelabo(kelaboId) {
     for (const key of [...disconnectTimers.keys()]) {
@@ -351,6 +441,7 @@ export function createRtcRoom(c) {
     leave,
     handleDisconnect,
     cancelDisconnect,
+    demote,
     closeKelabo,
     roster,
     peer,

@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "check": "node --check src/server.js",
-    "test": "node test/agent.mjs && node test/rtc.mjs && node test/roster.mjs && node test/presence.mjs && node test/smoke.mjs",
+    "test": "node test/agent.mjs && node test/rtc.mjs && node test/roster.mjs && node test/presence.mjs && node test/smoke.mjs && node test/journeys.mjs",
     "dev:agent": "node test/devAgent.mjs"
   },
   "dependencies": {

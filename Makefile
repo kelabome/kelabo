@@ -13,6 +13,7 @@ REGION = $(eval REGION := $(shell cd config && KELABO_ENV=$(env) node --input-ty
 STACK_PREFIX := kelabo-$(env)
 
 .PHONY: help deploy infra docker gateway restart backend frontend synth secrets rtc-secrets bootstrap test check \
+	origin-secret stt-key stt-adopt mail-secret \
 	allow-list allow-ip allow-rm \
 	agent-login agent-pack agent-publish agent-release agent-tarball connector-install install-connector install-oc-connector \
 	install-cc-connector uninstall-connector uninstall-oc-connector uninstall-cc-connector
@@ -116,6 +117,33 @@ stt-key: ## add/replace one provider's STT key (provider=deepgram key=..)
 	    && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/stt --secret-string "$$merged" --region $(REGION) >/dev/null \
 	    || aws secretsmanager create-secret --name kelabo/$(env)/stt --secret-string "$$merged" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null
 	@echo "stt key set for provider=$(provider) env=$(env)"
+
+# Kept out of `secrets` on purpose: a deployment sending through SES needs no
+# key at all — the Lambda authenticates with its own IAM role — so this is only
+# for the deployments that cannot use SES. That is not a rare case: SES
+# production access is granted case by case and is regularly refused, and a
+# permanently sandboxed account can mail only addresses verified one at a time.
+#
+# Merged per provider, like the STT secret, so switching provider or rolling
+# back after a switch never means re-entering a credential:
+#
+#   { "mailersend": "…" }
+#
+# The Lambda reads whichever one `mail.provider` names (rest-api/src/secrets.js).
+# Needs `make backend` (not `make restart`) to take effect the first time,
+# because the read grant and KELABO_MAIL_PROVIDER live in the task's IAM policy
+# and environment.
+mail-secret: ## add/replace the outbound mail API key (provider=mailersend key=..)
+	@test -n "$(provider)" || (echo "provider required, e.g. provider=mailersend"; exit 1)
+	@test -n "$(key)" || (echo "key required"; exit 1)
+	@command -v python3 >/dev/null || (echo "python3 required to merge the secret"; exit 1)
+	@existing=$$(aws secretsmanager get-secret-value --secret-id kelabo/$(env)/mail --region $(REGION) \
+	    --query SecretString --output text 2>/dev/null || echo '{}'); \
+	  merged=$$(python3 -c 'import json,sys; raw=(sys.argv[1] or "").strip() or "{}"; d=json.loads(raw); d=d if isinstance(d,dict) else {}; d[sys.argv[2]]=sys.argv[3]; print(json.dumps(d))' "$$existing" "$(provider)" "$(key)"); \
+	  aws secretsmanager describe-secret --secret-id kelabo/$(env)/mail --region $(REGION) >/dev/null 2>&1 \
+	    && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/mail --secret-string "$$merged" --region $(REGION) >/dev/null \
+	    || aws secretsmanager create-secret --name kelabo/$(env)/mail --secret-string "$$merged" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null
+	@echo "mail key set for provider=$(provider) env=$(env) — set mail.provider in config/kelabo.json, then 'make backend env=$(env)'"
 
 # Migration for a deployment that predates the STT provider boundary, where the
 # key lived in a secret named after the provider (kelabo/<env>/deepgram). Copies

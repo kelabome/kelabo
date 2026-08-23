@@ -26,6 +26,41 @@ const BOOL_KEYS = new Set(['notif', 'sounds', 'finalOnly', 'vad', 'muteHidden', 
 const TS_KEY = 'kelabo-settings-ts'
 export const SETTINGS_SYNCED_EVENT = 'kelabo-settings-synced'
 
+// Whose local settings cache this is. Every `KEY_MAP` key is read by the
+// component that renders it as "a truthy local value wins over the fresh
+// server identity" — the display name chief among them, in AppShell's account
+// menu and in Settings itself. That precedence is correct within one person's
+// own session (a name just typed must not flicker back to what the server
+// last said before the debounced push lands) and wrong the moment a
+// *different* person signs in on the same browser: their predecessor's name
+// and avatar are, to every read site, indistinguishable from their own —
+// worse, the next unrelated setting they touch pushes that stale name onto
+// their own server-side profile via `pushSettings` below.
+//
+// `syncIdentity` is the one place that notices the switch and clears the
+// slate; every read site then falls through to the fresh identity on its own,
+// unchanged. It never fires on the very first identity a browser ever sees —
+// only a confirmed *different* one from what was last remembered — so a
+// guest's typed name still carries into their first sign-in, and nothing is
+// wiped for no reason.
+const IDENTITY_KEY = 'kelabo-identity-email'
+
+export function syncIdentity(email) {
+  if (!email) return
+  const last = localStorage.getItem(IDENTITY_KEY)
+  if (last && last !== email) {
+    for (const storageKey of Object.keys(KEY_MAP)) localStorage.removeItem(storageKey)
+    localStorage.removeItem(TS_KEY)
+    // Same signal `pullSettings`/`pushSettings` fire, and for the same
+    // reason: AppShell and Settings both read these keys once, into
+    // `useState`, on mount — an already-mounted instance (the common case,
+    // since the shell was already showing the previous user a moment ago)
+    // keeps rendering what it read then without this.
+    window.dispatchEvent(new Event(SETTINGS_SYNCED_EVENT))
+  }
+  localStorage.setItem(IDENTITY_KEY, email)
+}
+
 let pushTimer = null
 
 const localUpdatedAt = () => Number(localStorage.getItem(TS_KEY) || 0)

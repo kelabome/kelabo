@@ -11,13 +11,14 @@
     "./schemas": "./src/schemas.js",
     "./frames": "./src/frames.js",
     "./llmcon": "./src/llmcon.js",
+    "./speaker": "./src/speaker.js",
     "./mention": "./src/mention.js",
     "./constants": "./src/constants.js",
     "./mcp-auth": "./src/mcpAuth.js",
     "./retention": "./src/retention.js"
   },
   "scripts": {
-    "test": "node test/frames.mjs && node test/mention.mjs"
+    "test": "node test/frames.mjs && node test/mention.mjs && node test/speaker.mjs"
   },
   "dependencies": {
     "zod": "^3.23.8"

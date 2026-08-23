@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RTC_MODES } from "./constants.js";
+import { RTC_MODES, JOURNEY_VISIBILITIES } from "./constants.js";
 
 export const utteranceSchema = z.object({
   kelaboId: z.string().min(1),
@@ -258,6 +258,11 @@ export const createKelaboBodySchema = z.object({
   // a decision a host has to actually make, and a default that quietly said yes
   // would be making it for them every time.
   historyEnabled: z.boolean().optional(),
+  // Link into one or more existing journeys at creation time (docs 20 §11).
+  // No membership check is needed here beyond zod: the caller is about to
+  // become this kelabo's host, which already satisfies journeys.linkKelabo's
+  // own "host or participant of the target" requirement.
+  journeyIds: z.array(z.string().min(1).max(64)).max(10).optional(),
 });
 
 // A scheduled kelabo is the same kelabo in an earlier state, not a different
@@ -288,6 +293,16 @@ export const rescheduleKelaboBodySchema = z.object({
   durationMinutes: z.number().int().min(5).max(24 * 60).optional(),
   title: z.string().min(1).max(80).optional(),
   note: z.string().max(500).optional(),
+});
+
+// Add or remove invitees on a scheduled kelabo (docs 18 §3.5) — the route
+// `ScheduledKelabo.jsx`'s reschedule form named and deferred. The *full*
+// desired list, same field as `scheduleKelaboBodySchema`'s own `invitees`:
+// the handler diffs it against who is currently invited rather than the
+// caller tracking an add list and a remove list separately, which is also
+// what lets the SPA hand it `EmailPicker`'s value unchanged.
+export const updateInviteesBodySchema = z.object({
+  invitees: z.array(z.string().email().max(160)).max(50),
 });
 
 // Huddle / ring (docs 18 §6). Start an instant kelabo and ring online contacts
@@ -580,8 +595,11 @@ export const retentionUnits = ["days", "weeks", "months", "years"];
 // destructive by omission is not acceptable here, so clients preview first.
 export const purgeRecordsBodySchema = z.object({
   // >= 1: `0 days` would mean "everything", which must be a deliberate choice
-  // made with an explicit age, not an accidental empty form field.
-  value: z.number().int().min(1).max(1000),
+  // made with an explicit age, not an accidental empty form field. <= 99
+  // regardless of unit — three digits' worth of typo (e.g. "999" meant to be
+  // "99") is exactly the kind of accidental over-broad purge this bound
+  // exists to catch before it reaches the confirmation step.
+  value: z.number().int().min(1).max(99),
   unit: z.enum(["days", "weeks", "months", "years"]),
   dryRun: z.boolean().optional(),
 });
@@ -636,4 +654,89 @@ export const sttSessionSchema = z.object({
   token: z.string().min(1),
   expiresInSeconds: z.number().int().positive(),
   params: z.record(z.unknown()),
+});
+
+// --- Journey (docs 20) -------------------------------------------------------
+//
+// A persistent container linking related kelabos so description, decisions
+// and documents carry from one meeting to the next, for people and the
+// agent. Full design: docs/20-journey.md.
+
+export const createJourneyBodySchema = z.object({
+  title: z.string().min(1).max(80),
+  // The free-text description's first version. Optional: a journey may be
+  // created empty and described later.
+  description: z.string().max(20000).optional(),
+  visibility: z.enum(JOURNEY_VISIBILITIES).default("private"),
+});
+
+// Every field optional; the handler rejects an empty body with
+// `nothing_to_change`, which zod cannot express on its own — the same
+// contract rescheduleKelaboBodySchema already uses. `avatarVariant` is the
+// identicon re-roll, same shape as the personal one in userSettingsSchema —
+// a client-chosen salt, owner-only to set (docs 20 §13).
+export const patchJourneyBodySchema = z.object({
+  title: z.string().min(1).max(80).optional(),
+  visibility: z.enum(JOURNEY_VISIBILITIES).optional(),
+  avatarVariant: z.number().int().min(0).max(999999).optional(),
+  // Owner-only gate on whether an attached agent may post to the board on
+  // its own initiative (docs 20 §7) — independent of human write rights.
+  // Default off, same reasoning as historyEnabled: a human-curated,
+  // always-visible surface being edited unsupervised is a decision an
+  // owner has to actually make.
+  aiCanPost: z.boolean().optional(),
+});
+
+// POST /journeys/:id/status — health/progress (docs 20 §5), a combined
+// snapshot rather than two independently-versioned fields: people report
+// them together ("60%, yellow, because X"). Every field optional; the
+// handler rejects a body with none of the three present. `null` explicitly
+// clears a field back to "unset" — genuinely absent, not defaulted.
+export const journeyStatusBodySchema = z.object({
+  health: z.enum(["green", "yellow", "red"]).nullable().optional(),
+  progress: z.number().int().min(0).max(100).nullable().optional(),
+  note: z.string().max(500).optional(),
+});
+
+// POST /journeys/:id/description — a new, immutable version. `changeNote` is
+// the human's own one-line "why", shown beside the version in history.
+export const journeyDescriptionBodySchema = z.object({
+  markdown: z.string().min(1).max(20000),
+  changeNote: z.string().max(200).optional(),
+});
+
+// POST /journeys/:id/accessors — owner-only, private journeys only.
+export const journeyAccessorBodySchema = z.object({
+  identity: z.string().email().max(254),
+});
+
+// POST /journeys/:id/kelabos — the caller must already be host or
+// participant of the kelabo being linked (checked server-side, not here).
+export const journeyLinkKelaboBodySchema = z.object({
+  kelaboId: z.string().min(1).max(128),
+});
+
+// POST /journeys/:id/reports — a free-text question, answered by synthesis
+// over the journey's own content (docs 20 §6). Generation happens in the
+// Gateway (the LLM credential is gateway-owned); this only validates the ask.
+export const journeyReportBodySchema = z.object({
+  question: z.string().min(1).max(2000),
+});
+
+// POST /journeys/:id/board, PATCH .../board/:msgId — a pinned message,
+// mutable in place with every edit kept (docs 20 §7). Same body shape for
+// create and edit.
+export const journeyBoardMessageBodySchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+
+// POST /journeys/:id/documents — pasted/typed text, not file upload (docs
+// 20 §8). 200,000 chars is comfortably inside the 400KB DynamoDB item cap
+// with the rest of the item's fields; content over that has nowhere to go
+// yet — S3 overflow (the same split the kelabo archive already uses) is
+// not built in this pass, so a document that large is refused rather than
+// silently truncated.
+export const journeyDocumentBodySchema = z.object({
+  title: z.string().min(1).max(160),
+  content: z.string().min(1).max(200_000),
 });

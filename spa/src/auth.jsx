@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { api } from './api'
-import { pullSettings } from './settings'
+import { pullSettings, syncIdentity } from './settings'
 
 const AuthContext = createContext({ identity: null, tenantId: null, loading: true, refresh: () => {} })
 
@@ -10,17 +10,25 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
-    try {
-      const me = await api.me()
+    // The one point that ever learns who is actually signed in — so it is
+    // also the one point that can tell a fresh login apart from a returning
+    // one. `syncIdentity` clears this browser's cached name/avatar/settings
+    // the moment the email differs from whoever last held them; every reader
+    // of those keys elsewhere falls through to this `identity` on its own.
+    const apply = (me) => {
       setIdentity(me?.identity || null)
       setTenantId(me.tenantId || null)
+      syncIdentity(me?.identity?.email)
+    }
+    try {
+      const me = await api.me()
+      apply(me)
     } catch (e) {
       if (e.status === 401) {
         try {
           await api.refresh()
           const me = await api.me()
-          setIdentity(me?.identity || null)
-          setTenantId(me.tenantId || null)
+          apply(me)
         } catch {
           setIdentity(null)
           setTenantId(null)

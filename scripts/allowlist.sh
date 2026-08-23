@@ -10,14 +10,16 @@
 #
 #   config/kelabo.json   the source of truth. CDK reads it, so a deploy always
 #                        re-asserts exactly this.
-#   AWS                  the WAF IPSets (CloudFront) and the ALB security group
+#   AWS                  the WAF IPSets (CloudFront) and the ALB listener rules
 #                        (Gateway), edited live so an address works in seconds
 #                        rather than after a CloudFormation update.
 #
 # The live edit is skipped, with a message, when the environment is not locked
-# yet: going from an open deployment to a locked one adds a stack and removes
-# the ALB's 0.0.0.0/0 rule, and neither is something a security-group call can
-# do. That first transition needs a deploy; every addition after it does not.
+# yet: going from an open deployment to a locked one adds a stack and turns the
+# ALB's default action into a 403, and neither is something a rule edit can do.
+# That first transition needs a deploy; every addition after it does not — up to
+# the point where the list outgrows the rules CDK made, since an ALB rule holds
+# five addresses and a sixth needs a new rule, which is also a deploy.
 set -euo pipefail
 
 ENV="${1:?usage: allowlist.sh <env> <list|add|rm> [cidr]}"
@@ -72,41 +74,50 @@ live_ipset() { # <name> <id> -> addresses, one per line
     --query 'IPSet.Addresses[]' --output text 2>/dev/null | tr '\t' '\n' || true
 }
 
-live_sg_cidrs() { # <sg-id> -> cidrs allowed on 443, one per line
-  aws ec2 describe-security-groups --group-ids "$1" --region "$REGION" \
-    --query 'SecurityGroups[0].IpPermissions[?FromPort==`443`].[IpRanges[].CidrIp,Ipv6Ranges[].CidrIpv6]' \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true
+rule_arns() { # -> the gateway's allowIps listener rule ARNs, one per line
+  stack_output "$PREFIX-gateway" "$REGION" GatewayAllowIpRuleArns | tr ',' '\n' | grep -v '^$' || true
+}
+
+live_rule_cidrs() { # -> cidrs the gateway ALB currently admits, one per line
+  local arn
+  while read -r arn; do
+    [ -z "$arn" ] && continue
+    aws elbv2 describe-rules --rule-arns "$arn" --region "$REGION" \
+      --query 'Rules[0].Conditions[?Field==`source-ip`].SourceIpConfig.Values[]' \
+      --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true
+  done < <(rule_arns)
 }
 
 # --- applying live -----------------------------------------------------------
 
 apply_live() {
-  local v4=() v6=() cidr
+  local v4=() v6=() all=() cidr
   while read -r cidr; do
     [ -z "$cidr" ] && continue
+    all+=("$cidr")
     case "$cidr" in *:*) v6+=("$cidr");; *) v4+=("$cidr");; esac
   done < <(config_list)
 
-  local sg
-  sg="$(stack_output "$PREFIX-gateway" "$REGION" GatewayAlbSecurityGroupId)"
+  local arns=()
+  mapfile -t arns < <(rule_arns)
   local v4id v4name v6id v6name
   v4id="$(stack_output "$PREFIX-waf" us-east-1 AllowIpSetV4Id)"
   v4name="$(stack_output "$PREFIX-waf" us-east-1 AllowIpSetV4Name)"
   v6id="$(stack_output "$PREFIX-waf" us-east-1 AllowIpSetV6Id)"
   v6name="$(stack_output "$PREFIX-waf" us-east-1 AllowIpSetV6Name)"
 
-  if [ -z "$v4id" ] || [ -z "$sg" ]; then
+  if [ -z "$v4id" ] || [ "${#arns[@]}" -eq 0 ]; then
     echo
     echo "  Config updated, AWS not touched: $ENV is not locked yet."
-    echo "  Locking adds the WAF stack and removes the ALB's 0.0.0.0/0 rule,"
-    echo "  which only a deploy can do:  make deploy env=$ENV"
+    echo "  Locking adds the WAF stack and turns the Gateway ALB's default"
+    echo "  action into a 403, which only a deploy can do:  make deploy env=$ENV"
     return 0
   fi
 
   update_ipset "$v4name" "$v4id" "${v4[@]:-}"
   update_ipset "$v6name" "$v6id" "${v6[@]:-}"
-  sync_sg "$sg" "${v4[@]:-}" -- "${v6[@]:-}"
-  echo "  Live: WAF IPSets and security group $sg now match the config."
+  sync_rules "${#arns[@]}" "${all[@]:-}" || return 1
+  echo "  Live: WAF IPSets and ${#arns[@]} Gateway ALB rule(s) now match the config."
 }
 
 update_ipset() { # <name> <id> <cidr...>
@@ -129,52 +140,37 @@ update_ipset() { # <name> <id> <cidr...>
     --region us-east-1 --lock-token "$token" --addresses "$addrs" >/dev/null
 }
 
-sync_sg() { # <sg-id> <v4...> -- <v6...>
-  local sg="$1"; shift
-  local v4=() v6=() seen_sep=0
-  for a in "$@"; do
-    if [ "$a" = "--" ]; then seen_sep=1; continue; fi
-    [ -z "$a" ] && continue
-    if [ "$seen_sep" = 1 ]; then v6+=("$a"); else v4+=("$a"); fi
-  done
+# Rewrites the rules' source-ip conditions to exactly the config list. A
+# replace rather than an add-what-is-missing diff, because a rule condition is
+# a set: `rm` needs no separate revoke step, and a rule cannot drift.
+#
+# The chunking must match gateway-ecs-stack.js — five addresses per rule, in
+# config order — or an address would land in a rule the next deploy rewrites
+# with something else.
+sync_rules() { # <rule-count> <cidr...>
+  local count="$1"; shift
+  local all=() a
+  for a in "$@"; do [ -n "$a" ] && all+=("$a"); done
 
-  # Add what is missing. Revoking what is extra is left to `rm`, which knows
-  # which address the operator meant — a blind diff here would drop a rule
-  # someone added by hand during an incident.
-  local existing; existing="$(live_sg_cidrs "$sg")"
-  for cidr in "${v4[@]:-}"; do
-    [ -z "$cidr" ] && continue
-    echo "$existing" | grep -qxF "$cidr" && continue
-    authorize "$sg" "IpRanges=[{CidrIp=$cidr,Description='allowIps'}]"
-  done
-  for cidr in "${v6[@]:-}"; do
-    [ -z "$cidr" ] && continue
-    echo "$existing" | grep -qxF "$cidr" && continue
-    authorize "$sg" "Ipv6Ranges=[{CidrIpv6=$cidr,Description='allowIps'}]"
-  done
-}
+  local need=$(( (${#all[@]} + 4) / 5 ))
+  if [ "$need" -gt "$count" ]; then
+    echo
+    echo "  Config updated, AWS not touched: $need ALB rules are needed and only"
+    echo "  $count exist. A rule holds five addresses, and making another one is"
+    echo "  CDK's:  make gateway env=$ENV"
+    return 1
+  fi
 
-authorize() { # <sg-id> <range-spec>
-  local sg="$1" ranges="$2" port
-  for port in 443 80; do
-    aws ec2 authorize-security-group-ingress --group-id "$sg" --region "$REGION" \
-      --ip-permissions "IpProtocol=tcp,FromPort=$port,ToPort=$port,$ranges" \
-      >/dev/null 2>&1 || true
-  done
-}
-
-revoke_live() { # <cidr>
-  local cidr="$1" sg port ranges
-  sg="$(stack_output "$PREFIX-gateway" "$REGION" GatewayAlbSecurityGroupId)"
-  [ -z "$sg" ] && return 0
-  case "$cidr" in
-    *:*) ranges="Ipv6Ranges=[{CidrIpv6=$cidr}]";;
-    *)   ranges="IpRanges=[{CidrIp=$cidr}]";;
-  esac
-  for port in 443 80; do
-    aws ec2 revoke-security-group-ingress --group-id "$sg" --region "$REGION" \
-      --ip-permissions "IpProtocol=tcp,FromPort=$port,ToPort=$port,$ranges" \
-      >/dev/null 2>&1 || true
+  local arns=(); mapfile -t arns < <(rule_arns)
+  local i chunk values
+  for (( i = 0; i < count; i++ )); do
+    chunk=("${all[@]:$((i * 5)):5}")
+    # An emptied rule cannot have zero values — ALB rejects that — so it is
+    # parked on a documentation-only address that matches nothing real.
+    [ "${#chunk[@]}" -eq 0 ] && chunk=("192.0.2.0/32")
+    values="$(printf '%s,' "${chunk[@]}")"
+    aws elbv2 modify-rule --rule-arn "${arns[$i]}" --region "$REGION" \
+      --conditions "Field=source-ip,SourceIpConfig={Values=[${values%,}]}" >/dev/null
   done
 }
 
@@ -209,10 +205,11 @@ case "$CMD" in
         live_ipset "$(stack_output "$PREFIX-waf" us-east-1 AllowIpSetV6Name)" \
                    "$(stack_output "$PREFIX-waf" us-east-1 AllowIpSetV6Id)"; } \
         | grep -v '^$' | sed 's/^/    /' || echo "    (none)"
-      sg="$(stack_output "$PREFIX-gateway" "$REGION" GatewayAlbSecurityGroupId)"
       echo
-      echo "  live (Gateway ALB security group $sg):"
-      live_sg_cidrs "$sg" | grep -v '^$' | sed 's/^/    /' || echo "    (none)"
+      echo "  live (Gateway ALB listener rules):"
+      live_rule_cidrs | grep -v '^$' | sed 's/^/    /' || echo "    (none)"
+      echo "    (plus /internal/* from anywhere — the control plane's own"
+      echo "     server-to-server calls, authenticated by the internal JWT)"
     else
       echo
       echo "  live: no WAF stack — this environment is open."
@@ -246,11 +243,12 @@ case "$CMD" in
     if [ "${#current[@]}" -eq 0 ]; then
       echo
       echo "  The list is now empty, which means OPEN TO EVERYONE — and that"
-      echo "  takes a deploy, because the WAF stack and the ALB's 0.0.0.0/0"
-      echo "  rule are CDK's:  make deploy env=$ENV"
+      echo "  takes a deploy, because the WAF stack and the ALB's default 403"
+      echo "  are CDK's:  make deploy env=$ENV"
     else
+      # No revoke step: sync_rules replaces each rule's condition set, so the
+      # removed address is gone the moment the rules match the config again.
       apply_live
-      revoke_live "$ARG"
     fi
     ;;
 

@@ -62,8 +62,11 @@
         }
       },
       "allowIps": [],
+      "mail": {
+        "provider": "ses",
+        "fromAddress": "otp@example.com"
+      },
       "ses": {
-        "fromAddress": "otp@example.com",
         "hostedZone": {
           "name": "example.com",
           "id": "ZXXXXXXXXXXXXX"
@@ -93,7 +96,8 @@
         "perIpWindowSeconds": 3600,
         "perIpMaxRequests": 30
       },
-      "retentionDays": 30
+      "retentionDays": 30,
+      "_logRetentionDays": "optional: how long CloudWatch keeps Lambda + Gateway application logs. Default 120. Must be a value CloudWatch accepts (1,3,5,7,14,30,60,90,120,150,180,365,...). These logs name the identity performing each action, so this is a privacy setting, not only a cost one."
     },
     "staging": {
       "endpoint": "staging",
@@ -182,7 +186,8 @@
         "perIpWindowSeconds": 3600,
         "perIpMaxRequests": 30
       },
-      "retentionDays": 30
+      "retentionDays": 30,
+      "_logRetentionDays": "optional: how long CloudWatch keeps Lambda + Gateway application logs. Default 120. Must be a value CloudWatch accepts (1,3,5,7,14,30,60,90,120,150,180,365,...). These logs name the identity performing each action, so this is a privacy setting, not only a cost one."
     },
     "prod": {
       "endpoint": "prod",
@@ -244,7 +249,8 @@
           }
         }
       },
-      "ses": {
+      "mail": {
+        "provider": "mailersend",
         "fromAddress": "otp@example.com"
       },
       "gateway": {
@@ -271,7 +277,8 @@
         "perIpWindowSeconds": 3600,
         "perIpMaxRequests": 30
       },
-      "retentionDays": 90
+      "retentionDays": 90,
+      "_logRetentionDays": "optional: how long CloudWatch keeps Lambda + Gateway application logs. Default 120. Must be a value CloudWatch accepts (1,3,5,7,14,30,60,90,120,150,180,365,...). These logs name the identity performing each action, so this is a privacy setting, not only a cost one."
     }
   }
 }

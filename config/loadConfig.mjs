@@ -5,6 +5,15 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * Outbound-mail transports the REST API can drive (`rest-api/src/mail/`).
+ * Restated here rather than imported because this file is loaded by CDK and by
+ * the Lambda alike and must not reach into either one's source. Keep it in step
+ * with `MAIL_PROVIDERS` there — the list exists so a typo in `mail.provider`
+ * fails at config load, where it can be read, rather than at the first send.
+ */
+const MAIL_PROVIDERS = ["ses", "mailersend"];
+
+/**
  * Load the single source-of-truth config and derive every env-specific value
  * (domains, URLs, table names, bucket, ECR image). No value may be hard-coded
  * elsewhere; secrets are referenced by name only.
@@ -65,6 +74,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     history: `kelabo-${block.endpoint}-history`,
     mcp: `kelabo-${block.endpoint}-mcp`,
     contacts: `kelabo-${block.endpoint}-contacts`,
+    journeys: `kelabo-${block.endpoint}-journeys`,
   };
 
   // Close the whole deployment to everything but a list of source addresses —
@@ -127,6 +137,22 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       : block.ses.spf
     : null;
 
+  // Custom MAIL FROM domain — the missing half of the SPF story above. With it,
+  // SES uses `<mailFrom>` as the envelope sender instead of amazonses.com, so
+  // SPF authenticates *this domain's* mail and aligns for DMARC: the message
+  // then passes on both SPF and DKIM rather than DKIM alone, which is what a
+  // deliverability (or SES production-access) review means by "fully set up".
+  // Opt-in like dmarc/spf; `true` derives `mail.<from-domain>`, a string names
+  // the subdomain outright. Must be a subdomain of the verified identity — SES
+  // rejects anything else at deploy time. The MX and SPF records the subdomain
+  // needs are published by the SES stack alongside the DKIM CNAMEs.
+  const sesIdentityDomain = block.ses?.hostedZone?.name || block.baseDomain;
+  const sesMailFrom = block.ses?.mailFrom
+    ? block.ses.mailFrom === true
+      ? `mail.${sesIdentityDomain}`
+      : block.ses.mailFrom
+    : "";
+
   // Bounce and complaint visibility. The account suppression list already stops
   // mailing an address that hard-bounces — silently, which is the problem: the
   // person types their address, sees "code sent", and no code ever arrives
@@ -146,15 +172,55 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     );
   }
 
+  // Which service actually puts the mail on the wire.
+  //
+  // SES is the default and stays it: nothing to sign up for, no key to hold,
+  // and it is already in the account. What it is not is guaranteed to be
+  // *available* — production access is granted case by case and is regularly
+  // refused, and a permanently sandboxed account can mail only addresses
+  // someone has verified one at a time, which is not a deployment. Since the
+  // way out of that is a different provider rather than different code, the
+  // provider is a config value.
+  const mailProvider = block.mail?.provider || "ses";
+  if (!MAIL_PROVIDERS.includes(mailProvider)) {
+    throw new Error(
+      `kelabo config: env "${env}" sets mail.provider "${mailProvider}"; known providers are ${MAIL_PROVIDERS.join(", ")}`,
+    );
+  }
+
+  // The sending address belongs to the mail, not to SES — every provider needs
+  // one. It reads `ses.fromAddress` when `mail.fromAddress` is absent so a
+  // kelabo.json written before this block still loads and still sends, and the
+  // resolved value is written back onto `ses` below so the two names cannot
+  // drift apart (the Lambda's IAM condition and the SES stack's output are
+  // both derived from it).
+  const mailFromAddress = block.mail?.fromAddress || block.ses?.fromAddress || "";
+
   const ses = {
     ...block.ses,
+    fromAddress: mailFromAddress,
     dmarc,
     spf,
+    mailFrom: sesMailFrom,
     events: sesEvents,
     configurationSetName: sesEvents ? `kelabo-${block.endpoint}-mail` : "",
     // `||`, not `??`: this file is hand-edited JSON, and an empty string left
     // behind from a template is "unset", not "region named the empty string".
     region: block.ses?.region || block.region,
+    // Whether this environment publishes DKIM/SPF/DMARC and verifies an
+    // identity at all. Already false when another environment owns the shared
+    // identity; false as well when the mail does not go through SES, because
+    // the SPF record that stack publishes (`include:amazonses.com -all`) names
+    // the WRONG sender for another provider and would fail its mail.
+    createIdentity: mailProvider === "ses" && block.ses?.createIdentity !== false,
+  };
+
+  const mail = {
+    provider: mailProvider,
+    fromAddress: mailFromAddress,
+    // Per-provider settings, derived rather than restated in a consumer.
+    ses: { region: ses.region, configurationSet: ses.configurationSetName },
+    mailersend: { ...(block.mail?.mailersend ?? {}) },
   };
 
   // Cloudflare Realtime's API host. Derived here (not written in a consumer) so
@@ -220,6 +286,31 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     redeemPerIpMaxRequests: 20,
     ...(block.joinCode ?? {}),
   };
+
+  // How long CloudWatch keeps the Lambda's and the Gateway's application logs.
+  //
+  // Set explicitly because the AWS default is **never expire**, and these logs
+  // are not anonymous: they record the identity performing an action, which for
+  // a signed-in person is their email address. Everything else the product
+  // stores has a stated lifetime — a kelabo 30 days, usage counters 90,
+  // financial records 5.5 years — and logs quietly outliving all of them is not
+  // a decision anyone made.
+  //
+  // 120 days is longer than `retentionDays` on purpose: a log's job is to
+  // explain an incident, and an incident is often reported well after the
+  // kelabo it concerns has expired. Long enough to investigate one, short
+  // enough that it is not a second, permanent copy of who spoke to whom.
+  //
+  // Not `retentionDays`: that is a promise to the person whose kelabo it is,
+  // this is an operational window. Tying them together would mean a deployment
+  // that wanted longer forensics silently keeping everyone's transcripts longer
+  // too.
+  const logRetentionDays = Number(block.logRetentionDays ?? 120);
+  if (!Number.isInteger(logRetentionDays) || logRetentionDays <= 0) {
+    throw new Error(
+      `kelabo config: env "${env}" sets logRetentionDays "${block.logRetentionDays}"; it must be a positive whole number of days`,
+    );
+  }
 
   // What this deployment calls itself, shown to people and used for nothing
   // else: the sign-in sentence and the browser tab. Strictly cosmetic —
@@ -287,12 +378,14 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     rtcApiBase,
     rtc,
     ses,
+    mail,
     allowIps,
     allowIpsV4,
     allowIpsV6,
     contacts,
     auth,
     joinCode,
+    logRetentionDays,
     secrets: {
       ...block.secrets,
       // Same defaulting reason as `rtc` above: keep a pre-conference-audio
@@ -304,6 +397,12 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       // this needs no config edit — only `make origin-secret` to create the
       // value, which is generated, never typed.
       apiOrigin: block.secrets?.apiOrigin ?? `kelabo/${block.endpoint}/api-origin`,
+      // The outbound-mail provider's API key. Named for every environment,
+      // created only where one is needed: SES authenticates with the Lambda's
+      // IAM role and reads nothing here, so an SES deployment can leave this
+      // secret absent and never notice it. Shaped like the STT secret — a key
+      // per provider — so changing provider does not mean re-entering one.
+      mail: block.secrets?.mail ?? `kelabo/${block.endpoint}/mail`,
     },
     baseDomain,
     portalDomain,

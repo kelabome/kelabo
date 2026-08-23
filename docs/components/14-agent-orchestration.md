@@ -200,6 +200,27 @@ Design notes:
 - The main agent MAY dispatch **several tasks in parallel** (multiple
   `dispatch_subagent` calls in one turn); each has its own `task_id`.
 
+**`task_id`/`objective` are validated before a sub-agent ever runs** —
+found missing, live, from a production report: a dispatch whose tool-call
+arguments came back empty (`{}`) reached `SubAgent.run({})` completely
+unchecked, which produced a confusing, sometimes non-English "the brief
+is empty" board message instead of a clear failure. `mainAgent.js`'s
+`missingBriefFields()` now catches this before constructing a `SubAgent`
+at all, producing a deterministic English result
+("Research failed — the lookup request was incomplete and could not be
+run.") and logging the actual missing fields (`main_dispatch_brief_invalid`).
+The rest of the schema (`kind`/`context`/`expected`/`to`/`constraints`) is
+still unenforced beyond the JSON-schema hint the provider sees — those can
+genuinely be omitted, so nothing downstream assumes they exist the way
+`task_id`/`objective` do. A likely root cause on the provider side is also
+now diagnosable rather than silent: `llm.js`'s OpenAI-compatible adapter
+used to swallow a `JSON.parse` failure on a tool call's `arguments` string
+(e.g. one truncated mid-JSON by `max_tokens` on a reasoning model) and
+silently fall back to `{}`, indistinguishable after the fact from the
+model genuinely sending nothing. It now logs `llm_tool_args_parse_failed`
+with the raw string, so a truncation bug and a model-side omission are no
+longer the same invisible failure.
+
 ### 5.2 `SubAgentResult` — the report (sub → main)
 
 Returned as the sub-agent's FINAL message and injected as the `tool_result` for the

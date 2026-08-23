@@ -68,7 +68,7 @@ about.
 | 16 | [16-agent-bridge.md](./components/16-agent-bridge.md) | Agent bridge — the interface between Kelabo and a developer's **own** coding agent: the KAP wire protocol, the MCP tool surface, the opencode and Claude Code adapters, device-code pairing, kelabo prep | dev laptop, spawned by the agent |
 | 17 | [17-agent-distribution.md](./components/17-agent-distribution.md) | Distributing the bridge as `@kelabome/agents` on npm — one package and one `kelabo` for every runtime, the runtime registry, the invertible key-only install, `setup`/`status`/`uninstall`/`reset`, and what the build does with `@kelabo/contracts` | dev laptop, `npm i -g` |
 
-### Cross-cutting docs (this folder) — 08–10, 13, 18
+### Cross-cutting docs (this folder) — 08–10, 13, 18–20
 | # | Doc | Covers |
 |---|-----|--------|
 | 08 | [08-database.md](./08-database.md) | DynamoDB tables, keys, GSIs, TTLs, S3 layout, every access pattern, item shapes |
@@ -76,6 +76,8 @@ about.
 | 10 | [10-data-contracts.md](./10-data-contracts.md) | The interfaces BETWEEN components: `Utterance`, `Contribution`, WSS frames, SSE events, cookies/refresh, JWT, JSDoc typedefs + zod |
 | 13 | [13-transcript-lifecycle.md](./13-transcript-lifecycle.md) | The one transcript reducer: nouns, stages and the invariants enforced in code |
 | 18 | [18-contacts-presence-lifecycle.md](./18-contacts-presence-lifecycle.md) | Cancel/reschedule a kelabo; org + external **contacts**; **presence** (who is online, in-kelabo); the huddle/ring — storage, routes, SSE scope |
+| 19 | [19-optional-capabilities.md](./19-optional-capabilities.md) | Every provider/feature can be absent: the rung ladder, on/off/degraded, server-computes-client-renders, public-repo-mechanism/private-repo-policy |
+| 20 | [20-journey.md](./20-journey.md) | **Journey** — a persistent container linking related kelabos so decisions, documents and Q&A history carry from one meeting to the next, for people and the agent: data model, visibility/permissions, timeline, reports, message board, documents, contributor stats, agent context injection |
 
 ## Conventions across all docs
 

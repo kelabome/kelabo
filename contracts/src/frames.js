@@ -130,6 +130,71 @@ export const frameDetachSchema = z.object({
   kelaboId: z.string().min(1).optional(),
 });
 
+// --- journey pull tools (docs 20 §12.2) -------------------------------------
+//
+// A kelabo may be linked to more than one journey (docs 20 §4.3's mirror has
+// no cap — `JOURNEY_LIMIT` in agent/journeyContext.js bounds only how many
+// feed the system prompt). None of these carry a required journeyId for that
+// reason: an omitted one resolves against the kelabo's own links, the same
+// "enumerate rather than guess" idiom `kelabo_join`'s omitted kelaboId
+// already uses — see `resolved`/`journeys` on each response below.
+
+export const frameJourneyInfoRequestSchema = z.object({
+  type: z.literal("journey_info_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  journeyId: z.string().min(1).optional(),
+});
+
+/** `entryType`, not `type` — the frame's own discriminator already owns
+ *  that name; this is the timeline's `type` filter (docs 20 §9.2's `?type=`)
+ *  under a different key so the two cannot collide on the wire. */
+export const frameJourneyTimelineRequestSchema = z.object({
+  type: z.literal("journey_timeline_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  journeyId: z.string().min(1).optional(),
+  entryType: z.string().max(40).optional(),
+  before: z.number().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+
+export const frameJourneyBoardRequestSchema = z.object({
+  type: z.literal("journey_board_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  journeyId: z.string().min(1).optional(),
+});
+
+/** The agent's own synthesis, stored directly — no server-side LLM round
+ *  trip (docs 20 §12.2's `kelabo_journey_report_submit`, structurally
+ *  `kelabo_post`'s fire-and-forget shape with a requestId added: unlike a
+ *  board post there is a real failure mode (no such journey) the tool must
+ *  be able to tell the model about, so it is request/response like `board`/
+ *  `history` rather than fire-and-forget like `contribution`). */
+export const frameJourneyReportSubmitSchema = z.object({
+  type: z.literal("journey_report_submit"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  journeyId: z.string().min(1).optional(),
+  question: z.string().min(1).max(2000),
+  answer: z.string().min(1).max(8000),
+});
+
+/** Write or edit a pinned journey board message. Same request/response
+ *  reasoning as `journey_report_submit` above, plus a real permission gate
+ *  (`aiCanPost`, docs 20 §7) whose "off" the tool must be able to report —
+ *  the same "a real answer, not an error" shape `history`'s `enabled:false`
+ *  already uses. */
+export const frameJourneyPostSchema = z.object({
+  type: z.literal("journey_post"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  journeyId: z.string().min(1).optional(),
+  content: z.string().min(1).max(4000),
+  msgId: z.string().min(1).optional(),
+});
+
 /** Discriminated union of all bridge -> Gateway frames. Unknown fields ignored. */
 export const upFrameSchema = z.discriminatedUnion("type", [
   frameRegisterSchema,
@@ -142,6 +207,11 @@ export const upFrameSchema = z.discriminatedUnion("type", [
   frameBoardRequestSchema,
   frameHistoryRequestSchema,
   frameDetachSchema,
+  frameJourneyInfoRequestSchema,
+  frameJourneyTimelineRequestSchema,
+  frameJourneyBoardRequestSchema,
+  frameJourneyReportSubmitSchema,
+  frameJourneyPostSchema,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -254,6 +324,107 @@ export const framePingSchema = z.object({
   type: z.literal("ping"),
 });
 
+// --- journey pull tool responses (docs 20 §12.2) ----------------------------
+//
+// `resolved` carries the outcome of resolving *which* journey, before any
+// tool-specific payload: "ok" (the rest of the frame is populated),
+// "no_journey" (this kelabo is linked to none), "ambiguous" (linked to more
+// than one and no journeyId was given — `journeys` lists the candidates),
+// or "journey_not_found" (an explicit journeyId that is not one of this
+// kelabo's links). `journey_posted` adds two outcomes of its own: the
+// `aiCanPost` gate, and an edit naming a message that does not exist or is
+// archived — the agent bridge can create or edit a message, never archive
+// or unarchive one; that stays a human action via the SPA/REST.
+const journeyRef = z.object({ journeyId: z.string(), title: z.string() });
+
+export const frameJourneyInfoSchema = z.object({
+  type: z.literal("journey_info"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  journeyId: z.string().optional(),
+  title: z.string().optional(),
+  visibility: z.enum(["public", "private"]).optional(),
+  status: z.enum(["active", "completed"]).optional(),
+  description: z.string().default(""),
+  health: z.enum(["green", "yellow", "red"]).nullable().optional(),
+  progress: z.number().nullable().optional(),
+  counts: z
+    .object({
+      kelaboCount: z.number().default(0),
+      documentCount: z.number().default(0),
+      reportCount: z.number().default(0),
+      boardMessageCount: z.number().default(0),
+      accessorCount: z.number().default(0),
+    })
+    .optional(),
+});
+
+export const frameJourneyTimelineSchema = z.object({
+  type: z.literal("journey_timeline"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  entries: z
+    .array(
+      z.object({
+        type: z.string(),
+        summary: z.string(),
+        actor: z.string().optional(),
+        at: z.number(),
+      })
+    )
+    .default([]),
+  nextBefore: z.number().optional(),
+});
+
+export const frameJourneyBoardSchema = z.object({
+  type: z.literal("journey_board"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  messages: z
+    .array(
+      z.object({
+        msgId: z.string(),
+        content: z.string(),
+        createdBy: z.string().optional(),
+        createdAt: z.number().optional(),
+      })
+    )
+    .default([]),
+});
+
+export const frameJourneyReportSubmittedSchema = z.object({
+  type: z.literal("journey_report_submitted"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  reportId: z.string().optional(),
+});
+
+export const frameJourneyPostedSchema = z.object({
+  type: z.literal("journey_posted"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1),
+  resolved: z.enum([
+    "ok",
+    "no_journey",
+    "ambiguous",
+    "journey_not_found",
+    "ai_posting_disabled",
+    "message_not_found",
+    "already_archived",
+  ]),
+  journeys: z.array(journeyRef).default([]),
+  msgId: z.string().optional(),
+  version: z.number().optional(),
+});
+
 /** Discriminated union of all Gateway -> bridge frames. */
 export const downFrameSchema = z.discriminatedUnion("type", [
   frameRegisteredSchema,
@@ -265,6 +436,11 @@ export const downFrameSchema = z.discriminatedUnion("type", [
   frameBoardSchema,
   frameHistorySchema,
   framePingSchema,
+  frameJourneyInfoSchema,
+  frameJourneyTimelineSchema,
+  frameJourneyBoardSchema,
+  frameJourneyReportSubmittedSchema,
+  frameJourneyPostedSchema,
 ]);
 
 /** @param {string|Buffer} raw @returns {{ok:true, frame:object}|{ok:false, error:string}} */

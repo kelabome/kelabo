@@ -23,6 +23,15 @@ import {
   queryContrib,
   isAgentTokenRevoked,
 } from "./db.js";
+import {
+  getJourneyMeta,
+  latestDescription,
+  activeBoardMessages,
+  resolveJourneyForKelabo,
+  queryJourneyTimeline,
+  submitJourneyReport,
+  postJourneyBoardMessage,
+} from "./journeys.js";
 
 const REGISTER_TIMEOUT_MS = 10_000;
 const HEARTBEAT_EXPECT_MS = 30_000;
@@ -30,6 +39,10 @@ const STALE_AFTER_MS = 90_000;
 const SUMMARY_WAIT_MS = 60_000;
 const ARCHIVE_WAIT_MS = 30_000;
 const BOARD_LIMIT = 50;
+// A dev tool asking for a journey's board directly may reasonably want more
+// than the terse digest agent/journeyContext.js pins into the system prompt
+// per turn (5) — generous without being the unbounded whole collection.
+const JOURNEY_BOARD_LIMIT = 20;
 // Open card references remembered per connection. Generous: an agent running
 // several background lookups at once holds several open at a time.
 const MAX_CARDS_PER_CONN = 200;
@@ -195,6 +208,16 @@ export function createTunnel(c) {
         return onBoardRequest(conn, frame);
       case "history_request":
         return onHistoryRequest(conn, frame);
+      case "journey_info_request":
+        return onJourneyInfoRequest(conn, frame);
+      case "journey_timeline_request":
+        return onJourneyTimelineRequest(conn, frame);
+      case "journey_board_request":
+        return onJourneyBoardRequest(conn, frame);
+      case "journey_report_submit":
+        return onJourneyReportSubmit(conn, frame);
+      case "journey_post":
+        return onJourneyPost(conn, frame);
       case "detach": {
         const ids = frame.kelaboId ? [frame.kelaboId] : [...conn.kelabos, ...conn.prepKelabos];
         for (const kelaboId of ids) await detach(kelaboId, conn);
@@ -560,6 +583,216 @@ export function createTunnel(c) {
       c.logError("history_request_failed", err, { kelaboId });
     }
     sendDown(conn.ws, { type: "history", requestId, kelaboId, enabled: true, entries });
+  }
+
+  /** Same attachment check `onBoardRequest`/`onHistoryRequest` already
+   *  inline — factored out for the five journey handlers below, which all
+   *  need it, without touching those two's already-tested bodies. */
+  function attachedOrPreparing(conn, kelaboId) {
+    return c.state.tunnelByKelabo.get(kelaboId) === conn || c.state.prepByKelabo.get(kelaboId) === conn;
+  }
+
+  /** Serve `kelabo_journey_info` (docs 20 §12.2). */
+  async function onJourneyInfoRequest(conn, frame) {
+    const { kelaboId, requestId, journeyId } = frame;
+    if (!attachedOrPreparing(conn, kelaboId)) {
+      c.log("journey_info_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
+      c.logError("journey_info_resolve_failed", err, { kelaboId });
+      return { resolved: "no_journey", journeys: [] };
+    });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_info", requestId, kelaboId, ...resolution });
+      return;
+    }
+    const meta = await getJourneyMeta(c, resolution.journeyId).catch(() => null);
+    if (!meta) {
+      sendDown(conn.ws, { type: "journey_info", requestId, kelaboId, resolved: "journey_not_found", journeys: [] });
+      return;
+    }
+    const description = await latestDescription(c, resolution.journeyId).catch(() => "");
+    sendDown(conn.ws, {
+      type: "journey_info",
+      requestId,
+      kelaboId,
+      resolved: "ok",
+      journeys: [],
+      journeyId: meta.journeyId,
+      title: meta.title || "",
+      visibility: meta.visibility,
+      status: meta.status,
+      description,
+      health: meta.health ?? null,
+      progress: typeof meta.progress === "number" ? meta.progress : null,
+      counts: {
+        kelaboCount: meta.kelaboCount || 0,
+        documentCount: meta.documentCount || 0,
+        reportCount: meta.reportCount || 0,
+        boardMessageCount: meta.boardMessageCount || 0,
+        accessorCount: meta.accessorCount || 0,
+      },
+    });
+  }
+
+  /** Serve `kelabo_journey_timeline` (docs 20 §9.2, §12.2). */
+  async function onJourneyTimelineRequest(conn, frame) {
+    const { kelaboId, requestId, journeyId, entryType, before, limit } = frame;
+    if (!attachedOrPreparing(conn, kelaboId)) {
+      c.log("journey_timeline_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
+      c.logError("journey_timeline_resolve_failed", err, { kelaboId });
+      return { resolved: "no_journey", journeys: [] };
+    });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_timeline", requestId, kelaboId, ...resolution, entries: [] });
+      return;
+    }
+    let entries = [];
+    try {
+      entries = await queryJourneyTimeline(c, resolution.journeyId, { type: entryType, before, limit: limit || 20 });
+    } catch (err) {
+      c.logError("journey_timeline_query_failed", err, { kelaboId, journeyId: resolution.journeyId });
+    }
+    const nextBefore = entries.length ? entries[entries.length - 1].at : undefined;
+    sendDown(conn.ws, {
+      type: "journey_timeline",
+      requestId,
+      kelaboId,
+      resolved: "ok",
+      journeys: [],
+      entries: entries.map((e) => ({ type: e.type, summary: e.summary || "", ...(e.actor ? { actor: e.actor } : {}), at: e.at })),
+      ...(nextBefore !== undefined ? { nextBefore } : {}),
+    });
+  }
+
+  /** Serve `kelabo_journey_board` (docs 20 §12.2) — the journey's pinned
+   *  board, distinct from this kelabo's own (`onBoardRequest`, above). */
+  async function onJourneyBoardRequest(conn, frame) {
+    const { kelaboId, requestId, journeyId } = frame;
+    if (!attachedOrPreparing(conn, kelaboId)) {
+      c.log("journey_board_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
+      c.logError("journey_board_resolve_failed", err, { kelaboId });
+      return { resolved: "no_journey", journeys: [] };
+    });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_board", requestId, kelaboId, ...resolution, messages: [] });
+      return;
+    }
+    let heads = [];
+    try {
+      heads = await activeBoardMessages(c, resolution.journeyId, JOURNEY_BOARD_LIMIT);
+    } catch (err) {
+      c.logError("journey_board_query_failed", err, { kelaboId, journeyId: resolution.journeyId });
+    }
+    sendDown(conn.ws, {
+      type: "journey_board",
+      requestId,
+      kelaboId,
+      resolved: "ok",
+      journeys: [],
+      messages: heads.map((m) => ({
+        msgId: m.msgId,
+        content: m.content || "",
+        ...(m.createdBy ? { createdBy: m.createdBy } : {}),
+        ...(m.createdAt ? { createdAt: m.createdAt } : {}),
+      })),
+    });
+  }
+
+  /** Serve `kelabo_journey_report_submit` (docs 20 §12.2) — the agent's own
+   *  synthesis, stored directly with no LLM round trip. */
+  async function onJourneyReportSubmit(conn, frame) {
+    const { kelaboId, requestId, journeyId, question, answer } = frame;
+    if (!attachedOrPreparing(conn, kelaboId)) {
+      c.log("journey_report_submit_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
+      c.logError("journey_report_resolve_failed", err, { kelaboId });
+      return { resolved: "no_journey", journeys: [] };
+    });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_report_submitted", requestId, kelaboId, ...resolution });
+      return;
+    }
+    try {
+      const { reportId } = await submitJourneyReport(c, resolution.journeyId, {
+        reportId: randomUUID(),
+        question,
+        answer,
+        identity: conn.identity,
+      });
+      sendDown(conn.ws, { type: "journey_report_submitted", requestId, kelaboId, resolved: "ok", journeys: [], reportId });
+    } catch (err) {
+      c.logError("journey_report_submit_failed", err, { kelaboId, journeyId: resolution.journeyId });
+      sendDown(conn.ws, { type: "journey_report_submitted", requestId, kelaboId, resolved: "journey_not_found", journeys: [] });
+    }
+  }
+
+  /** Serve `kelabo_journey_post` (docs 20 §7, §12.2) — write or edit a pinned
+   *  journey board message, gated by the owner-controlled `aiCanPost`. */
+  async function onJourneyPost(conn, frame) {
+    const { kelaboId, requestId, journeyId, content, msgId } = frame;
+    if (!attachedOrPreparing(conn, kelaboId)) {
+      c.log("journey_post_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
+      c.logError("journey_post_resolve_failed", err, { kelaboId });
+      return { resolved: "no_journey", journeys: [] };
+    });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_posted", requestId, kelaboId, ...resolution });
+      return;
+    }
+    const meta = await getJourneyMeta(c, resolution.journeyId).catch(() => null);
+    if (!meta) {
+      sendDown(conn.ws, { type: "journey_posted", requestId, kelaboId, resolved: "journey_not_found", journeys: [] });
+      return;
+    }
+    // The one owner-controlled permission gate in this whole tool surface
+    // (docs 20 §7/§12.2) — off by default, the same justification
+    // `historyEnabled` already carries: a human-curated, always-visible
+    // surface being edited unsupervised by an agent is a decision an owner
+    // has to make, not a default. Refused explicitly — a real answer, the
+    // same shape `history`'s `enabled:false` already uses — never a silently
+    // dropped write.
+    if (!meta.aiCanPost) {
+      sendDown(conn.ws, { type: "journey_posted", requestId, kelaboId, resolved: "ai_posting_disabled", journeys: [] });
+      return;
+    }
+    try {
+      const result = await postJourneyBoardMessage(c, resolution.journeyId, { content, msgId, identity: conn.identity });
+      if (!result.ok) {
+        sendDown(conn.ws, {
+          type: "journey_posted",
+          requestId,
+          kelaboId,
+          resolved: result.reason === "already_archived" ? "already_archived" : "message_not_found",
+          journeys: [],
+        });
+        return;
+      }
+      sendDown(conn.ws, {
+        type: "journey_posted",
+        requestId,
+        kelaboId,
+        resolved: "ok",
+        journeys: [],
+        msgId: result.msgId,
+        version: result.version,
+      });
+    } catch (err) {
+      c.logError("journey_post_failed", err, { kelaboId, journeyId: resolution.journeyId });
+      sendDown(conn.ws, { type: "journey_posted", requestId, kelaboId, resolved: "journey_not_found", journeys: [] });
+    }
   }
 
   function notifyKelabo(kelaboId, event, extra = {}) {

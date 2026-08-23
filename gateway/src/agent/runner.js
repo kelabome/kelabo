@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { queryUtt, getMeta } from "../db.js";
 import { loadKelaboHistory } from "./history.js";
+import { loadJourneyContext, historyStillApplies } from "./journeyContext.js";
 import { loadEffectiveMcp } from "./mcp.js";
 import { WEB_SEARCH_ENABLED } from "./subagents.js";
 import { languageName } from "./language.js";
@@ -162,17 +163,38 @@ export function createAgentDispatcher(c) {
     // falls back to the language the kelabo was actually held in.
     const hostLanguage = languageName(meta?.hostLang);
 
+    // Journey context (docs 20 §12.1) — no opt-in flag: linking a kelabo into
+    // a journey (a deliberate, visible act) already IS the decision, unlike
+    // historyEnabled's automatic host-scoped record which needs one. Always
+    // attempted, always best-effort — a kelabo with no journey link costs one
+    // cheap, empty query. Loaded first because `history`'s own load, below,
+    // now depends on the result.
+    const journeys = await loadJourneyContext(c, kelaboId).catch((err) => {
+      c.logError("agent_journey_context_failed", err, { kelaboId });
+      return [];
+    });
+
     // What the assistant remembers of earlier kelabos (notes #3) — the host's
     // opt-in record, loaded by agent/history.js (which also serves the
     // dev-mode bridge's `kelabo_history`, so both brains see one record).
-    const history = meta?.historyEnabled ? await loadKelaboHistory(c, kelaboId, meta).catch((err) => {
+    // Suppressed the moment this kelabo has journey context to offer instead
+    // (`historyStillApplies`, journeyContext.js) — a corrected decision, not
+    // the original one: the two used to load independently, on the reasoning
+    // that a kelabo could plausibly want both. In practice a journey already
+    // *is* the narrower, deliberately-linked version of the same continuity
+    // historyEnabled provides more diffusely, and giving the assistant both
+    // at once serves nobody. This also means a kelabo linked to a journey
+    // after historyEnabled was already turned on for it stops getting the
+    // broader record the moment the link exists — evaluated fresh every
+    // turn, not fixed at creation time.
+    const history = historyStillApplies(meta, journeys) ? await loadKelaboHistory(c, kelaboId, meta).catch((err) => {
       // Best-effort by design: a kelabo whose history lookup failed is a normal
       // kelabo, not a broken one.
       c.logError("agent_history_failed", err, { kelaboId });
       return [];
     }) : [];
 
-    w.postMessage({ type: "context", kelaboId, transcript, mcp, capabilities, hostLanguage, history });
+    w.postMessage({ type: "context", kelaboId, transcript, mcp, capabilities, hostLanguage, history, journeys });
     handle = { kelaboId, createdAt: handle?.createdAt ?? Date.now(), rehydrated: true };
     c.state.agentWorkers.set(kelaboId, handle);
     c.log("agent_context_ready", {
@@ -180,7 +202,12 @@ export function createAgentDispatcher(c) {
       transcriptSize: transcript.length,
       mcpServers: mcp.servers.length,
       hostLanguage: hostLanguage ?? "unset",
-      history: meta?.historyEnabled ? history.length : "off",
+      // Three states, not two: "off" (never opted in), "superseded" (opted
+      // in, but a journey link now provides context instead), or a real
+      // count — collapsing the last two would hide exactly the interaction
+      // this log line exists to make visible.
+      history: !meta?.historyEnabled ? "off" : journeys.length > 0 ? "superseded" : history.length,
+      journeys: journeys.length,
     });
     return handle;
   }

@@ -120,7 +120,6 @@ export function createScheduling({ config, db, mailer, internal }) {
       try {
         await mailer.sendInvite({
           to: email,
-          from: config.ses.fromAddress,
           hostName: displayName || identity,
           title: meta.title,
           scheduledAt: meta.scheduledAt,
@@ -151,9 +150,12 @@ export function createScheduling({ config, db, mailer, internal }) {
   }
 
   async function listScheduled({ identity }) {
-    const items = await db.listKelabosByStatus(tenantOf(identity), "scheduled");
     // Everything at the tenant is visible in the index; a host's own list is
-    // what the rail shows, and being invited to one is what puts it in yours.
+    // what the rail shows, and being invited to one is what puts it in yours
+    // — including an invite from a kelabo hosted at someone else's tenant
+    // entirely, which sameTenant's index can never reach (docs 18 §2.8).
+    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "scheduled");
+    const items = [...sameTenant, ...crossTenant];
     const withInvites = await Promise.all(
       items.map(async (m) => {
         const invites = await db.listInvites(m.kelaboId);
@@ -182,9 +184,16 @@ export function createScheduling({ config, db, mailer, internal }) {
     const invites = await db.listInvites(kelaboId);
     const isHost = meta.hostIdentity === identity;
     if (!isHost && !invites.some((i) => i.inviteKey === identity)) throw err(403, "forbidden");
+    // Docs 20 §4.3/§11 touch-up — same shape and reasoning as GET /kelabos/:id.
+    const journeys = (await db.listKelaboJourneyLinks(kelaboId).catch(() => [])).map((l) => ({
+      id: l.journeyId,
+      title: l.journeyTitleSnapshot || "",
+      visibility: l.journeyVisibilitySnapshot,
+    }));
     return {
       ...toScheduledSummary(meta, invites),
       isHost,
+      journeys,
       invites: await Promise.all(
         invites.map(async (i) => ({
           email: i.email,
@@ -282,7 +291,6 @@ export function createScheduling({ config, db, mailer, internal }) {
       try {
         await mailer.sendCancellation({
           to: inv.email,
-          from: config.ses.fromAddress,
           hostName: meta.hostIdentity,
           title: meta.title,
           scheduledAt: meta.scheduledAt,
@@ -340,7 +348,6 @@ export function createScheduling({ config, db, mailer, internal }) {
         try {
           await mailer.sendReschedule({
             to: inv.email,
-            from: config.ses.fromAddress,
             hostName: meta.hostIdentity,
             title: updates.title || meta.title,
             scheduledAt: body.scheduledAt,
@@ -369,6 +376,92 @@ export function createScheduling({ config, db, mailer, internal }) {
         durationMinutes: updates.durationMinutes ?? meta.durationMinutes,
         title: updates.title ?? meta.title,
         rsvpsReset: timeMoved,
+      },
+    };
+  }
+
+  /**
+   * Add or remove invitees on a scheduled kelabo (docs 18 §3.5). Host-only,
+   * scheduled-only — the same guard cancel and reschedule use. Takes the
+   * *full* desired list rather than an add list and a remove list, both
+   * because that is what `EmailPicker`'s controlled `value` already is on the
+   * SPA side, and because a client-computed diff can be wrong (a chip removed
+   * and re-added in the same edit, a race with another tab) in a way a
+   * server-computed one cannot.
+   *
+   * The host and any guest-only RSVP (`inviteKey` starting `g:`, someone who
+   * answered the link without an account) are outside this diff entirely:
+   * neither was ever something the host "invited" by typing an address, so
+   * neither can be added or removed through this route.
+   */
+  async function updateInvitees({ kelaboId, identity, displayName, body }) {
+    const meta = await db.getKelaboMeta(kelaboId);
+    if (!meta) throw err(404, "kelabo_not_found");
+    if (meta.hostIdentity !== identity) throw err(403, "not_host");
+    if (meta.status === "active") throw err(409, "already_active");
+    if (meta.status === "cancelled") throw err(409, "kelabo_cancelled");
+    if (meta.status !== "scheduled") throw err(409, "not_scheduled");
+
+    const desired = new Set(
+      (body.invitees || []).map((e) => e.trim().toLowerCase()).filter((e) => e && e !== identity)
+    );
+    const invites = await db.listInvites(kelaboId);
+    const current = new Set(invites.filter((i) => i.email && !i.isGuest && !i.isHost).map((i) => i.email));
+
+    const toAdd = [...desired].filter((e) => !current.has(e));
+    const toRemove = [...current].filter((e) => !desired.has(e));
+    if (toAdd.length === 0 && toRemove.length === 0) throw err(400, "nothing_to_change");
+
+    const now = Date.now();
+    const inviteUrl = config.inviteUrl(kelaboId);
+    const hostName = displayName || identity;
+
+    // Added first, removed second — an address moved between the two lists
+    // by mistake (typo'd, fixed, re-typed) ends up simply invited, not
+    // invited-then-immediately-uninvited.
+    const added = [];
+    for (const email of toAdd) {
+      await db.putInvite(kelaboId, { inviteKey: email, email, isGuest: false, response: "pending", invitedAt: now });
+      let sent = true;
+      let reason;
+      try {
+        await mailer.sendInvite({
+          to: email,
+          hostName,
+          title: meta.title,
+          scheduledAt: meta.scheduledAt,
+          durationMinutes: meta.durationMinutes,
+          note: meta.note,
+          inviteUrl,
+        });
+      } catch (e) {
+        sent = false;
+        reason = e.code || e.name || "send_failed";
+      }
+      added.push({ email, sent, ...(reason ? { reason } : {}) });
+    }
+
+    const removed = [];
+    for (const email of toRemove) {
+      await db.removeInvite(kelaboId, email);
+      let sent = true;
+      let reason;
+      try {
+        await mailer.sendUninvite({ to: email, hostName, title: meta.title, scheduledAt: meta.scheduledAt });
+      } catch (e) {
+        sent = false;
+        reason = e.code || e.name || "send_failed";
+      }
+      removed.push({ email, sent, ...(reason ? { reason } : {}) });
+    }
+
+    return {
+      status: 200,
+      body: {
+        kelaboId,
+        added,
+        removed,
+        failed: [...added, ...removed].filter((r) => !r.sent).map((r) => r.email),
       },
     };
   }
@@ -478,5 +571,16 @@ export function createScheduling({ config, db, mailer, internal }) {
     };
   }
 
-  return { schedule, listScheduled, getScheduled, start, cancel, reschedule, getInvitation, rsvp, suggestPeople };
+  return {
+    schedule,
+    listScheduled,
+    getScheduled,
+    start,
+    cancel,
+    reschedule,
+    updateInvitees,
+    getInvitation,
+    rsvp,
+    suggestPeople,
+  };
 }

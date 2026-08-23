@@ -54,6 +54,10 @@ export const api = {
         ...(opts.rtcMode ? { rtcMode: opts.rtcMode } : {}),
         // Opt-in, so it is only ever sent when true — the server's default is no.
         ...(opts.historyEnabled ? { historyEnabled: true } : {}),
+        // Link into one or more journeys at creation time (docs 20 §11) —
+        // the field already exists server-side; this call just used to
+        // silently drop it.
+        ...(opts.journeyIds?.length ? { journeyIds: opts.journeyIds } : {}),
       },
     }),
   getKelabo: id => apiRequest(`/kelabos/${id}`),
@@ -67,6 +71,8 @@ export const api = {
     apiRequest(`/kelabos/${id}/cancel`, { method: 'POST', body: reason ? { reason } : {} }),
   rescheduleKelabo: (id, body) =>
     apiRequest(`/kelabos/${id}/reschedule`, { method: 'POST', body }),
+  updateInvitees: (id, invitees) =>
+    apiRequest(`/kelabos/${id}/invitees`, { method: 'POST', body: { invitees } }),
   // Deliberately reachable without a session: the invitation link is meant to
   // work for people who have no account.
   getInvitation: id => apiRequest(`/kelabos/${id}/invitation`),
@@ -132,6 +138,59 @@ export const api = {
   // dryRun: true reports what would be deleted without touching anything.
   purgeRecords: (value, unit, dryRun) =>
     apiRequest('/records/purge', { method: 'POST', body: { value, unit, dryRun: !!dryRun } }),
+
+  // --- Journey (docs 20) -----------------------------------------------------
+  // A persistent container linking related kelabos so decisions, documents and
+  // Q&A history carry from one meeting to the next. Access (owner /
+  // public-tenant-member / private-accessor) is resolved server-side on every
+  // call — nothing here decides who may see or write what.
+  listJourneys: () => apiRequest('/journeys'),
+  createJourney: body => apiRequest('/journeys', { method: 'POST', body }),
+  getJourney: id => apiRequest(`/journeys/${id}`),
+  patchJourney: (id, body) => apiRequest(`/journeys/${id}`, { method: 'PATCH', body }),
+  completeJourney: id => apiRequest(`/journeys/${id}/complete`, { method: 'POST' }),
+  reopenJourney: id => apiRequest(`/journeys/${id}/reopen`, { method: 'POST' }),
+  deleteJourney: id => apiRequest(`/journeys/${id}`, { method: 'DELETE' }),
+
+  listJourneyAccessors: id => apiRequest(`/journeys/${id}/accessors`),
+  addJourneyAccessor: (id, identity) => apiRequest(`/journeys/${id}/accessors`, { method: 'POST', body: { identity } }),
+  removeJourneyAccessor: (id, identity) =>
+    apiRequest(`/journeys/${id}/accessors/${encodeURIComponent(identity)}`, { method: 'DELETE' }),
+
+  listJourneyKelabos: id => apiRequest(`/journeys/${id}/kelabos`),
+  linkJourneyKelabo: (id, kelaboId) => apiRequest(`/journeys/${id}/kelabos`, { method: 'POST', body: { kelaboId } }),
+  unlinkJourneyKelabo: (id, kelaboId) => apiRequest(`/journeys/${id}/kelabos/${kelaboId}`, { method: 'DELETE' }),
+
+  updateJourneyDescription: (id, body) => apiRequest(`/journeys/${id}/description`, { method: 'POST', body }),
+  getJourneyDescriptionHistory: id => apiRequest(`/journeys/${id}/description/history`),
+
+  updateJourneyStatus: (id, body) => apiRequest(`/journeys/${id}/status`, { method: 'POST', body }),
+  getJourneyStatusHistory: id => apiRequest(`/journeys/${id}/status/history`),
+
+  getJourneyTimeline: (id, { type, before, limit } = {}) =>
+    apiRequest(`/journeys/${id}/timeline${qs({ type, before, limit })}`),
+
+  listJourneyBoard: id => apiRequest(`/journeys/${id}/board`),
+  addJourneyBoardMessage: (id, content) => apiRequest(`/journeys/${id}/board`, { method: 'POST', body: { content } }),
+  editJourneyBoardMessage: (id, msgId, content) =>
+    apiRequest(`/journeys/${id}/board/${msgId}`, { method: 'PATCH', body: { content } }),
+  archiveJourneyBoardMessage: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}/archive`, { method: 'POST' }),
+  unarchiveJourneyBoardMessage: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}/unarchive`, { method: 'POST' }),
+  getJourneyBoardMessageHistory: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}/history`),
+
+  listJourneyDocuments: id => apiRequest(`/journeys/${id}/documents`),
+  addJourneyDocument: (id, body) => apiRequest(`/journeys/${id}/documents`, { method: 'POST', body }),
+  getJourneyDocument: (id, docId) => apiRequest(`/journeys/${id}/documents/${docId}`),
+  removeJourneyDocument: (id, docId) => apiRequest(`/journeys/${id}/documents/${docId}`, { method: 'DELETE' }),
+
+  // Generation happens in the Gateway (it holds the LLM credential); this
+  // call returns `{reportId, status:"pending"}` immediately-ish and the
+  // finished row is read back separately, the same "mutating call returns a
+  // summary" shape every other create endpoint here follows.
+  requestJourneyReport: (id, question) => apiRequest(`/journeys/${id}/reports`, { method: 'POST', body: { question } }),
+  listJourneyReports: id => apiRequest(`/journeys/${id}/reports`),
+  getJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`),
+  listJourneyContributors: id => apiRequest(`/journeys/${id}/contributors`),
 }
 
 // Conference audio (docs 15). All of it lives on the Gateway, next to the SSE

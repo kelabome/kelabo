@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useTypeAnywhere } from '../useTypeAnywhere'
 import { api } from '../api'
 import { useAuth, displayName } from '../auth'
@@ -7,11 +7,13 @@ import { Switch } from '../components/ui/Switch'
 import { Button } from '../components/ui/Button'
 import { Crumbs } from '../components/ui/Crumbs'
 import { useToast } from '../components/Toaster'
+import { JourneyPicker } from '../components/JourneyPicker'
 
 export default function NewKelabo() {
   const toast = useToast()
   const navigate = useNavigate()
   const { identity } = useAuth()
+  const [searchParams] = useSearchParams()
   const [title, setTitle] = useState('')
   const titleRef = useRef(null)
   // Typing or pasting anywhere on the page fills the title.
@@ -24,6 +26,24 @@ export default function NewKelabo() {
   // later without revoking the guarantee people joined under.
   const [secure, setSecure] = useState(false)
   const [creating, setCreating] = useState(false)
+  // Which journey(s) this kelabo belongs to (docs 20 §11), as {id, title}.
+  // A journey-detail page's "New kelabo" button pre-fills exactly one of
+  // these via ?journeyId= — removable here, not locked.
+  const [journeys, setJourneys] = useState([])
+  useEffect(() => {
+    const journeyId = searchParams.get('journeyId')
+    if (!journeyId) return
+    api.getJourney(journeyId)
+      .then(j => setJourneys(prev => (prev.some(p => p.id === journeyId) ? prev : [...prev, { id: journeyId, title: j.title }])))
+      .catch(() => {}) // a bad/inaccessible id from the URL is silently not pre-filled
+  }, [searchParams])
+  // A linked journey supersedes historyEnabled server-side regardless of
+  // this toggle's value (docs 20 §12.1), so offering it once one is picked
+  // would show a control that no longer does anything — reset rather than
+  // just hide, so the record does not carry a `true` that never applied.
+  useEffect(() => {
+    if (journeys.length > 0 && historyEnabled) setHistoryEnabled(false)
+  }, [journeys.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const create = async () => {
     if (creating) return
@@ -37,6 +57,7 @@ export default function NewKelabo() {
         mcpEnabled,
         historyEnabled,
         rtcMode: secure ? 'mesh' : 'sfu',
+        journeyIds: journeys.map(j => j.id),
       })
       // The locally-set name is the user's own choice and must win over the
       // server identity (which is only ever the email local-part). Creating a
@@ -47,7 +68,8 @@ export default function NewKelabo() {
         await api.joinKelabo(m.kelaboId, name, 'audio-board')
         localStorage.setItem('kelabo-mode', 'audio-board')
       } catch {}
-      toast('Kelabo created')
+      const failed = (m.journeyLinks || []).filter(l => !l.linked)
+      toast(failed.length ? `Kelabo created — ${failed.length} journey link${failed.length === 1 ? '' : 's'} failed` : 'Kelabo created')
       navigate(`/m/${m.kelaboId}/lobby`)
     } catch (e) {
       setCreating(false)
@@ -86,21 +108,32 @@ export default function NewKelabo() {
           <Switch checked={mcpEnabled} onChange={setMcpEnabled} ariaLabel="Use my MCP servers in this kelabo" />
         </div>
 
-        <div className="settings-row settings-row-plain">
-          <div className="sr-main">
-            <div className="sr-title">Let the assistant read my past kelabos</div>
-            <div className="sr-sub">
-              It can answer “what did we decide last time” from the minutes of kelabos you attended — nobody
-              else's. Everyone in the room is told this is on, because it can surface an earlier kelabo in
-              front of someone who was not at it.
-            </div>
-          </div>
-          <Switch
-            checked={historyEnabled}
-            onChange={setHistoryEnabled}
-            ariaLabel="Let the assistant read my past kelabos"
-          />
+        <div className="field form-stack">
+          <span className="label">Journey (optional)</span>
+          <JourneyPicker value={journeys} onChange={setJourneys} />
+          <p className="form-note">
+            Links this kelabo into that journey — the assistant gets its full context automatically, and it
+            shows up under the journey's own Kelabos tab.
+          </p>
         </div>
+
+        {journeys.length === 0 && (
+          <div className="settings-row settings-row-plain">
+            <div className="sr-main">
+              <div className="sr-title">Let the assistant read my past kelabos</div>
+              <div className="sr-sub">
+                It can answer “what did we decide last time” from the minutes of kelabos you attended — nobody
+                else's. Everyone in the room is told this is on, because it can surface an earlier kelabo in
+                front of someone who was not at it.
+              </div>
+            </div>
+            <Switch
+              checked={historyEnabled}
+              onChange={setHistoryEnabled}
+              ariaLabel="Let the assistant read my past kelabos"
+            />
+          </div>
+        )}
 
         <div className="settings-row settings-row-plain">
           <div className="sr-main">

@@ -38,7 +38,7 @@ const config = {
     providers: { deepgram: { model: "nova-3", diarizeModel: "latest", tokenTtlSeconds: 60 } },
   },
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, video: false },
-  ses: { fromAddress: "otp@test.example.com" },
+  mail: { provider: "ses", fromAddress: "otp@test.example.com", ses: {}, mailersend: {} },
   otp: {
     ttlSeconds: 600,
     maxAttempts: 5,
@@ -68,7 +68,11 @@ const sentEmails = [];
 const sentInvites = [];
 const sentCancellations = [];
 const sentReschedules = [];
-const ses = {
+const sentUninvites = [];
+// Stands in for `createMailer` — the same four methods, no transport. `from` is
+// no longer passed by the callers (the mailer defaults it), so it arrives
+// undefined here and the assertions below are about `to` and the content.
+const mailer = {
   sendOtp: async ({ to, code, from }) => {
     sentEmails.push({ to, code, from });
   },
@@ -84,12 +88,22 @@ const ses = {
   sendReschedule: async (msg) => {
     sentReschedules.push(msg);
   },
+  sendUninvite: async (msg) => {
+    sentUninvites.push(msg);
+  },
 };
 const internalCalls = [];
 // Which identities the fake gateway considers "online" for ring delivery.
 const onlineSet = new Set();
 const internal = {
-  endKelabo: async (kelaboId, identity) => internalCalls.push({ op: "end", kelaboId, identity }),
+  // Set to make the fake gateway unreachable, the way a closed ALB made the
+  // real one (docs 07 `allowIps`).
+  endUnreachable: false,
+  endKelabo: async (kelaboId, identity, { retry = false } = {}) => {
+    internalCalls.push({ op: "end", kelaboId, identity, ...(retry ? { retry } : {}) });
+    if (internal.endUnreachable) throw new TypeError("fetch failed");
+    return { ok: true, archived: true };
+  },
   requestMinutes: async (kelaboId, identity) => internalCalls.push({ op: "minutes", kelaboId, identity }),
   cancelKelabo: async (kelaboId, identity) => internalCalls.push({ op: "cancel", kelaboId, identity }),
   rescheduleKelabo: async (kelaboId, identity) => internalCalls.push({ op: "reschedule", kelaboId, identity }),
@@ -173,12 +187,12 @@ const mcpFetch = async (url, init = {}) => {
 };
 
 const db = createDb();
-const otp = createOtp({ config, db, ses });
+const otp = createOtp({ config, db, mailer });
 const sessions = createSessions({ config, db, secrets });
 const oidc = createOidc({ config, secrets, fetchImpl: async () => ({ ok: false }) });
 const auth = createAuthProvider({ otp, oidc, sessions });
 const kelabos = createKelabos({ config, db, internal });
-const scheduling = createScheduling({ config, db, mailer: ses, internal });
+const scheduling = createScheduling({ config, db, mailer, internal });
 const contacts = createContacts({ config, db });
 const huddle = createHuddle({ config, db, internal, kelabos });
 const join = createJoin({ config, db, secrets });
@@ -204,7 +218,7 @@ const mcpOauth = createMcpOauth({ config, db, secrets, fetchImpl: mcpFetch });
 
 const agent = createAgent({ config, db, secrets });
 
-const app = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
+const app = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
 
 function cookieValue(res, name) {
   const c = (res.cookies || []).find((s) => s.startsWith(`${name}=`));
@@ -258,7 +272,7 @@ await test("empty allow-list = open registration, tenant from the email's own do
   // The multi-domain mode: no allow-list configured, every org lands in its
   // own tenant. Built from the same modules with only the config differing.
   const { createOtp } = await import("../src/otp.js");
-  const openOtp = createOtp({ config: { ...config, allowedEmailDomain: "" }, db, ses });
+  const openOtp = createOtp({ config: { ...config, allowedEmailDomain: "" }, db, mailer });
   await openOtp.request({ email: "sam@anywhere.io" });
   // pop, not peek: the next test counts sentEmails from empty.
   const sent = sentEmails.pop();
@@ -273,7 +287,11 @@ await test("otp request/verify happy path sets session+refresh cookies", async (
   assert.equal(req.json.ok, true);
   assert.equal(sentEmails.length, 1);
   assert.equal(sentEmails[0].to, "alice@example.com");
-  assert.equal(sentEmails[0].from, "otp@test.example.com");
+  // The sender is the mailer's business, not this route's. Every call site
+  // used to pass `config.ses.fromAddress` by hand, which is one more thing to
+  // forget and a silent provider rejection when someone does — `test/mail.mjs`
+  // asserts the mailer supplies it.
+  assert.equal(sentEmails[0].from, undefined, "a caller is naming the sender again");
   const code = sentEmails[0].code;
   assert.match(code, /^\d{6}$/);
 
@@ -598,7 +616,7 @@ await test("POST /kelabos/:id/end (host only) signals gateway", async () => {
 
   const res = await call("POST", `/kelabos/${kelaboId}/end`, { cookies: sessionCookies });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json, { kelaboId, status: "ended" });
+  assert.deepEqual(res.json, { kelaboId, status: "ended", archived: true });
   assert.deepEqual(internalCalls, [{ op: "end", kelaboId, identity: "host@example.com" }]);
 
   const gone = await call("GET", `/kelabos/${kelaboId}`);
@@ -608,6 +626,36 @@ await test("POST /kelabos/:id/end (host only) signals gateway", async () => {
   const again = await call("POST", `/kelabos/${kelaboId}/end`, { cookies: sessionCookies });
   assert.equal(again.statusCode, 409);
   assert.equal(again.json.error, "already_ended");
+});
+
+// The failure that cost a whole deployment its records: `allowIps` closed the
+// Gateway's ALB to this Lambda, every internal call died with "fetch failed",
+// and this side ended the kelabo anyway and said nothing. The kelabo must still
+// end — an unreachable Gateway cannot leave it live forever — but it must say
+// the record is missing, and it must be possible to ask again.
+await test("an end the gateway never received is flagged, and can be retried", async () => {
+  const created = await call("POST", "/kelabos", { cookies: sessionCookies, body: { title: "unreachable" } });
+  const id = created.json.kelaboId;
+  internalCalls.length = 0;
+
+  internal.endUnreachable = true;
+  const failed = await call("POST", `/kelabos/${id}/end`, { cookies: sessionCookies });
+  assert.equal(failed.statusCode, 200, "the kelabo ends regardless");
+  assert.equal(failed.json.archived, false, "but the caller is told there is no record");
+  assert.equal((await db.getKelaboMeta(id)).archivePending, true);
+
+  // Ending again is a resume, not a second end: no 409, and the gateway is told
+  // so it does not 409 on the status this side wrote.
+  internal.endUnreachable = false;
+  const retried = await call("POST", `/kelabos/${id}/end`, { cookies: sessionCookies });
+  assert.equal(retried.statusCode, 200);
+  assert.equal(retried.json.archived, true);
+  assert.deepEqual(internalCalls.at(-1), { op: "end", kelaboId: id, identity: "host@example.com", retry: true });
+  assert.equal((await db.getKelaboMeta(id)).archivePending, undefined, "the flag is removed, not nulled");
+
+  // And once archived it is an ordinary ended kelabo again.
+  const third = await call("POST", `/kelabos/${id}/end`, { cookies: sessionCookies });
+  assert.equal(third.statusCode, 409);
 });
 
 await test("POST /auth/refresh rotates refresh token", async () => {
@@ -797,6 +845,8 @@ await test("cutoffFromAge uses calendar arithmetic for months and years", async 
   assert.equal(cutoffFromAge(2, "weeks", at("2026-03-15T00:00:00Z")), at("2026-03-01T00:00:00Z"));
   assert.equal(cutoffFromAge(3, "days", at("2026-03-15T00:00:00Z")), at("2026-03-12T00:00:00Z"));
   assert.throws(() => cutoffFromAge(0, "days"), /invalid retention value/);
+  assert.throws(() => cutoffFromAge(100, "days"), /invalid retention value/, "capped at 99 regardless of unit");
+  assert.equal(typeof cutoffFromAge(99, "years"), "number", "99 itself is still allowed");
   assert.throws(() => cutoffFromAge(1, "fortnights"), /invalid retention unit/);
 });
 
@@ -926,7 +976,7 @@ await test("POST /records/purge: hosted records are fully deleted, attended ones
 await test("POST /records/purge: validation and auth", async () => {
   const anon = await call("POST", "/records/purge", { body: { value: 1, unit: "days" } });
   assert.equal(anon.statusCode, 401);
-  for (const body of [{ value: 0, unit: "days" }, { value: 1, unit: "fortnights" }, { value: 1.5, unit: "days" }, {}]) {
+  for (const body of [{ value: 0, unit: "days" }, { value: 100, unit: "days" }, { value: 1, unit: "fortnights" }, { value: 1.5, unit: "days" }, {}]) {
     const bad = await call("POST", "/records/purge", { body, cookies: sessionCookies });
     assert.equal(bad.statusCode, 400, `rejects ${JSON.stringify(body)}`);
   }
@@ -1480,6 +1530,214 @@ await test("reschedule with an empty body is nothing_to_change", async () => {
   await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
 });
 
+// --- add/remove invitees (docs 18 §3.5) ------------------------------------
+
+await test("POST /kelabos/:id/invitees — adds new addresses, emails only them", async () => {
+  const id = await scheduleFresh(); // matt@example.com already invited
+  const before = sentInvites.length;
+
+  const anon = await call("POST", `/kelabos/${id}/invitees`, { body: { invitees: ["matt@example.com"] } });
+  assert.equal(anon.statusCode, 401);
+
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["matt@example.com", "priya@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json.removed, []);
+  assert.equal(res.json.added.length, 1);
+  assert.equal(res.json.added[0].email, "priya@example.com");
+  assert.equal(res.json.added[0].sent, true);
+  assert.equal(res.json.failed.length, 0);
+
+  // Matt was already invited — no second email to him, only Priya's.
+  assert.equal(sentInvites.length, before + 1);
+  assert.equal(sentInvites.at(-1).to, "priya@example.com");
+  assert.equal((await db.getInvite(id, "priya@example.com")).response, "pending");
+});
+
+await test("POST /kelabos/:id/invitees — removes an address, emails the removed person, not the kelabo", async () => {
+  const id = await scheduleFresh(); // matt@example.com invited
+  const before = sentUninvites.length;
+
+  const res = await call("POST", `/kelabos/${id}/invitees`, { body: { invitees: [] }, cookies: sessionCookies });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json.added, []);
+  assert.equal(res.json.removed.length, 1);
+  assert.equal(res.json.removed[0].email, "matt@example.com");
+
+  assert.equal(sentUninvites.length, before + 1);
+  assert.equal(sentUninvites.at(-1).to, "matt@example.com");
+  assert.equal(await db.getInvite(id, "matt@example.com"), null, "the invite row is gone, not just marked");
+
+  // The kelabo itself is untouched.
+  const meta = await db.getKelaboMeta(id);
+  assert.equal(meta.status, "scheduled");
+  // The host's own auto-RSVP survives a removal request that never named it.
+  assert.equal((await db.getInvite(id, "host@example.com")).response, "accepted");
+});
+
+await test("POST /kelabos/:id/invitees — add and remove in the same call", async () => {
+  const id = await scheduleFresh(); // matt@example.com invited
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["priya@example.com"] }, // drops matt, adds priya
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.added.length, 1);
+  assert.equal(res.json.removed.length, 1);
+  assert.equal(res.json.added[0].email, "priya@example.com");
+  assert.equal(res.json.removed[0].email, "matt@example.com");
+});
+
+await test("POST /kelabos/:id/invitees — the same list back is nothing_to_change", async () => {
+  const id = await scheduleFresh();
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["matt@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json.error, "nothing_to_change");
+});
+
+await test("POST /kelabos/:id/invitees — the host's own address is never added or removed through here", async () => {
+  const id = await scheduleFresh();
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    // Matt dropped, host's own email listed (as if a client echoed it back) —
+    // neither adds nor removes the host, who was never in the diff's domain.
+    body: { invitees: ["host@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.removed.length, 1);
+  assert.equal(res.json.removed[0].email, "matt@example.com");
+  assert.equal((await db.getInvite(id, "host@example.com")).response, "accepted", "host's own row is untouched");
+});
+
+await test("POST /kelabos/:id/invitees — a guest's link RSVP is not something this route can remove", async () => {
+  const id = await scheduleFresh();
+  // A guest answered the link directly — no email the host ever typed.
+  await db.putInvite(id, { inviteKey: "g:abc123", displayName: "Guest Gary", isGuest: true, response: "accepted", invitedAt: Date.now() });
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["matt@example.com"] }, // unchanged from what scheduleFresh already set
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 400, "matt is unchanged and the guest row is outside this diff, so there is nothing to change");
+  assert.equal(res.json.error, "nothing_to_change");
+  assert.notEqual(await db.getInvite(id, "g:abc123"), null, "the guest's RSVP survives untouched");
+});
+
+await test("POST /kelabos/:id/invitees — not the host is forbidden", async () => {
+  const id = await scheduleFresh();
+
+  // A second, genuinely different signed-in identity — not the host, and not
+  // an invitee either, which is what makes 403 the right answer rather than
+  // some read-only view.
+  await call("POST", "/auth/otp/request", { body: { email: "colleague@example.com" } });
+  const code = sentEmails.at(-1).code;
+  const ver = await call("POST", "/auth/otp/verify", { body: { email: "colleague@example.com", code } });
+  const otherCookies = { kelabo_session: cookieValue(ver, "kelabo_session"), kelabo_refresh: cookieValue(ver, "kelabo_refresh") };
+
+  const res = await call("POST", `/kelabos/${id}/invitees`, { body: { invitees: [] }, cookies: otherCookies });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json.error, "not_host");
+});
+
+await test("POST /kelabos/:id/invitees — refused once live, refused once cancelled", async () => {
+  const live = await scheduleFresh();
+  await call("POST", `/kelabos/${live}/start-scheduled`, { cookies: sessionCookies });
+  const onLive = await call("POST", `/kelabos/${live}/invitees`, { body: { invitees: [] }, cookies: sessionCookies });
+  assert.equal(onLive.statusCode, 409);
+  assert.equal(onLive.json.error, "already_active");
+  await db.updateKelaboMeta(live, { status: "ended", tenantStatus: null });
+  await db.deleteHostGuard("host@example.com");
+
+  const cancelled = await scheduleFresh();
+  await call("POST", `/kelabos/${cancelled}/cancel`, { cookies: sessionCookies });
+  const onCancelled = await call("POST", `/kelabos/${cancelled}/invitees`, { body: { invitees: [] }, cookies: sessionCookies });
+  assert.equal(onCancelled.statusCode, 409);
+  assert.equal(onCancelled.json.error, "kelabo_cancelled");
+});
+
+// --- cross-tenant invite visibility (docs 18 §2.8) --------------------------
+//
+// A kelabo's tenantStatus names its HOST's tenant — status-index, which every
+// list above reads, can therefore never surface a kelabo to someone invited
+// from a different domain: no query on the invitee's own tenant reaches a
+// row indexed under someone else's. invitee-index is the other half,
+// identity-keyed rather than tenant-keyed, so a colleague-only default
+// cannot silently exclude the one person a specific INVITE# row names.
+
+// Via sessions.establishSession directly, not the HTTP OTP flow: this file's
+// `config.allowedEmailDomain` is "example.com" (line 23), which the real OTP
+// gate would refuse these addresses under — a fixture detail of this test
+// file, unrelated to what cross-tenant visibility is about. `sessions` is the
+// same module the OTP flow itself calls once a code is verified.
+async function sessionFor(email) {
+  const session = await sessions.establishSession(email);
+  return {
+    kelabo_session: cookieValue({ cookies: session.cookies }, "kelabo_session"),
+    kelabo_refresh: cookieValue({ cookies: session.cookies }, "kelabo_refresh"),
+  };
+}
+
+await test("GET /kelabos/scheduled — an invitee at a different domain than the host still sees it", async () => {
+  const outsideCookies = await sessionFor("outside@other-domain.example");
+  const id = await scheduleFresh({ invitees: ["outside@other-domain.example"] });
+
+  // Accept, exactly the route the emailed link's page uses.
+  const rsvp = await call("POST", `/kelabos/${id}/rsvp`, { body: { response: "accepted" }, cookies: outsideCookies });
+  assert.equal(rsvp.statusCode, 200);
+
+  const mine = await call("GET", "/kelabos/scheduled", { cookies: outsideCookies });
+  assert.equal(mine.statusCode, 200);
+  const found = mine.json.scheduled.find((m) => m.kelaboId === id);
+  assert.ok(found, "the outside invitee's own list does not contain the kelabo they accepted");
+  assert.equal(found.isHost, false);
+  assert.equal(found.myResponse, "accepted");
+
+  // The host's own list is unaffected by any of this.
+  const hostList = await call("GET", "/kelabos/scheduled", { cookies: sessionCookies });
+  assert.ok(hostList.json.scheduled.some((m) => m.kelaboId === id));
+});
+
+await test("GET /kelabos/scheduled — someone at another domain who was never invited still sees nothing", async () => {
+  const strangerCookies = await sessionFor("stranger@another-domain.example");
+  const id = await scheduleFresh();
+  const list = await call("GET", "/kelabos/scheduled", { cookies: strangerCookies });
+  assert.equal(list.json.scheduled.some((m) => m.kelaboId === id), false);
+});
+
+await test("GET /kelabos — a cross-tenant invitee (rung into a live kelabo) sees it before joining", async () => {
+  const outsideCookies = await sessionFor("rung@elsewhere.example");
+  const res = await call("POST", "/kelabos", { body: { title: "Standup" }, cookies: sessionCookies });
+  const id = res.json.kelaboId;
+  // The same write huddle.ringInto makes for an outside target — one
+  // INVITE# row, before they have joined or become a participant.
+  await db.putInvite(id, {
+    inviteKey: "rung@elsewhere.example",
+    email: "rung@elsewhere.example",
+    isGuest: false,
+    response: "pending",
+    invitedAt: Date.now(),
+  });
+
+  const list = await call("GET", "/kelabos", { cookies: outsideCookies });
+  assert.equal(list.statusCode, 200);
+  assert.ok(list.json.active.some((m) => m.kelaboId === id), "the rung outsider's own list does not contain it");
+  assert.equal(list.json.mine.some((m) => m.kelaboId === id), false, "it is not theirs to have started");
+
+  await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+  await db.deleteHostGuard("host@example.com");
+});
+
+await test("GET /agent/kelabos — the same cross-tenant reach, for the agent bridge", async () => {
+  const id = await scheduleFresh({ invitees: ["agentside@far-domain.example"] });
+  const { kelabos: joinable } = await agent.joinableKelabos({ identity: "agentside@far-domain.example" });
+  assert.ok(joinable.some((k) => k.kelaboId === id), "the agent bridge's own list does not reach a cross-tenant invite");
+  await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+});
+
 // --- agent bridge pairing (docs 16 §6) -------------------------------------
 
 let agentToken = null;
@@ -1656,7 +1914,7 @@ function gatedApp({ secretValue = ORIGIN_VALUE, throws = false } = {}) {
         return secretValue;
       },
     },
-    ses, sessions, auth, kelabos, join, joinCodes, records, sttToken,
+    mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken,
     internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test",
   });
 }
@@ -1704,36 +1962,6 @@ await test("origin gate fails CLOSED when the secret cannot be read", async () =
   // takes the API down, which is the correct direction to fail.
   const res = await callApp(gatedApp({ throws: true }), { header: ORIGIN_VALUE });
   assert.equal(res.statusCode, 403);
-});
-
-// The configuration set name is spread into every SendEmailCommand, and SES
-// rejects a send naming a set that does not exist — so "unconfigured" must mean
-// the key is ABSENT, not empty. Getting this wrong loses no events; it stops
-// all mail, including every sign-in code.
-await test("SES configuration set: named when set, absent when not", async () => {
-  const { createSesSender } = await import("../src/otp.js");
-  const sent = [];
-  const stubClient = { send: async (cmd) => { sent.push(cmd.input); return {}; } };
-
-  const withSet = createSesSender({ client: stubClient, configurationSet: "kelabo-test-mail" });
-  await withSet.sendOtp({ to: "a@example.com", from: "otp@example.com", code: "123456" });
-  assert.equal(sent.at(-1).ConfigurationSetName, "kelabo-test-mail");
-  // Raw, not Simple: `Simple` content cannot carry a part, so going back to it
-  // silently drops the inline logo and nothing else notices (see otpMail.mjs).
-  assert.ok(sent.at(-1).Content?.Raw?.Data, "the sign-in mail must be sent as raw MIME");
-  assert.ok(!sent.at(-1).Content?.Simple, "raw and simple content are mutually exclusive");
-
-  for (const unset of [undefined, "", null]) {
-    const without = createSesSender({ client: stubClient, configurationSet: unset });
-    await without.sendInvite({
-      to: "b@example.com", from: "otp@example.com", hostName: "Rico",
-      title: "T", scheduledAt: Date.now(), inviteUrl: "https://x/invite/1",
-    });
-    assert.ok(
-      !("ConfigurationSetName" in sent.at(-1)),
-      `ConfigurationSetName must be absent, not empty, for ${JSON.stringify(unset)}`,
-    );
-  }
 });
 
 await test("originSecretMatches: only an exact match, and never on absence", async () => {

@@ -18,6 +18,9 @@ const METAS = {
   "m-sfu": { rtcMode: "sfu" },
   "m-other": { rtcMode: "sfu" },
   "m-mesh": { rtcMode: "mesh" },
+  // Demotion (docs 15 §1.1): one room small enough for mesh to carry, one not.
+  "m-demote": { rtcMode: "sfu" },
+  "m-big": { rtcMode: "sfu" },
   // Exactly its second META read fails — the shape of a DynamoDB blip landing
   // between the route's own getMeta and the room's modeFor.
   "m-flaky": { rtcMode: "mesh" },
@@ -45,9 +48,14 @@ function metaItem(kelaboId) {
   };
 }
 
+// Every META write, so a demotion can be checked for having made itself
+// durable — an in-process mode change alone is undone by the next restart.
+const metaWrites = [];
+
 const db = {
   send: async (cmd) => {
     const name = cmd.constructor.name;
+    if (name === "UpdateCommand") metaWrites.push(cmd.input);
     if (name === "GetCommand") {
       const pk = String(cmd.input.Key.PK ?? "");
       const id = pk.startsWith("KELABO#") ? pk.slice("KELABO#".length) : "";
@@ -753,6 +761,86 @@ async function main() {
     ok("a META read failure refuses the join (503) instead of guessing sfu");
   }
 
+  // --- Demotion: sfu -> mesh, mid-call (docs 15 §1.1) ------------------------
+  const demoteStream = await connectSse(port, "m-demote", cookieFor("m-demote", "alice@example.com"));
+  {
+    for (const who of ["alice", "bob"]) {
+      const res = await req(port, {
+        path: "/rtc/join",
+        cookie: cookieFor("m-demote", `${who}@example.com`),
+        body: { kelaboId: "m-demote" },
+      });
+      assert.equal(res.body.mode, "sfu");
+    }
+    const sess = await req(port, {
+      path: "/rtc/sfu/session",
+      cookie: cookieFor("m-demote", "alice@example.com"),
+      body: { kelaboId: "m-demote", sessionDescription: { type: "offer", sdp: "v=0 alice" } },
+    });
+    assert.ok(sess.body.sessionId);
+    assert.ok(c.rtcRoom.peer("m-demote", "alice@example.com").sfuSessionId);
+
+    const closesBefore = rtc.calls.filter((x) => x.op === "closeTracks").length;
+    const res = await c.rtcRoom.demote("m-demote", { reason: "test" });
+    assert.deepEqual(res, { ok: true, peers: 2 });
+
+    assert.equal(c.state.rtcRooms.get("m-demote").mode, "mesh");
+    // The abandoned session is off the roster in the same breath. Leaving it
+    // there makes every peer pull tracks that no longer exist for the rest of
+    // the kelabo — and, on a metered deployment, keeps counting seat-seconds
+    // for a call nobody is routing.
+    assert.equal(c.rtcRoom.peer("m-demote", "alice@example.com").sfuSessionId, undefined);
+    assert.deepEqual(c.rtcRoom.peer("m-demote", "alice@example.com").tracks, {});
+
+    const ev = await waitFor(() => demoteStream.rtc.find((e) => e.kind === "mode"));
+    assert.equal(ev.mode, "mesh");
+    assert.equal(ev.reason, "test");
+
+    const write = metaWrites.find((w) => w.Key.PK === "KELABO#m-demote");
+    assert.ok(write, "the new mode is written to META");
+    assert.equal(Object.values(write.ExpressionAttributeNames)[0], "rtcMode");
+    assert.equal(Object.values(write.ExpressionAttributeValues)[0], "mesh");
+
+    await waitFor(() => rtc.calls.filter((x) => x.op === "closeTracks").length > closesBefore);
+    ok("demote() moves a live sfu room to mesh: roster, META, mode event, Cloudflare teardown");
+  }
+
+  {
+    // A joiner arriving after the demotion gets the new transport, not the one
+    // the META was created with.
+    const res = await req(port, {
+      path: "/rtc/join",
+      cookie: cookieFor("m-demote", "carol@example.com"),
+      body: { kelaboId: "m-demote" },
+    });
+    assert.equal(res.body.mode, "mesh");
+    assert.deepEqual(await c.rtcRoom.demote("m-demote"), { ok: true, peers: 3, already: true });
+    ok("after a demotion a fresh join is mesh, and demoting again is a no-op");
+  }
+
+  {
+    // Mesh is N-1 uplinks per participant, not a cheaper SFU. A room bigger
+    // than the cap is REFUSED rather than degraded — the caller wanted a
+    // working call, and half a room is not one.
+    for (const who of ["alice", "bob", "carol", "dave"]) {
+      const res = await req(port, {
+        path: "/rtc/join",
+        cookie: cookieFor("m-big", `${who}@example.com`),
+        body: { kelaboId: "m-big" },
+      });
+      assert.equal(res.status, 200);
+    }
+    const res = await c.rtcRoom.demote("m-big", { reason: "test" });
+    assert.deepEqual(res, { ok: false, code: "mesh_too_small", detail: { meshMax: MESH_MAX, units: 4 } });
+    assert.equal(c.state.rtcRooms.get("m-big").mode, "sfu", "a refused demotion changes nothing");
+    ok(`a room of 4 will not demote under meshMax ${MESH_MAX} — refused, not degraded`);
+  }
+
+  {
+    assert.deepEqual(await c.rtcRoom.demote("m-nobody"), { ok: false, code: "rtc_no_room" });
+    ok("demoting a room with no live call is refused, not invented");
+  }
+
   // --- Auth ------------------------------------------------------------------
   {
     const res = await req(port, { path: "/rtc/join", body: { kelaboId: "m-sfu" } });
@@ -760,6 +848,7 @@ async function main() {
     ok("no participant cookie → 401");
   }
 
+  demoteStream.res.destroy();
   aliceStream.res.destroy();
   meshStreams.alice.res.destroy();
   meshStreams.bob.res.destroy();

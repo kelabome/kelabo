@@ -1,10 +1,12 @@
-import { Stack, Duration, CfnOutput } from "aws-cdk-lib";
+import { Stack, Duration, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { logRetention } from "./log-retention.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +16,35 @@ export class LambdaStack extends Stack {
     const { cfg, tables, archiveBucket } = props;
     const names = cfg.tableNames;
 
+    // Declared rather than left to Lambda, which creates the group on first
+    // invocation with **no expiry**. These logs name the identity performing
+    // each action — an email address for a signed-in person — so an unset
+    // retention is an unbounded record of who used the service and when,
+    // outliving the kelabos it describes by any margin.
+    //
+    // **Deliberately not `/aws/lambda/<function>`.** That is where Lambda puts
+    // logs by itself, so on any environment that has ever served a request the
+    // group already exists and is not owned by CloudFormation — and declaring
+    // it fails the whole changeset with `already exists`, before anything is
+    // deployed. A change made for hygiene must not break every existing
+    // deployment's next deploy, so it takes a name of ours instead.
+    //
+    // Consequence worth knowing: after this ships, the old `/aws/lambda/…`
+    // group stops receiving anything, because the function's logging config
+    // points here. It keeps whatever it already had and can be deleted whenever
+    // convenient — there is no race, because Lambda only auto-creates the group
+    // it is configured to use.
+    //
+    // `RETAIN` on destroy: losing the stack must not also lose the log of what
+    // happened to it, which is exactly when it is wanted.
+    const logGroup = new logs.LogGroup(this, "RestApiLogs", {
+      logGroupName: `/${cfg.app}/${cfg.endpoint}/rest-api`,
+      retention: logRetention(cfg.logRetentionDays),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     this.fn = new NodejsFunction(this, "RestApiFn", {
+      logGroup,
       functionName: `${cfg.app}-${cfg.endpoint}-rest-api`,
       entry: join(here, "../../rest-api/src/index.js"),
       handler: "handler",
@@ -46,6 +76,7 @@ export class LambdaStack extends Stack {
         KELABO_TABLE_REFRESH: names.refresh,
         KELABO_TABLE_MCP: names.mcp,
         KELABO_TABLE_CONTACTS: names.contacts,
+        KELABO_TABLE_JOURNEYS: names.journeys,
         KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
         KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
         KELABO_SECRET_STT: cfg.secrets.stt,
@@ -64,7 +95,15 @@ export class LambdaStack extends Stack {
         KELABO_SES_CONFIG_SET: cfg.ses.configurationSetName,
         KELABO_SECRET_API_ORIGIN: cfg.secrets.apiOrigin,
         KELABO_REQUIRE_ORIGIN_SECRET: cfg.api.requireOriginSecret ? "true" : "false",
-        KELABO_SES_FROM_ADDRESS: cfg.ses.fromAddress,
+        // Which transport in rest-api/src/mail/ carries outbound mail, and the
+        // address it sends from. `fromAddress` is provider-neutral; the
+        // KELABO_SES_* pair below configures the SES transport specifically.
+        KELABO_MAIL_PROVIDER: cfg.mail.provider,
+        KELABO_MAIL_FROM_ADDRESS: cfg.mail.fromAddress,
+        // Only read when the provider needs a key. SES does not — it
+        // authenticates with this function's own role — so an SES deployment
+        // never touches it and the secret need not exist.
+        KELABO_SECRET_MAIL: cfg.secrets.mail,
         // Usually this stack's own region. It differs only when a deployment
         // moved an environment's mail to another region to give it its own
         // sandbox status and reputation, so the SES client cannot just take
@@ -108,6 +147,7 @@ export class LambdaStack extends Stack {
     tables.history.grantReadData(this.fn);
     tables.mcp.grantReadWriteData(this.fn);
     tables.contacts.grantReadWriteData(this.fn);
+    tables.journeys.grantReadWriteData(this.fn);
     archiveBucket.grantRead(this.fn);
 
     // Retention purge (POST /records/purge). Deliberately DeleteItem/DeleteObject
@@ -138,13 +178,20 @@ export class LambdaStack extends Stack {
       }),
     );
 
-    this.fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: ["*"],
-        conditions: { StringEquals: { "ses:FromAddress": cfg.ses.fromAddress } },
-      }),
-    );
+    // Only what this deployment's mail provider actually needs. SES gets an
+    // identity-independent send permission fenced by the from-address; every
+    // other provider gets nothing here and reads its API key below instead.
+    // Granting both would leave a function that can still send from the SES
+    // identity long after the deployment stopped meaning to.
+    if (cfg.mail.provider === "ses") {
+      this.fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ses:SendEmail", "ses:SendRawEmail"],
+          resources: ["*"],
+          conditions: { StringEquals: { "ses:FromAddress": cfg.mail.fromAddress } },
+        }),
+      );
+    }
 
     for (const [id, secretName] of Object.entries({
       Stt: cfg.secrets.stt,
@@ -154,6 +201,7 @@ export class LambdaStack extends Stack {
       // Read, not describe: the Lambda compares the presented header against
       // this value on every request that reaches a cold container.
       ApiOrigin: cfg.secrets.apiOrigin,
+      ...(cfg.mail.provider === "ses" ? {} : { Mail: cfg.secrets.mail }),
     })) {
       secretsmanager.Secret.fromSecretNameV2(this, `Secret${id}`, secretName).grantRead(this.fn);
     }

@@ -32,6 +32,20 @@ export class DynamoDbStack extends Stack {
       sortKey: { name: "startedAt", type: N },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    // Sparse on `inviteKey`, which only an INVITE# item ever carries (the same
+    // trick status-index plays on tenantStatus, which only META carries) — so
+    // this indexes exactly the rows that name who was invited, nothing else.
+    // What it is for: a kelabo's tenantStatus names its HOST's tenant, never an
+    // invitee's, so status-index alone can never surface a kelabo to someone
+    // invited across a domain boundary — this is the other half of "who can
+    // see this kelabo", queried by the invitee's own identity instead of by
+    // tenant (docs 18 §2.8).
+    kelabos.addGlobalSecondaryIndex({
+      indexName: "invitee-index",
+      partitionKey: { name: "inviteKey", type: S },
+      sortKey: { name: "invitedAt", type: N },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
 
     const history = table("HistoryTable", names.history, {
       partitionKey: { name: "archiveId", type: S },
@@ -111,7 +125,35 @@ export class DynamoDbStack extends Stack {
       timeToLiveAttribute: "ttl",
     });
 
-    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts };
+    // Journey (docs 20). One partition per journey, `PK = JOURNEY#<id>`,
+    // holding META, a DESC# version chain, ACCESSOR# (private-journey
+    // roster), and LINK# (kelabo membership) items by SK prefix. No `ttl` —
+    // a journey never auto-expires; every removal in docs 20 is an explicit
+    // write, unlike the orphaned-child trap TTL creates on `kelabos`.
+    const journeys = table("JourneysTable", names.journeys, {
+      partitionKey: { name: "PK", type: S },
+      sortKey: { name: "SK", type: S },
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+    // Sparse on `tenantStatus`, which only META carries — "journeys in my
+    // tenant" (docs 20 §4.2), the same trick kelabos.status-index plays.
+    journeys.addGlobalSecondaryIndex({
+      indexName: "tenant-status-index",
+      partitionKey: { name: "tenantStatus", type: S },
+      sortKey: { name: "updatedAt", type: N },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // Sparse on `accessorIdentity`, which only an ACCESSOR# item carries —
+    // "private journeys I'm an accessor of", a structural copy of kelabos'
+    // invitee-index.
+    journeys.addGlobalSecondaryIndex({
+      indexName: "accessor-index",
+      partitionKey: { name: "accessorIdentity", type: S },
+      sortKey: { name: "addedAt", type: N },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts, journeys };
 
     this.archiveBucket = new s3.Bucket(this, "ArchiveBucket", {
       bucketName: cfg.archiveBucket.toLowerCase().replace(/[^a-z0-9.-]/g, "-"),

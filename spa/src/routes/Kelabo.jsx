@@ -74,6 +74,9 @@ function KelaboRoom() {
   const [kelabo, setKelabo] = useState(null)
   const [loadError, setLoadError] = useState(false)
   const [ended, setEnded] = useState(false)
+  // The kelabo ended but the Gateway never wrote the record. Distinct from
+  // `ended` because only the host sees it, and only they can retry it.
+  const [archiveFailed, setArchiveFailed] = useState(false)
   const [icon, setIcon] = useState(themeIcon())
   const [scheme, setSchemeState] = useState(currentScheme())
   const [finalOnly, setFinalOnly] = useState(localStorage.getItem('kelabo-final-only') === '1')
@@ -479,12 +482,30 @@ function KelaboRoom() {
     })
     if (!ok) return
     try {
-      await api.endKelabo(id)
+      const res = await api.endKelabo(id)
+      // The kelabo always ends; the record does not always get written. Say
+      // which happened rather than promising an archive that is not there —
+      // the host is the only person who can ask for it again.
+      if (res?.archived === false) setArchiveFailed(true)
       // Promise minutes only where an agent exists to write them (docs 19 §2).
-      toast(assistantOn ? 'Kelabo ended — minutes generating…' : 'Kelabo ended — record archived')
+      else toast(assistantOn ? 'Kelabo ended — minutes generating…' : 'Kelabo ended — record archived')
       setEnded(true)
     } catch {
       toast('Could not end the kelabo')
+    }
+  }
+
+  const retryArchive = async () => {
+    try {
+      const res = await api.endKelabo(id)
+      if (res?.archived === false) {
+        toast('Still could not save the record')
+        return
+      }
+      setArchiveFailed(false)
+      toast('Record saved')
+    } catch {
+      toast('Still could not save the record')
     }
   }
 
@@ -496,6 +517,7 @@ function KelaboRoom() {
         me={me}
         isHost={isHost}
         ended={ended}
+        archive={{ failed: archiveFailed, onRetry: retryArchive }}
         boardOnly={boardOnly}
         agentPresent={agentPresent}
         agentLabel={agentLabel}

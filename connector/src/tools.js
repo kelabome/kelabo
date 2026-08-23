@@ -309,5 +309,107 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
     return kelaboId ? `Detached from ${kelaboId}.` : "Was not attached to a kelabo.";
   }
 
-  return { join, post, working, kelabo, board, history, minutes, leave, sweep, briefing: () => briefing };
+  // --- journey tools (docs 20 §12.2) ------------------------------------
+  //
+  // A kelabo may be linked to more than one journey, so none of these take a
+  // required journeyId — an omitted one resolves against the kelabo's own
+  // links Gateway-side, and `resolved` on the response says which of four
+  // things happened. This helper renders the three outcomes every one of
+  // them shares; a tool-specific `resolved` value (e.g. `journey_post`'s
+  // `aiCanPost` gate) is handled by its own function instead.
+  function explainJourneyResolution(res) {
+    if (res.resolved === "no_journey") {
+      return "This kelabo is not linked to any journey.";
+    }
+    if (res.resolved === "ambiguous") {
+      const lines = res.journeys.map((j) => `- ${j.journeyId}  ${j.title || "(untitled)"}`);
+      return ["This kelabo is linked to more than one journey:", ...lines, "", "Call again with journeyId set to one of these."].join("\n");
+    }
+    if (res.resolved === "journey_not_found") {
+      return "That journeyId is not one this kelabo is linked to.";
+    }
+    return null; // "ok" — the caller renders its own payload.
+  }
+
+  function requireAttached() {
+    const kelaboId = tunnel.attachedKelabo();
+    if (!kelaboId) throw new Error("Not attached to a kelabo. Call kelabo_join first.");
+    return kelaboId;
+  }
+
+  async function journeyInfo({ journeyId } = {}) {
+    const kelaboId = requireAttached();
+    const res = await tunnel.requestJourneyInfo(kelaboId, journeyId);
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    return [
+      `${res.title || "(untitled journey)"} — ${res.visibility}, ${res.status}`,
+      res.description || "(no description yet)",
+      `Health: ${res.health || "unset"}  Progress: ${typeof res.progress === "number" ? res.progress + "%" : "unset"}`,
+      `Kelabos: ${res.counts.kelaboCount}  Documents: ${res.counts.documentCount}  Reports: ${res.counts.reportCount}  Board messages: ${res.counts.boardMessageCount}`,
+      `journeyId: ${res.journeyId}`,
+    ].join("\n");
+  }
+
+  async function journeyTimeline({ journeyId, entryType, before, limit } = {}) {
+    const kelaboId = requireAttached();
+    const res = await tunnel.requestJourneyTimeline(kelaboId, { journeyId, entryType, before, limit });
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    if (!res.entries.length) return "The journey's timeline has nothing (yet) matching that.";
+    const rendered = res.entries
+      .map((e) => `[${new Date(e.at).toISOString()}] ${e.type}${e.actor ? ` (${e.actor})` : ""}: ${e.summary}`)
+      .join("\n");
+    return res.nextBefore ? `${rendered}\n\nMore available — call again with before:${res.nextBefore}.` : rendered;
+  }
+
+  async function journeyBoard({ journeyId } = {}) {
+    const kelaboId = requireAttached();
+    const res = await tunnel.requestJourneyBoard(kelaboId, journeyId);
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    if (!res.messages.length) return "The journey's board has no pinned messages.";
+    return res.messages.map((m) => `- ${m.content}`).join("\n");
+  }
+
+  /** The agent's own synthesis, stored directly — no server-side LLM call.
+   *  Read the journey's own content first with journeyInfo/journeyTimeline/
+   *  journeyBoard and kelabo_history, then answer from that. */
+  async function journeyReportSubmit({ journeyId, question, answer } = {}) {
+    if (!question || !String(question).trim()) throw new Error("question is required.");
+    if (!answer || !String(answer).trim()) throw new Error("answer is required.");
+    const kelaboId = requireAttached();
+    const res = await tunnel.submitJourneyReport(kelaboId, { journeyId, question, answer });
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    return `Report submitted and stored on the journey (reportId: ${res.reportId}).`;
+  }
+
+  async function journeyPost({ journeyId, content, msgId } = {}) {
+    if (!content || !String(content).trim()) throw new Error("content is required.");
+    const kelaboId = requireAttached();
+    const res = await tunnel.postJourneyMessage(kelaboId, { journeyId, content, msgId });
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    if (res.resolved === "ai_posting_disabled") {
+      return "The journey's owner has not turned on assistant posting for this journey (aiCanPost is off). Nothing was posted.";
+    }
+    if (res.resolved === "message_not_found") {
+      return "No such board message on this journey — it may have been archived or never existed.";
+    }
+    if (res.resolved === "already_archived") {
+      return "That board message is archived and cannot be edited until it is unarchived.";
+    }
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    return msgId ? `Journey board message edited (version ${res.version}).` : `Posted to the journey's board (msgId: ${res.msgId}).`;
+  }
+
+  return {
+    join, post, working, kelabo, board, history, minutes, leave, sweep, briefing: () => briefing,
+    journeyInfo, journeyTimeline, journeyBoard, journeyReportSubmit, journeyPost,
+  };
 }

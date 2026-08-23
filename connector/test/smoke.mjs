@@ -42,6 +42,7 @@ const waitFor = async (fn, ms = 3000, step = 10) => {
 const received = [];
 let gatewaySocket = null;
 let historyAsks = 0;
+let journeyPostAsks = 0;
 const wss = new WebSocketServer({ port: 0 });
 const port = await new Promise((r) => wss.on("listening", () => r(wss.address().port)));
 
@@ -92,6 +93,55 @@ wss.on("connection", (ws) => {
             : [],
         })
       );
+    }
+    if (frame.type === "journey_info_request") {
+      if (frame.journeyId === "ambi") {
+        ws.send(JSON.stringify({
+          type: "journey_info", requestId: frame.requestId, kelaboId: frame.kelaboId,
+          resolved: "ambiguous", journeys: [{ journeyId: "j1", title: "Q3 Launch" }, { journeyId: "j2", title: "Q4 Launch" }],
+        }));
+      } else if (frame.journeyId === "bogus") {
+        ws.send(JSON.stringify({ type: "journey_info", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "journey_not_found", journeys: [] }));
+      } else {
+        ws.send(JSON.stringify({
+          type: "journey_info", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+          journeyId: "j1", title: "Q3 Launch", visibility: "public", status: "active", description: "Ship the redesign.",
+          health: "yellow", progress: 40,
+          counts: { kelaboCount: 2, documentCount: 1, reportCount: 0, boardMessageCount: 3, accessorCount: 0 },
+        }));
+      }
+    }
+    if (frame.type === "journey_timeline_request") {
+      ws.send(JSON.stringify({
+        type: "journey_timeline", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+        entries: [{ type: "report", summary: "Report requested: Where are we?", actor: "alice@example.com", at: 1722400000000 }],
+      }));
+    }
+    if (frame.type === "journey_board_request") {
+      ws.send(JSON.stringify({
+        type: "journey_board", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+        messages: [{ msgId: "m1", content: "Freeze is Friday" }],
+      }));
+    }
+    if (frame.type === "journey_report_submit") {
+      ws.send(JSON.stringify({ type: "journey_report_submitted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [], reportId: "r-1" }));
+    }
+    if (frame.type === "journey_post") {
+      // First ask: the owner has not turned aiCanPost on. Later asks: on,
+      // matching the historyAsks toggle above.
+      const enabled = journeyPostAsks++ > 0;
+      if (!enabled) {
+        ws.send(JSON.stringify({ type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ai_posting_disabled", journeys: [] }));
+      } else if (frame.msgId === "missing") {
+        ws.send(JSON.stringify({ type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "message_not_found", journeys: [] }));
+      } else if (frame.msgId === "archived-msg") {
+        ws.send(JSON.stringify({ type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "already_archived", journeys: [] }));
+      } else {
+        ws.send(JSON.stringify({
+          type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+          msgId: frame.msgId || "new-msg-1", version: frame.msgId ? 2 : 1,
+        }));
+      }
     }
   });
 });
@@ -237,6 +287,60 @@ await test("kelabo_history tells opt-in-off apart from an empty record", async (
   assert.match(on, /We picked the blue design\./);
   assert.match(on, /Decisions: Blue, not green/);
   assert.match(on, /Action items: Ship it \(bo\)/);
+});
+
+await test("kelabo_journey_info renders the resolved journey, or asks to disambiguate", async () => {
+  const out = await tools.journeyInfo({});
+  assert.match(out, /Q3 Launch — public, active/);
+  assert.match(out, /Ship the redesign\./);
+  assert.match(out, /Health: yellow  Progress: 40%/);
+  assert.match(out, /journeyId: j1/);
+
+  const ambiguous = await tools.journeyInfo({ journeyId: "ambi" });
+  assert.match(ambiguous, /linked to more than one journey/);
+  assert.match(ambiguous, /j1  Q3 Launch/);
+  assert.match(ambiguous, /j2  Q4 Launch/);
+  assert.match(ambiguous, /Call again with journeyId/);
+
+  const bogus = await tools.journeyInfo({ journeyId: "bogus" });
+  assert.match(bogus, /not one this kelabo is linked to/);
+});
+
+await test("kelabo_journey_timeline and kelabo_journey_board render the resolved payload", async () => {
+  const timeline = await tools.journeyTimeline({});
+  assert.match(timeline, /report/);
+  assert.match(timeline, /Report requested: Where are we\?/);
+  assert.match(timeline, /alice@example\.com/);
+
+  const board = await tools.journeyBoard({});
+  assert.match(board, /Freeze is Friday/);
+});
+
+await test("kelabo_journey_report_submit requires both fields and reports the stored reportId", async () => {
+  await assert.rejects(() => tools.journeyReportSubmit({ answer: "a" }), /question is required/);
+  await assert.rejects(() => tools.journeyReportSubmit({ question: "q" }), /answer is required/);
+  const out = await tools.journeyReportSubmit({ question: "Where are we?", answer: "On track." });
+  assert.match(out, /reportId: r-1/);
+});
+
+await test("kelabo_journey_post is refused while aiCanPost is off, then succeeds once it is on", async () => {
+  const off = await tools.journeyPost({ content: "Freeze is Friday" });
+  assert.match(off, /has not turned on assistant posting/);
+
+  const posted = await tools.journeyPost({ content: "Freeze is Friday" });
+  assert.match(posted, /Posted to the journey's board \(msgId: new-msg-1\)/);
+
+  const edited = await tools.journeyPost({ content: "Freeze moved", msgId: "m1" });
+  assert.match(edited, /edited \(version 2\)/);
+
+  const missing = await tools.journeyPost({ content: "x", msgId: "missing" });
+  assert.match(missing, /may have been archived or never existed/);
+
+  // Previously untested: the agent bridge can never archive or unarchive a
+  // message itself, but must still be told plainly when it tries to edit
+  // one that already is.
+  const archived = await tools.journeyPost({ content: "x", msgId: "archived-msg" });
+  assert.match(archived, /is archived and cannot be edited until it is unarchived/);
 });
 
 await test("kelabo_working puts an in-progress card up before there is an answer", async () => {

@@ -286,7 +286,25 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
     const msg = data.choices?.[0]?.message ?? {};
     const toolCalls = (msg.tool_calls ?? []).map((tc) => {
       let input = {};
-      try { input = JSON.parse(tc.function?.arguments || "{}"); } catch {}
+      const rawArgs = tc.function?.arguments || "{}";
+      try {
+        input = JSON.parse(rawArgs);
+      } catch (err) {
+        // Previously silent: a malformed/truncated arguments string (a
+        // reasoning model cut off mid-JSON by max_tokens is the known
+        // culprit, per the fallback comment below) fell back to `{}` with
+        // no trace anywhere — indistinguishable after the fact from the
+        // model genuinely emitting no arguments at all. Logged with the
+        // raw string so a truncation bug is diagnosable, not just visible
+        // as a downstream "empty brief" failure several calls later.
+        log?.("llm_tool_args_parse_failed", {
+          provider: "openai-compatible",
+          tool: tc.function?.name,
+          rawArgsLength: rawArgs.length,
+          rawArgs: rawArgs.slice(0, 500),
+          error: err.message,
+        });
+      }
       return { id: tc.id, name: tc.function?.name, input };
     });
     // Reasoning models (e.g. deepseek-v4-*) may put the answer in reasoning_content

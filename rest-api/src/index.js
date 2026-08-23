@@ -8,6 +8,7 @@ import {
   scheduleKelaboBodySchema,
   cancelKelaboBodySchema,
   rescheduleKelaboBodySchema,
+  updateInviteesBodySchema,
   huddleBodySchema,
   ringBodySchema,
   ringAnswerBodySchema,
@@ -23,13 +24,23 @@ import {
   agentDeviceTokenBodySchema,
   agentApproveBodySchema,
   joinCodeRedeemBodySchema,
+  createJourneyBodySchema,
+  patchJourneyBodySchema,
+  journeyDescriptionBodySchema,
+  journeyAccessorBodySchema,
+  journeyLinkKelaboBodySchema,
+  journeyStatusBodySchema,
+  journeyBoardMessageBodySchema,
+  journeyDocumentBodySchema,
+  journeyReportBodySchema,
 } from "@kelabo/contracts";
 import { timingSafeEqual } from "node:crypto";
 import { ZodError } from "zod";
 import { ensureConfig } from "./config.js";
 import { createDb } from "./db.js";
 import { createSecrets } from "./secrets.js";
-import { createSesSender, createOtp } from "./otp.js";
+import { createOtp } from "./otp.js";
+import { createMailer, mailSettingsFromConfig } from "./mail/index.js";
 import { createSessions } from "./sessions.js";
 import { createOidc } from "./oidc.js";
 import { createMcpOauth } from "./mcpOauth.js";
@@ -41,6 +52,7 @@ import { createHuddle } from "./huddle.js";
 import { createJoin } from "./join.js";
 import { createJoinCodes } from "./joinCode.js";
 import { createRecords } from "./records.js";
+import { createJourneys } from "./journeys.js";
 import { createSttToken } from "./stt/index.js";
 import { createInternal } from "./internal.js";
 import { createAgent } from "./agent.js";
@@ -96,7 +108,27 @@ function htmlErrorPage(status, code) {
 }
 
 export function createApp(deps) {
-  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent } = deps;
+  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent, journeys } = deps;
+
+  /**
+   * Best-effort link into the journeys named at kelabo creation/schedule time
+   * (docs 20 §11). One bad id must not lose the kelabo, same reasoning as an
+   * invite email that fails to send: the caller is told which links failed
+   * rather than the create silently doing less than it said.
+   */
+  async function linkNewKelaboToJourneys({ identity, kelaboId, journeyIds }) {
+    if (!journeyIds?.length) return undefined;
+    const results = [];
+    for (const journeyId of journeyIds) {
+      try {
+        await journeys.linkKelabo({ journeyId, identity, kelaboId });
+        results.push({ journeyId, linked: true });
+      } catch (e) {
+        results.push({ journeyId, linked: false, reason: e.code || e.name || "link_failed" });
+      }
+    }
+    return results;
+  }
 
   /** `Authorization: Bearer <token>` — the agent bridge's only credential. */
   function bearerToken(req) {
@@ -449,7 +481,7 @@ export function createApp(deps) {
         if (!payload) throw err(401, "unauthenticated");
         return {
           status: 200,
-          body: await agent.joinableKelabos({ identity: payload.sub, tenantId: payload.tenant }),
+          body: await agent.joinableKelabos({ identity: payload.sub }),
         };
       },
     },
@@ -460,7 +492,12 @@ export function createApp(deps) {
         const session = await requireSession(req);
         const body = createKelaboBodySchema.parse(req.body || {});
         const result = await kelabos.createKelabo({ identity: session.identity, body });
-        return result;
+        const journeyLinks = await linkNewKelaboToJourneys({
+          identity: session.identity,
+          kelaboId: result.body.kelaboId,
+          journeyIds: body.journeyIds,
+        });
+        return journeyLinks ? { ...result, body: { ...result.body, journeyLinks } } : result;
       },
     },
     {
@@ -508,7 +545,12 @@ export function createApp(deps) {
             failed: failures.map((f) => `${f.email}:${f.reason || "unknown"}`),
           });
         }
-        return res;
+        const journeyLinks = await linkNewKelaboToJourneys({
+          identity: session.identity,
+          kelaboId: res.body?.kelaboId,
+          journeyIds: body.journeyIds,
+        });
+        return journeyLinks ? { ...res, body: { ...res.body, journeyLinks } } : res;
       },
     },
     {
@@ -581,6 +623,22 @@ export function createApp(deps) {
         const session = await requireSession(req);
         const body = rescheduleKelaboBodySchema.parse(req.body || {});
         return scheduling.reschedule({ kelaboId: req.params.id, identity: session.identity, body });
+      },
+    },
+    {
+      // Add or remove invitees on a kelabo that has not started yet (docs 18
+      // §3.5) — host-only, scheduled-only, the same guard reschedule uses.
+      method: "POST",
+      pattern: "/kelabos/:id/invitees",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = updateInviteesBodySchema.parse(req.body || {});
+        return scheduling.updateInvitees({
+          kelaboId: req.params.id,
+          identity: session.identity,
+          displayName: session.displayName,
+          body,
+        });
       },
     },
     {
@@ -809,6 +867,434 @@ export function createApp(deps) {
         return { status: 200, body: result };
       },
     },
+    // --- journeys (docs 20) -------------------------------------------------
+    // A persistent container linking related kelabos so description,
+    // decisions and Q&A history carry from one meeting to the next. Every
+    // route requires a session; per-journey access (owner / public-tenant-
+    // member / private-accessor) is resolved fresh inside journeys.js, never
+    // cached on a cookie.
+    {
+      method: "POST",
+      pattern: "/journeys",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = createJourneyBodySchema.parse(req.body || {});
+        return { status: 200, body: await journeys.createJourney({ identity: session.identity, body }) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await journeys.listJourneys({ identity: session.identity }) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getJourney({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "PATCH",
+      pattern: "/journeys/:id",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = patchJourneyBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.patchJourney({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/complete",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.completeJourney({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/reopen",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.reopenJourney({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.deleteJourney({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/accessors",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listAccessors({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/accessors",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyAccessorBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.addAccessor({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id/accessors/:identity",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.removeAccessor({
+            journeyId: req.params.id,
+            identity: session.identity,
+            target: req.params.identity,
+          }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/kelabos",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyLinkKelaboBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.linkKelabo({
+            journeyId: req.params.id,
+            identity: session.identity,
+            kelaboId: body.kelaboId,
+          }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/kelabos",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listLinkedKelabos({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id/kelabos/:kelaboId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.unlinkKelabo({
+            journeyId: req.params.id,
+            identity: session.identity,
+            kelaboId: req.params.kelaboId,
+          }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/description",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyDescriptionBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.updateDescription({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/description/history",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getDescriptionHistory({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      // Health/progress (docs 20 §5) — optional, member-writable, frozen once
+      // the journey is completed.
+      method: "POST",
+      pattern: "/journeys/:id/status",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyStatusBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.updateStatus({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/status/history",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getStatusHistory({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      // Backward cursor (docs 20 §9.2), same shape as /caption/history's
+      // `before`, not the board's forward `since` — a journey's timeline is
+      // unbounded and read newest-first.
+      method: "GET",
+      pattern: "/journeys/:id/timeline",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const before = req.query.before ? Number(req.query.before) : undefined;
+        const limit = req.query.limit ? Math.min(Number(req.query.limit), 200) : 50;
+        const type = typeof req.query.type === "string" && req.query.type ? req.query.type : undefined;
+        return {
+          status: 200,
+          body: await journeys.getTimeline({ journeyId: req.params.id, identity: session.identity, type, before, limit }),
+        };
+      },
+    },
+    // Message board (docs 20 §7) — distinct from a kelabo's own board;
+    // mutable in place, every edit kept, member-writable, frozen once
+    // completed.
+    {
+      method: "POST",
+      pattern: "/journeys/:id/board",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyBoardMessageBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.addBoardMessage({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/board",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listBoardMessages({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "PATCH",
+      pattern: "/journeys/:id/board/:msgId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyBoardMessageBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.editBoardMessage({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+            body,
+          }),
+        };
+      },
+    },
+    // Archive/unarchive (docs 20 §7) — a state change, not a deletion, so
+    // these are POST sub-resources rather than DELETE, the same shape
+    // /journeys/:id/complete and /journeys/:id/reopen already use for a
+    // reversible status transition.
+    {
+      method: "POST",
+      pattern: "/journeys/:id/board/:msgId/archive",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.archiveBoardMessage({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+          }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/board/:msgId/unarchive",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.unarchiveBoardMessage({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+          }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/board/:msgId/history",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getBoardMessageHistory({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+          }),
+        };
+      },
+    },
+    // Documents (docs 20 §8) — pasted/typed text, member-writable, added
+    // once, only ever soft-removed (no edit).
+    {
+      method: "POST",
+      pattern: "/journeys/:id/documents",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyDocumentBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.addDocument({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/documents",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listDocuments({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/documents/:docId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getDocument({
+            journeyId: req.params.id,
+            identity: session.identity,
+            docId: req.params.docId,
+          }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id/documents/:docId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.removeDocument({
+            journeyId: req.params.id,
+            identity: session.identity,
+            docId: req.params.docId,
+          }),
+        };
+      },
+    },
+    // Reports (docs 20 §6) — generation happens in the Gateway, which holds
+    // the LLM credential; POST awaits that call the same way requestMinutes
+    // does, but returns only `{reportId, status}` — the client re-fetches
+    // the finished row via GET, the same "mutating call returns a summary"
+    // convention every other create endpoint here already follows.
+    {
+      method: "POST",
+      pattern: "/journeys/:id/reports",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyReportBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.requestReport({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/reports",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listReports({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/reports/:reportId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getReport({
+            journeyId: req.params.id,
+            identity: session.identity,
+            reportId: req.params.reportId,
+          }),
+        };
+      },
+    },
+    // Contributors (docs 20 §10) — a rollup, not a live query; recoverable
+    // from the source rows (kelabo links + report requests) if it ever
+    // needed rebuilding, never itself authoritative.
+    {
+      method: "GET",
+      pattern: "/journeys/:id/contributors",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listContributors({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
     {
       method: "POST",
       pattern: "/kelabos/:id/stt-token",
@@ -953,28 +1439,33 @@ export async function handler(event, context) {
     const config = await ensureConfig();
     const db = createDb({ config });
     const secrets = createSecrets({ region: config.region });
-    // Not config.region: mail can be sent from another region deliberately, to
-    // give an environment its own SES sandbox status, quota and reputation.
-    const ses = createSesSender({
-      region: config.ses.region || config.region,
-      configurationSet: config.ses.configurationSet,
+    // Resolved per send rather than captured here, which costs nothing on a
+    // self-hosted deployment (the same object every time) and is what lets a
+    // deployment holding its mail settings elsewhere change provider or
+    // rotate a key without a restart. The key is read only when a provider
+    // needs one: SES authenticates with this Lambda's own IAM role, so an SES
+    // deployment never touches the mail secret and does not have to have one.
+    const mailer = createMailer({
+      resolve: async () =>
+        mailSettingsFromConfig(config, config.mail.provider === "ses" ? "" : await secrets.getMailApiKey(config)),
     });
-    const otp = createOtp({ config, db, ses });
+    const otp = createOtp({ config, db, mailer });
     const sessions = createSessions({ config, db, secrets });
     const oidc = createOidc({ config, secrets });
     const auth = createAuthProvider({ otp, oidc, sessions });
     const mcpOauth = createMcpOauth({ config, db, secrets });
     const internal = createInternal({ config, secrets });
     const kelabos = createKelabos({ config, db, internal, secrets });
-    const scheduling = createScheduling({ config, db, mailer: ses, internal });
+    const scheduling = createScheduling({ config, db, mailer, internal });
     const contacts = createContacts({ config, db });
     const huddle = createHuddle({ config, db, internal, kelabos });
     const join = createJoin({ config, db, secrets });
     const joinCodes = createJoinCodes({ config, db });
     const records = createRecords({ config, db });
+    const journeys = createJourneys({ config, db, internal });
     const sttToken = createSttToken({ config, db, secrets });
     const agent = createAgent({ config, db, secrets });
-    defaultApp = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
+    defaultApp = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys });
   }
   return defaultApp(event, context);
 }

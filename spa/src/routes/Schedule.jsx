@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useTypeAnywhere } from '../useTypeAnywhere'
 import { api } from '../api'
 import { useAuth } from '../auth'
@@ -9,6 +9,7 @@ import { Switch } from '../components/ui/Switch'
 import { Icon } from '../components/ui/Icon'
 import { Banner } from '../components/ui/Banner'
 import { EmailPicker } from '../components/EmailPicker'
+import { JourneyPicker } from '../components/JourneyPicker'
 import { DateTimePicker } from '../components/DateTimePicker'
 import { useToast } from '../components/Toaster'
 
@@ -48,6 +49,9 @@ function scheduleError(e) {
     case 'bad_request':
       return e.message || 'Something in the form was not accepted — check the title and time.'
     case 'email_not_verified':
+    case 'email_suppressed':
+    case 'mail_not_configured':
+    case 'mail_failed':
       return 'The kelabo could not be created because invitation email is not set up for this deployment.'
     default:
       if (e?.status >= 500) return 'The server had a problem creating that kelabo. Try again in a moment.'
@@ -60,6 +64,7 @@ export default function Schedule() {
   const navigate = useNavigate()
   const toast = useToast()
   const { identity } = useAuth()
+  const [searchParams] = useSearchParams()
 
   const [title, setTitle] = useState('')
   const [scheduledAt, setScheduledAt] = useState(defaultStart)
@@ -77,6 +82,22 @@ export default function Schedule() {
   useTypeAnywhere(titleRef, state !== 'done')
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
+  // Which journey(s) this kelabo belongs to (docs 20 §11) — same shape and
+  // ?journeyId= pre-fill as NewKelabo.jsx.
+  const [journeys, setJourneys] = useState([])
+  useEffect(() => {
+    const journeyId = searchParams.get('journeyId')
+    if (!journeyId) return
+    api.getJourney(journeyId)
+      .then(j => setJourneys(prev => (prev.some(p => p.id === journeyId) ? prev : [...prev, { id: journeyId, title: j.title }])))
+      .catch(() => {})
+  }, [searchParams])
+  // A linked journey supersedes historyEnabled server-side regardless of
+  // this toggle's value (docs 20 §12.1) — reset rather than just hide, so
+  // the record does not carry a `true` that never applied.
+  useEffect(() => {
+    if (journeys.length > 0 && historyEnabled) setHistoryEnabled(false)
+  }, [journeys.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const hostDomain = useMemo(() => identity?.email?.split('@')[1] || '', [identity])
   const inPast = Number.isFinite(scheduledAt) && scheduledAt < Date.now()
@@ -95,13 +116,17 @@ export default function Schedule() {
         invitees,
         ...(note.trim() ? { note: note.trim() } : {}),
         ...(historyEnabled ? { historyEnabled: true } : {}),
+        ...(journeys.length ? { journeyIds: journeys.map(j => j.id) } : {}),
       })
       setResult(res)
       setState('done')
       // Partial success is still success: the kelabo exists and the link
       // works, so say what failed rather than pretending the whole thing did.
+      const failedJourneys = (res.journeyLinks || []).filter(l => !l.linked)
       if (res.failed?.length) {
         toast(`Scheduled — but ${res.failed.length} invitation${res.failed.length === 1 ? '' : 's'} could not be sent`)
+      } else if (failedJourneys.length) {
+        toast(`Scheduled — but ${failedJourneys.length} journey link${failedJourneys.length === 1 ? '' : 's'} failed`)
       } else {
         toast(invitees.length ? 'Scheduled and invitations sent' : 'Kelabo scheduled')
       }
@@ -234,20 +259,31 @@ export default function Schedule() {
           />
         </div>
 
-        <div className="settings-row settings-row-plain">
-          <div className="sr-main">
-            <div className="sr-title">Let the assistant read my past kelabos</div>
-            <div className="sr-sub">
-              It can answer “what did we decide last time” from the minutes of kelabos you attended — nobody
-              else's. Everyone in the room is told this is on.
-            </div>
-          </div>
-          <Switch
-            checked={historyEnabled}
-            onChange={setHistoryEnabled}
-            ariaLabel="Let the assistant read my past kelabos"
-          />
+        <div className="field">
+          <span className="label">Journey <span className="text-meta">(optional)</span></span>
+          <JourneyPicker value={journeys} onChange={setJourneys} disabled={state === 'saving'} />
+          <p className="form-note">
+            Links this kelabo into that journey — the assistant gets its full context automatically, and it
+            shows up under the journey's own Kelabos tab.
+          </p>
         </div>
+
+        {journeys.length === 0 && (
+          <div className="settings-row settings-row-plain">
+            <div className="sr-main">
+              <div className="sr-title">Let the assistant read my past kelabos</div>
+              <div className="sr-sub">
+                It can answer “what did we decide last time” from the minutes of kelabos you attended — nobody
+                else's. Everyone in the room is told this is on.
+              </div>
+            </div>
+            <Switch
+              checked={historyEnabled}
+              onChange={setHistoryEnabled}
+              ariaLabel="Let the assistant read my past kelabos"
+            />
+          </div>
+        )}
 
         {error && <Banner kind="danger">{error}</Banner>}
 

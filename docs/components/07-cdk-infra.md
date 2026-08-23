@@ -77,7 +77,7 @@ home region + `us-east-1` (CloudFront ACM), via `crossRegionReferences: true`.
 | **CertStack (home region)** | ACM certs for Gateway ALB domain | DNS-validated |
 | **CertStack (us-east-1)** | ACM certs for Portal CloudFront | required in us-east-1 |
 | **DynamoDbStack** | 7 tables (kelabos, users, otp, **refresh**, history, mcp, contacts) + S3 archive bucket | see [08-database.md](../08-database.md) |
-| **SesStack / config** | SES identity + from-address; (sandbox in dev) | OTP email |
+| **SesStack / config** | SES identity + from-address; (sandbox in dev). Not synthesized when `mail.provider` is not `ses` | OTP email |
 | **LambdaStack** | REST API Lambda (Node20); IAM (DynamoDB RW incl. refresh, SES send, Secrets read incl. social OIDC); **no `transcribe:*`** | control plane only |
 | **ApiGatewayStack** | HTTP API `/{proxy+}` → Lambda | no JWT authorizer |
 | **GatewayEcsStack** | ALB + Fargate service (`desiredCount:1`, sized from `config.gateway` — **0.5 vCPU / 1 GB** by default, configurable), `/health`, ALB idle 240s, DockerImageAsset from `gateway/`; **the server-agent worker runs in this task** | the one ECS |
@@ -93,21 +93,40 @@ browser reaches CloudFront and the Gateway ALB by separate names:
 - **CloudFront** — a WAF WebACL, because a distribution has no security group.
   CLOUDFRONT scope exists only in us-east-1, so it is its own stack and the ARN
   crosses regions on the same `crossRegionReferences` path as the portal cert.
-- **Gateway ALB** — a security group. `openListener: false` suppresses the
-  pattern's own `0.0.0.0/0` rules, which matters: a security group is a union,
-  so an open rule beside an allowlist is just an open rule. Port 80 is listed
-  as well as 443 only because `redirectHTTP` opens it.
+- **Gateway ALB** — **listener rules**: the default action becomes a 403, one
+  rule forwards `/internal/*`, and further rules forward the allowed addresses
+  (five per rule — an ALB rule holds five condition values). The security group
+  stays open at 0.0.0.0/0.
+
+**Why not a security group on the ALB.** It was one, and it silently broke the
+product. `/internal/*` is the REST API calling the Gateway server to server:
+ending a kelabo (S3 archive → history row → participant index → minutes),
+ringing a contact, cancelling or rescheduling. The Lambda is not in the VPC, so
+it arrives over the public internet from an AWS-owned address that changes per
+invocation and cannot be allowlisted. Every one of those calls was dropped at
+layer 4; `rest-api` logged `gateway end call failed: TypeError: fetch failed`
+and marked the kelabo ended anyway. **Kelabos ended with no record, no minutes,
+and no error shown to anyone.** Nothing else broke, because the browser's own
+traffic comes from an allowlisted address — which is why it survived a whole
+deployment unnoticed. A refused connection is stronger than a 403, but only if
+it can express the exemption, and a security group cannot name a path.
+
+Filtering `/internal/*` by source address bought nothing anyway: it is already
+authenticated by the internal JWT, signed with the cookie key and carrying its
+own `aud` (`INTERNAL_JWT_AUD`), which every verifier checks.
 
 Both families are carried. CloudFront answers on IPv6 by default, so a list
 holding only someone's IPv4 address blocks them the moment their browser
-prefers IPv6 — and that reads as an outage, not as a rule.
+prefers IPv6 — and that reads as an outage, not as a rule. A source-ip
+condition takes both families in one list, so the Gateway needs no split.
 
 `make allow-ip` / `allow-list` / `allow-rm` (`scripts/allowlist.sh`) write
-`config/kelabo.json` *and* edit the IPSets and the security group live, so a new
-address works in seconds and the next deploy re-asserts the same thing. The two
-exceptions are the first lock and the last unlock: those add or remove a stack
-and the ALB's open rule, which only a deploy can do, and the script says so
-instead of appearing to succeed.
+`config/kelabo.json` *and* edit the IPSets and the listener rules live, so a new
+address works in seconds and the next deploy re-asserts the same thing. Three
+things still need a deploy, and the script says so rather than appearing to
+succeed: the first lock and the last unlock (they add or remove a stack and
+flip the ALB's default action), and growing the list past what the existing
+rules hold — a sixth address needs a sixth rule, and rules are CDK's.
 
 **The execute-api bypass, and `api.originSecret`.** API Gateway always answers
 on its own `https://<id>.execute-api.<region>.amazonaws.com` URL, which reaches
@@ -225,9 +244,11 @@ Dev may use inline values in local profiles; prod always references secrets.
 
 - **REST Lambda:** DynamoDB RW (kelabos/users/otp/refresh/mcp/contacts), read
   history + read S3 archive (plus narrow `dynamodb:DeleteItem` on history and
-  `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`,
-  Secrets read (deepgram, cookie-key, oidc-*) and Create/Put/Get/Delete/Describe
-  under the `kelabo/<env>/mcp/` prefix (host MCP tokens). No `transcribe:*`.
+  `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`
+  **when `mail.provider` is `ses`** and a read grant on `kelabo/<env>/mail`
+  when it is not, Secrets read (deepgram, cookie-key, oidc-*) and
+  Create/Put/Get/Delete/Describe under the `kelabo/<env>/mcp/` prefix (host MCP
+  tokens). No `transcribe:*`.
 - **Gateway task role:** DynamoDB — kelabos RW, history RW (incl.
   `participant-index`), mcp read + narrow `dynamodb:PutItem` (persists rotated
   OAuth tokens; cannot delete user config) + encrypt/decrypt on the mcp table's
@@ -250,6 +271,16 @@ cdk deploy -c env=prod  --all
   invalidation.
 - Gateway and Rig are Docker images (DockerImageAsset / ECR); the agent bridge is
   an npm package (`@kelabome/agents`), not an image.
+- **SES is the default, not the only option.** `mail.provider` selects a
+  transport in `rest-api/src/mail/`; `mailersend` is the other one today. It
+  exists because SES production access is granted case by case and is
+  regularly refused, and a permanently sandboxed account cannot run a
+  deployment. Choosing another provider also turns `ses.createIdentity` off:
+  the SES stack publishes `v=spf1 include:amazonses.com -all`, which names the
+  wrong sender for anyone else and would fail their mail. Switching an
+  existing deployment stops synthesizing that stack but does not delete the
+  deployed one — `cdk destroy kelabo-<env>-ses` is deliberately manual,
+  because it takes DNS records with it.
 - SES must leave sandbox for prod (verified domain + production access); dev/staging
   can use verified addresses. Sandbox status, quota, reputation and the
   bounce/complaint suppression list are all **account+region** scoped and nothing
@@ -269,8 +300,20 @@ cdk deploy -c env=prod  --all
   against the *envelope* sender, and SES's default envelope is
   `<id>@<region>.amazonses.com`, so this record does **not** authenticate our own
   mail and is not what makes DMARC pass — Easy DKIM is. It denies the domain to
-  anyone else's envelope. SPF *alignment* would need a custom MAIL FROM
-  subdomain, which neither knob provides.
+  anyone else's envelope. SPF *alignment* needs a custom MAIL FROM subdomain,
+  which is `ses.mailFrom`'s job, not these knobs'.
+- **`ses.mailFrom` sets a custom MAIL FROM subdomain, the missing half of the
+  SPF story.** `true` derives `mail.<from-domain>`; a string names the
+  subdomain outright (it must be a subdomain of the verified identity — SES
+  rejects anything else at deploy). The envelope sender becomes that subdomain
+  instead of amazonses.com, so SPF authenticates the deployment's own mail and
+  *aligns* for DMARC: messages then pass on SPF and DKIM both, which is what a
+  deliverability or SES production-access review means by "fully set up". The
+  stack publishes the subdomain's MX (`feedback-smtp.<region>.amazonses.com`,
+  which keeps async bounces routing back into SES) and its SPF TXT beside the
+  DKIM CNAMEs. `BehaviorOnMxFailure` is `USE_DEFAULT_VALUE`: if the MX record
+  ever disappears, SES falls back to the amazonses.com envelope rather than
+  refusing to send — losing alignment beats losing sign-in codes.
 - **Two environments may share a hosted zone, but only one may own its mail
   records.** DKIM CNAMEs, the apex SPF and `_dmarc` are singletons per *domain*,
   while portal/gateway records are per *subdomain* and never collide. So

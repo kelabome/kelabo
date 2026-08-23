@@ -21,6 +21,10 @@ function fromEnv() {
       mcp: e.KELABO_TABLE_MCP,
       refresh: e.KELABO_TABLE_REFRESH,
       contacts: e.KELABO_TABLE_CONTACTS,
+      // Read: context for a journey report (docs 20 §6). Write: the report
+      // itself, and the contributor rollup counters — both land here because
+      // the Gateway is the one place the LLM credential is readable at all.
+      journeys: e.KELABO_TABLE_JOURNEYS,
     },
     contacts: { external: e.KELABO_CONTACTS_EXTERNAL === "true" },
     // May a link-joined guest receive the spoken transcript? Default yes: on a
@@ -82,6 +86,7 @@ function fromBase(base) {
       mcp: base.tableNames.mcp,
       refresh: base.tableNames.refresh,
       contacts: base.tableNames.contacts,
+      journeys: base.tableNames.journeys,
     },
     contacts: { external: !!base.contacts?.external },
     guestTranscriptAccess: base.guestTranscriptAccess !== false,

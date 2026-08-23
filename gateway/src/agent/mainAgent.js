@@ -93,6 +93,24 @@ function briefTitle(brief, query) {
   return truncate(String(brief?.title || brief?.objective || query || "Researching"), 80);
 }
 
+/**
+ * The two fields the whole downstream pipeline assumes exist: the worker
+ * echoes `task_id` back so its result can be matched to this dispatch, and
+ * a worker with no `objective` has nothing to look up. Everything else in
+ * the brief (`context`/`expected`/`kind`/`to`/`constraints`) can genuinely
+ * be omitted. The dispatch tool's own JSON schema marks all three of
+ * `task_id`/`objective`/`language` `required`, but that is a hint to the
+ * provider, not something this codebase enforces — nothing between the
+ * model's tool call and `SubAgent.run()` ever checked it before.
+ */
+function missingBriefFields(brief) {
+  if (!brief || typeof brief !== "object") return ["task_id", "objective"];
+  const missing = [];
+  if (!String(brief.task_id ?? "").trim()) missing.push("task_id");
+  if (!String(brief.objective ?? "").trim()) missing.push("objective");
+  return missing;
+}
+
 /** Why a worker's result never made it to the board, in one plain sentence. */
 function skipReason(result) {
   const gaps = String(result?.gaps ?? "").trim();
@@ -114,7 +132,7 @@ function skipReason(result) {
  * itself — a sub-agent's output is the board post.
  */
 export class MainAgent {
-  constructor({ llm, smallModel, subAgentModel, subAgentDeps, maxDispatchPerTurn, hostLanguage, history, log, debug }) {
+  constructor({ llm, smallModel, subAgentModel, subAgentDeps, maxDispatchPerTurn, hostLanguage, history, journeys, log, debug }) {
     this.llm = llm;
     this.smallModel = smallModel;
     this.subAgentModel = subAgentModel;
@@ -137,6 +155,11 @@ export class MainAgent {
     this.system = mainAgentSystemPrompt({
       mcpServers: subAgentDeps?.mcp?.servers ?? [],
       history: history ?? [],
+      // Journey context (docs 20 §12.1) — independent of `history` above:
+      // that is the host's own past kelabos, this is a deliberately-linked
+      // shared container. Same "fixed for the kelabo, goes in the system
+      // prompt not the thread" reasoning as history.
+      journeys: journeys ?? [],
     });
     this.thread = []; // persistent message array (excludes system)
     this.transcriptLen = 0;
@@ -306,6 +329,33 @@ export class MainAgent {
       // MCP credentials and can throw — lives inside this async function, so no
       // failure path can skip the `finally` that closes the stream.
       (async () => {
+        // An empty or near-empty brief (an unparseable tool-call-arguments
+        // string — see llm.js's own new logging for that side of it — or a
+        // small model calling the tool without filling it in) must never
+        // reach a SubAgent: it has nothing to research, and running one
+        // anyway wastes a full LLM round trip on a doomed call AND produces
+        // a confusing failure card in an unpredictable language (the
+        // sub-agent's own language rule falls back to "detect it from the
+        // brief," which an empty brief gives it nothing to detect from).
+        // Caught here instead: a deterministic, English, immediately
+        // diagnosable result, with the actual missing fields logged
+        // server-side rather than only visible as prose on the board.
+        const missing = missingBriefFields(brief);
+        if (missing.length) {
+          this.log?.("main_dispatch_brief_invalid", { kelaboId, taskId: brief?.task_id, missing, briefKeys: Object.keys(brief || {}) });
+          return {
+            task_id: brief?.task_id,
+            status: "error",
+            title,
+            to: brief?.to || "all",
+            answer: "Research failed: the lookup request was incomplete and could not be run.",
+            confidence: 0,
+            sources: [],
+            gaps: `missing_fields:${missing.join(",")}`,
+            tool_trace: [],
+            usage: null,
+          };
+        }
         let sub = null;
         try {
           sub = new SubAgent({

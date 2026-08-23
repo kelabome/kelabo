@@ -112,6 +112,54 @@ await test("MainAgent dispatches → sub-agent outputs become board cards", asyn
   assert.deepEqual(ids, ["tu1", "tu2"]);
 });
 
+await test("MainAgent refuses an empty/malformed dispatch brief before it ever reaches a SubAgent", async () => {
+  // Reproduces a live production bug: a dispatch_subagent tool call whose
+  // arguments came back empty (a truncated/unparseable arguments string in
+  // the OpenAI-compatible adapter — see llm.js's own new parse-failure
+  // logging for that half — or a small model calling the tool without
+  // filling it in) used to reach SubAgent.run({}) unvalidated, which then
+  // produced a confusing, sometimes non-English "the brief is empty"
+  // failure card. `strong` throwing here proves no SubAgent is ever
+  // constructed for either shape.
+  const mainLlm = stubLlm([{
+    text: "",
+    toolCalls: [
+      { id: "tu1", name: "dispatch_subagent", input: {} },
+      { id: "tu2", name: "dispatch_subagent", input: { objective: "no task_id given", to: "all", language: "English" } },
+    ],
+  }]);
+  const strong = { async completeRaw() { throw new Error("must never be called for an invalid brief"); } };
+  const logged = [];
+  const agent = new MainAgent({
+    llm: mainLlm,
+    smallModel: "flash",
+    subAgentModel: "pro",
+    subAgentDeps: { strong, webSearch: async () => [], webFetch: async () => ({}), makeMcpQuery: () => async () => ({}), capabilities: ["web"], mcp: { servers: [] } },
+    log: (event, data) => logged.push({ event, data }),
+    debug: () => {},
+  });
+
+  const out = [];
+  for await (const c of agent.runTurn({ kelaboId: "m1", trigger: transcript[0], query: "what's fluxview?", transcript })) out.push(c);
+
+  const skipped = out.filter((c) => c.status === "skipped");
+  assert.equal(skipped.length, 2, "both invalid dispatches get a skipped card, not a hang or a crash");
+  for (const card of skipped) {
+    assert.equal(card.reason, "Research failed — the lookup request was incomplete and could not be run.", "deterministic, English, and never model-generated — the exact failure mode that used to come back in whatever language a confused sub-agent picked");
+  }
+
+  const invalidLogs = logged.filter((l) => l.event === "main_dispatch_brief_invalid");
+  assert.equal(invalidLogs.length, 2);
+  assert.deepEqual(invalidLogs[0].data.missing.sort(), ["objective", "task_id"], "a fully empty brief is missing both");
+  assert.deepEqual(invalidLogs[1].data.missing, ["task_id"], "only the one actually missing field is named");
+
+  // The thread still gets a tool_result for every tool_use, or the next
+  // request to the provider is malformed and the kelabo's thread is dead —
+  // this must hold even for a dispatch that never ran.
+  const toolResultMsg = agent.thread.find((m) => Array.isArray(m.content) && m.content[0]?.type === "tool_result");
+  assert.equal(toolResultMsg.content.length, 2);
+});
+
 await test("MainAgent stays silent (NO_POST) → no board cards, recorded in thread", async () => {
   const mainLlm = stubLlm([{ text: "NO_POST: small talk", toolCalls: [] }]);
   const agent = new MainAgent({
@@ -907,6 +955,37 @@ await test("the OpenAI adapter never sends an unanswered tool call", async () =>
     const idx = roles.indexOf("assistant");
     assert.equal(roles[idx + 1], "tool", "the dangling call is answered before the next turn");
     assert.equal(body.messages[idx + 1].tool_call_id, "tu1");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await test("the OpenAI adapter logs a malformed tool-call arguments string instead of silently defaulting to {}", async () => {
+  // The other half of the same production bug: this failure was previously
+  // indistinguishable after the fact from a model genuinely emitting no
+  // arguments — both silently became input:{}. Now it leaves a trace.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{
+        message: {
+          content: "",
+          tool_calls: [{ id: "tu1", function: { name: "dispatch_subagent", arguments: '{"task_id": "t1", "objective": ' } }],
+        },
+      }],
+    }),
+  });
+  const logged = [];
+  try {
+    const llm = createLlmProvider({ provider: "deepseek", model: "m" }, { apiKey: "k", log: (event, data) => logged.push({ event, data }) });
+    const res = await llm.completeRaw({ model: "m", messages: [{ role: "user", content: "hi" }] });
+    assert.deepEqual(res.toolCalls[0].input, {}, "still falls back to {} — behavior is unchanged, only the visibility is new");
+    const entry = logged.find((l) => l.event === "llm_tool_args_parse_failed");
+    assert.ok(entry, "the parse failure is logged, not swallowed");
+    assert.equal(entry.data.tool, "dispatch_subagent");
+    assert.ok(entry.data.rawArgs.includes('"task_id": "t1"'), "the actual malformed string is captured for diagnosis");
   } finally {
     globalThis.fetch = realFetch;
   }

@@ -105,6 +105,73 @@ const TOOLS = [
     description: "Detach from the kelabo. Transcript stops arriving.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "kelabo_journey_info",
+    description:
+      "Details of the journey this kelabo is linked to: title, visibility, status, description, health/progress, counts. If the kelabo is linked to more than one journey, lists them and asks you to call again with journeyId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if this kelabo is linked to more than one. Omit if there is only one." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_timeline",
+    description:
+      "The journey's timeline: description changes, status updates, kelabos linked/unlinked, reports, board messages and documents — newest first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if this kelabo is linked to more than one." },
+        entryType: {
+          type: "string",
+          enum: ["description", "status", "kelabo_linked", "kelabo_unlinked", "report", "board_message", "document"],
+          description: "Only entries of this kind.",
+        },
+        before: { type: "number", description: "Cursor: only entries strictly before this epoch-ms timestamp." },
+        limit: { type: "number", description: "Max entries to return (default 20)." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_board",
+    description: "The journey's pinned board messages — persistent notes, distinct from this kelabo's own board.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if this kelabo is linked to more than one." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_report_submit",
+    description:
+      "Submit your own synthesis as a journey report, stored directly with no server-side LLM call. Use it to answer a free-text question from the journey's accumulated content — read it first with kelabo_journey_info, kelabo_journey_timeline, kelabo_journey_board and kelabo_history.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if this kelabo is linked to more than one." },
+        question: { type: "string", description: "The question this report answers." },
+        answer: { type: "string", description: "Your synthesized answer." },
+      },
+      required: ["question", "answer"],
+    },
+  },
+  {
+    name: "kelabo_journey_post",
+    description:
+      "Write or edit a pinned message on the journey's board. Gated by the journey owner's aiCanPost setting, off by default — a clear refusal, not a silent no-op, when it is off.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if this kelabo is linked to more than one." },
+        content: { type: "string", description: "The message body." },
+        msgId: { type: "string", description: "An existing message's id, to edit it in place. Omit to post a new one." },
+      },
+      required: ["content"],
+    },
+  },
 ];
 
 const ok = (text) => ({ content: [{ type: "text", text }] });
@@ -156,6 +223,16 @@ export function createMcpServer({
           return ok(await handlers.minutes(args));
         case "kelabo_leave":
           return ok(await handlers.leave());
+        case "kelabo_journey_info":
+          return ok(await handlers.journeyInfo(args));
+        case "kelabo_journey_timeline":
+          return ok(await handlers.journeyTimeline(args));
+        case "kelabo_journey_board":
+          return ok(await handlers.journeyBoard(args));
+        case "kelabo_journey_report_submit":
+          return ok(await handlers.journeyReportSubmit(args));
+        case "kelabo_journey_post":
+          return ok(await handlers.journeyPost(args));
         default:
           return fail(`unknown tool: ${req.params.name}`);
       }

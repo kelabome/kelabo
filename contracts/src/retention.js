@@ -16,14 +16,17 @@
  * rather than silently rolling forward into March — rolling forward would make
  * the window slightly SHORTER than asked and delete more than intended.
  *
- * @param {number} value - whole units, >= 1
+ * @param {number} value - whole units, 1..99 regardless of unit
  * @param {"days"|"weeks"|"months"|"years"} unit
  * @param {number} [now] - epoch ms, injectable for tests
  * @returns {number} epoch ms
  */
 export function cutoffFromAge(value, unit, now = Date.now()) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 1) throw new Error(`invalid retention value: ${value}`);
+  // Same 1..99 bound purgeRecordsBodySchema enforces at the API boundary,
+  // restated here so this pure function can't be handed something the
+  // schema would have rejected by any future direct caller.
+  if (!Number.isFinite(n) || n < 1 || n > 99) throw new Error(`invalid retention value: ${value}`);
   const d = new Date(now);
 
   switch (unit) {

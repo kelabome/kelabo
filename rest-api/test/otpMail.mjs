@@ -7,15 +7,23 @@
 // gets a broken box. Nothing failed: the mail sent, the code worked, only the
 // picture was missing, and the cause was three stacks away in infra.
 //
-// It is now a CID part, which means `sendOtp` hand-builds MIME, and hand-built
-// MIME fails in ways SES will not tell you about either: a bare LF, a line over
-// 998 characters, or the image nested as a third *alternative* rather than as a
-// sibling of the alternative (which makes clients offer the logo INSTEAD of the
-// text, and some then show the picture alone). None of that is visible from the
-// send call, and the stub in smoke.mjs never renders a template, so this reads
-// the bytes.
+// It is now a CID part, which means the SES transport hand-builds MIME, and
+// hand-built MIME fails in ways SES will not tell you about either: a bare LF,
+// a line over 998 characters, or the image nested as a third *alternative*
+// rather than as a sibling of the alternative (which makes clients offer the
+// logo INSTEAD of the text, and some then show the picture alone). None of that
+// is visible from the send call, and the stub in smoke.mjs never renders a
+// template, so this reads the bytes.
+//
+// The message and its encoding are now separate modules — MailerSend takes the
+// same inline logo as a JSON attachment and needs no MIME at all — so this
+// composes the two the way `mail/ses.js` does. `test/mail.mjs` covers the
+// provider-neutral half; this file stays about the bytes SES receives.
 import assert from "node:assert/strict";
-import { buildOtpMessage } from "../src/otp.js";
+import { buildMimeMessage } from "../src/mail/mime.js";
+import { otpMessage } from "../src/mail/messages.js";
+
+const buildOtpMessage = ({ to, code, from }) => buildMimeMessage({ to, from, ...otpMessage({ code }) });
 
 const CRLF = "\r\n";
 const raw = buildOtpMessage({ to: "someone@example.com", code: "482913", from: "otp@kelabo.me" });

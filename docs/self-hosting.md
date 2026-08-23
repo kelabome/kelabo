@@ -70,9 +70,47 @@ Kelabo deliberately buys rather than builds four things:
 3. **SES sandbox**: new AWS accounts can only send email to addresses you have
    individually verified. That is fine for testing (verify your own address in
    the SES console), but before the whole team signs in, request **production
-   access** in SES (a one-page form, usually approved within a day). Sign-in
-   codes are the only mail Kelabo sends.
+   access** in SES (a one-page form, usually approved within a day).
+
+   **If that request is refused, you are not stuck.** Production access is
+   granted case by case and refusals are common, and a permanently sandboxed
+   account cannot run a deployment — everyone would have to be verified one at
+   a time, forever. Set `mail.provider` to another provider instead (§D2 and
+   §C2a); nothing else about the deployment changes.
 4. One-time per account/region: bootstrap the CDK (step D3 below).
+
+### C2a. MailerSend (only if you are not sending through SES)
+
+Skip this unless C1.3 went badly. SES is the default and needs no account, no
+key and no step here — the Lambda authenticates with its own IAM role.
+
+1. Create an account at mailersend.com and add your sending domain, then
+   publish the DNS records it gives you (SPF, DKIM and a return-path CNAME) in
+   the Route 53 zone from C1.2. Wait for the domain to read as **verified** in
+   their dashboard; until it does, every send is refused and Kelabo reports
+   `mail_not_configured`.
+2. Create an API token with the **Email → full access** permission. Nothing
+   else is used.
+3. `make mail-secret env=<env> provider=mailersend key=…` writes it to
+   Secrets Manager (`kelabo/<env>/mail`), then set `mail.provider` in
+   `config/kelabo.json` (§D2) and `make backend env=<env>`.
+
+Two things that differ from SES and are worth knowing before you debug them:
+
+- **Their API answers `202 Accepted` for mail it does not send** — a recipient
+  on your account's suppression list, or an account with sending paused, comes
+  back as a success with a warning in the body. Kelabo reads the body and
+  fails the request instead, so a suppressed address shows up as
+  `email_suppressed` rather than as a code that never arrives. If someone
+  cannot sign in, look for them on the suppression list first.
+- **The SES `mail` records are not just unnecessary, they are wrong.** Setting
+  `mail.provider` to anything but `ses` stops Kelabo creating the SES stack,
+  because the SPF record that stack publishes
+  (`v=spf1 include:amazonses.com -all`) names Amazon as the only permitted
+  sender for your domain and would fail every message MailerSend sends. If you
+  are switching an existing deployment, `cdk destroy kelabo-<env>-ses` after
+  the switch — that is deliberately not automatic, since it deletes DNS
+  records.
 
 ### C2. Deepgram
 
@@ -126,9 +164,11 @@ All configuration is one file. Nothing anywhere else needs editing.
    | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time like the domain, so changing it needs `make frontend` |
    | `environments.<env>.allowIps` | empty (the default) means anyone can reach the deployment; sign-in is still the access control. A list of CIDRs closes it to those sources only — your corporate egress range while a pilot runs, say. It covers the portal, the API and the Gateway; add IPv6 ranges too if your network has them, or a browser preferring IPv6 is locked out. Manage it with `make allow-ip` / `allow-list` / `allow-rm` rather than by hand |
    | `environments.<env>.api.originSecret` | `off` (default), `send` or `require`. API Gateway also answers on its own `execute-api` URL, which reaches the same Lambda without passing CloudFront or the WAF — so with `allowIps` set and this left `off`, your portal is closed and your entire API is not. `require` makes CloudFront prove itself with a secret header. Roll it out in that order: `make origin-secret`, then `send` + deploy, then `require` + deploy. Going straight to `require` takes the API down for the length of a deploy, because the Lambda stack deploys before CloudFront |
-   | `environments.<env>.ses.fromAddress` | e.g. `kelabo@mycompany.com` — where sign-in codes come from |
-   | `environments.<env>.ses.createIdentity` | leave unset. Set `false` only when another env in the same account already verified the sending domain (SES identities are account-scoped; two stacks can't create the same one) |
+   | `environments.<env>.mail.fromAddress` | e.g. `kelabo@mycompany.com` — where sign-in codes and invitations come from. (Older configs say `ses.fromAddress`; that still works and means the same thing) |
+   | `environments.<env>.mail.provider` | `ses` (the default) or `mailersend`. Only worth changing if SES production access was refused (§C1.3) — see §C2a, which is also where the API key comes from. A value that is not a known provider fails at config load rather than at the first sign-in |
+   | `environments.<env>.ses.createIdentity` | leave unset. Set `false` only when another env in the same account already verified the sending domain (SES identities are account-scoped; two stacks can't create the same one). Any non-SES `mail.provider` turns it off regardless |
    | `environments.<env>.ses.dmarc` | omit unless your sending domain has no DMARC record yet — it is one record per domain, so publishing a second one where your mail provider already wrote one fails the deploy. `true` publishes `v=DMARC1; p=none;` beside the DKIM CNAMEs: monitor-only, which is the sole safe opening policy, since anything stricter quarantines mail from senders you have not yet inventoried. `{ "policy": "none", "rua": "mailto:…" }` to add an aggregate-report address — but only one you actually read, and if it is at another domain that domain must publish a `<sender>._report._dmarc` record or the reports go nowhere |
+   | `environments.<env>.ses.mailFrom` | optional. `true` publishes a custom MAIL FROM subdomain (`mail.<your-domain>`) with its MX and SPF records, so SES's envelope sender is your own domain and mail passes DMARC on SPF *and* DKIM rather than DKIM alone — worth setting before requesting production access (§C1). A string names a different subdomain |
    | `environments.<env>.ses.region` | leave unset — mail then goes from the env's own region. Set it only to put an environment's mail in a *different* region, which is the one way to give it its own sandbox status, quota, reputation and bounce list (§C1). The identity must be verified in that region, and production access requested there separately |
 
    Leave `auth.socialProviders` as `[]` — work-email sign-in is the

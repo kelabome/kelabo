@@ -784,6 +784,18 @@ h1, h2, h3, h4, h5, h6 { line-height: var(--leading-tight); letter-spacing: -.01
   transition: background .12s, color .12s;
   min-width: 0;
 }
+/* Every other .sidebar-item is a Link (an <a>); "New journey" is a <button>
+   because it opens a modal rather than navigating (docs 20 §11) — reset the
+   browser's own button chrome so it is not visually distinguishable from
+   its siblings. Reset font-family/size/line-height only, not the `font`
+   shorthand — that also resets font-weight, and `button.sidebar-item`'s
+   higher specificity (element+class) than `.sidebar-new-alt` (class-only)
+   would then always win regardless of source order, silently overriding
+   the 500 weight every other `-alt` item gets and leaving this one
+   noticeably thinner. */
+button.sidebar-item {
+  width: 100%; border: 0; background: none; font-family: inherit; font-size: inherit; line-height: inherit; text-align: left; cursor: pointer;
+}
 .sidebar-item:hover { background: var(--surface-3); color: var(--text); text-decoration: none; }
 .sidebar-item.active { background: var(--surface-3); color: var(--text); font-weight: 600; }
 
@@ -1748,6 +1760,16 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .action-row { display: flex; align-items: center; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-1); }
 /* …and the left-aligned variant that sits under a panel (e.g. "Download") */
 .action-row-start { justify-content: flex-start; margin-top: var(--space-4); }
+/* Journey tab panels (Timeline/Kelabos/Board/Documents/Reports/Accessors,
+   docs 20 §13): every panel is now a `vstack-sm` flex column so its own
+   rows always get a consistent gap, including before the first one — but a
+   flex formatting context also blocks the block-level margin collapse a
+   plain section would get for free between `.tabs`' own margin-bottom and
+   an `.action-row-start`'s margin-top, nearly doubling the visible gap
+   above the row for any tab that has one. Zero it back to the same "one
+   collapsed gap" look every panel without a leading action-row already
+   has. */
+.journey-tab > .action-row-start:first-child { margin-top: 0; }
 /* header row above a list/timeline */
 .panel-toolbar { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); flex-wrap: wrap; }
 
@@ -2519,7 +2541,10 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   animation: menu-in .12s ease-out both;
 }
 .dtp-presets { display: flex; gap: 6px; margin-bottom: var(--space-3); }
-.dtp-presets .chip-btn.is-on { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+/* Generalised rather than scoped to .dtp-presets: any chip-btn toggle (the
+   journey timeline's type filter, docs 20 §9.3) gets the same "selected"
+   look, not a second one. */
+.chip-btn.is-on { background: var(--accent); color: var(--accent-on); border-color: transparent; }
 
 .dtp-body { display: flex; gap: var(--space-3); }
 .dtp-cal { width: 15.75rem; }

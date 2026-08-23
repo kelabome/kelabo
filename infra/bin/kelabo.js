@@ -63,7 +63,15 @@ const ddb = new DynamoDbStack(app, `${prefix}-ddb`, { ...synthProps, env: homeEn
 // another region is the only way to keep it from affecting another
 // environment's — and the identity has to be verified where the mail is sent
 // from, not where the rest of the environment lives.
-if (cfg.ses.createIdentity !== false) {
+//
+// `cfg.ses.createIdentity` is also false whenever `mail.provider` is not SES:
+// this stack publishes an SPF record naming amazonses.com as the only
+// permitted sender, which would fail every message another provider sends.
+// Switching an existing deployment away from SES therefore stops synthesizing
+// this stack but does not delete the deployed one — `cdk destroy
+// kelabo-<env>-ses` is a deliberate step, because it takes the DNS records
+// with it.
+if (cfg.ses.createIdentity) {
   const ses = new SesStack(app, `${prefix}-ses`, {
     ...synthProps,
     env: sesEnv,

@@ -13,6 +13,7 @@ import { RTC_PATHS, handleRtc } from "./rtc/routes.js";
 import { handleCaptionPost, handleCaptionRename, handleCaptionHistory, transcriptEntitled, readJson, send } from "./caption.js";
 import { endKelabo, cancelKelabo, rescheduleKelabo } from "./archive.js";
 import { generateMinutes } from "./minutes.js";
+import { generateJourneyReport } from "./journeys.js";
 import { log, logError } from "./log.js";
 
 export function createGateway(c) {
@@ -143,6 +144,7 @@ async function route(c, req, res) {
     const key = await c.getCookieKey();
     const payload = verifyInternalJwt(bearerToken(req), key);
     if (!payload) return send(res, 401, { error: "unauthenticated" });
+    const body = await readJson(req).catch(() => ({}));
     c.log("internal_request", { kelaboId, action, sub: payload.sub });
     const handlers = {
       end: endKelabo,
@@ -150,7 +152,26 @@ async function route(c, req, res) {
       cancel: cancelKelabo,
       reschedule: rescheduleKelabo,
     };
-    const result = await handlers[action](c, kelaboId);
+    // `retry` reaches `endKelabo` only: the control plane sets it when a
+    // previous end reached DynamoDB but never reached here, so the kelabo is
+    // already "ended" and has no record. Without it the retry would 409 on the
+    // status it set itself.
+    const result = await handlers[action](c, kelaboId, { retry: body?.retry === true });
+    return send(res, result.status, result.body);
+  }
+
+  // Journey reports (docs 20 §6) — a bounded synthesis over rows already in
+  // DynamoDB, run inline (no worker thread, no dev-tunnel): the LLM
+  // credential lives here, which is the entire reason this call exists.
+  const reportMatch = path.match(/^\/internal\/journeys\/([^/]+)\/report$/);
+  if (method === "POST" && reportMatch) {
+    const [, journeyId] = reportMatch;
+    const key = await c.getCookieKey();
+    const payload = verifyInternalJwt(bearerToken(req), key);
+    if (!payload) return send(res, 401, { error: "unauthenticated" });
+    const body = await readJson(req).catch(() => ({}));
+    c.log("internal_request", { journeyId, action: "report", sub: payload.sub, reportId: body?.reportId });
+    const result = await generateJourneyReport(c, journeyId, { reportId: body?.reportId, question: body?.question });
     return send(res, result.status, result.body);
   }
 
