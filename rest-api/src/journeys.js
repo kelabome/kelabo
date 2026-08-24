@@ -336,11 +336,22 @@ export function createJourneys({ config, db, internal }) {
     return { journeyId, kelaboId, linked: true };
   }
 
+  /**
+   * Unlink is authorised two ways: a journey member (the ordinary case), or
+   * the KELABO's own host. The host authority exists because of what linking
+   * permits: any participant of a kelabo may link it into a journey the host
+   * cannot see (linkKelabo requires journey membership plus mere kelabo
+   * membership), and `purgeOne` refuses to purge a linked kelabo — so
+   * without this, a participant could permanently block the host's own
+   * record deletion (docs 20 §14.3). The host is read off the link's
+   * snapshot: a kelabo's host never changes, and the live META may already
+   * have expired by the time the host comes to delete the record.
+   */
   async function unlinkKelabo({ journeyId, identity, kelaboId }) {
     const meta = await requireJourney(journeyId);
-    await requireMember(meta, identity);
     const link = await db.getJourneyLink(journeyId, kelaboId);
     if (!link) throw err(404, "kelabo_not_found");
+    if (link.hostIdentitySnapshot !== identity) await requireMember(meta, identity);
     await db.unlinkKelaboFromJourney({ journeyId, kelaboId, now: Date.now() });
     await db.putJourneyTimelineEntry(journeyId, {
       type: "kelabo_unlinked",

@@ -207,9 +207,24 @@ export function createRecords({ config, db, s3 }) {
     // §14.3) — the host must unlink it from every journey first. This only
     // ever runs on the host-purge path (the caller has already confirmed
     // `isHost`); a participant dropping their own copy never reaches here
-    // and is never blocked by it.
+    // and is never blocked by it. (The host can always perform that unlink,
+    // journey member or not — see unlinkKelabo's host authority.)
+    //
+    // Only LIVE links block. `deleteJourney` removes the kelabo-side mirrors
+    // best-effort, so a mirror can outlive its journey — and a link whose
+    // journey no longer exists has nothing to protect and no page left to
+    // unlink it from. Treat it as no link and delete it in passing, so one
+    // swallowed mirror-delete years ago cannot block a purge forever.
     const journeyLinks = await db.listKelaboJourneyLinks(kelaboId).catch(() => []);
-    if (journeyLinks.length) throw err(409, "kelabo_in_journey");
+    let liveLinks = 0;
+    for (const link of journeyLinks) {
+      // No catch on the read: a transient failure must abort the purge (it
+      // retries), not read as "journey gone" and delete a live mirror.
+      const journey = await db.getJourneyMeta(link.journeyId);
+      if (journey) liveLinks++;
+      else await db.deleteKelaboJourneyMirror(kelaboId, link.journeyId).catch(() => {});
+    }
+    if (liveLinks) throw err(409, "kelabo_in_journey");
 
     if (row.s3Key) {
       // A missing object is a success for our purposes — the goal is "gone".
