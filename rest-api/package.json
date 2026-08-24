@@ -7,7 +7,7 @@
   "main": "src/index.js",
   "scripts": {
     "check": "for f in src/*.js test/*.mjs; do node --check \"$f\" || exit 1; done",
-    "test": "node test/smoke.mjs && node test/reserved.mjs && node test/mail.mjs && node test/otpMail.mjs && node test/journeys.mjs",
+    "test": "node test/smoke.mjs && node test/reserved.mjs && node test/mail.mjs && node test/otpMail.mjs && node test/journeys.mjs && node test/closeAccount.mjs",
     "build": "esbuild src/index.js --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.mjs --external:@aws-sdk/*"
   },
   "dependencies": {

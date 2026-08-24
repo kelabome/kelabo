@@ -385,6 +385,49 @@ export function createDb({ config, client } = {}) {
     );
   }
 
+  /**
+   * Account closure: remove everything the contacts table knows about one
+   * person. Their own partition whole (FAV#, PEER#, anything later), plus the
+   * mirror `PEER#<identity>` row on each peer's partition — a two-sided
+   * relationship must not keep naming someone who is gone. What this cannot
+   * reach: OTHER people's one-way FAV# rows pointing at this identity — they
+   * are private to their owners and have no index; they are those owners'
+   * address-book entries, not this account's data. Returns rows deleted.
+   */
+  async function deleteContactsForIdentity(identity) {
+    let deleted = 0;
+    let cursor;
+    do {
+      const res = await doc.send(
+        new QueryCommand({
+          TableName: T.contacts,
+          KeyConditionExpression: "PK = :pk",
+          ExpressionAttributeValues: { ":pk": `CONTACT#${identity}` },
+          ...(cursor ? { ExclusiveStartKey: cursor } : {}),
+        })
+      );
+      for (const row of res.Items || []) {
+        if (typeof row.SK === "string" && row.SK.startsWith("PEER#") && row.peer) {
+          await doc
+            .send(
+              new DeleteCommand({
+                TableName: T.contacts,
+                Key: { PK: `CONTACT#${row.peer}`, SK: `PEER#${identity}` },
+              })
+            )
+            .then(() => deleted++)
+            .catch(() => {});
+        }
+        await doc.send(
+          new DeleteCommand({ TableName: T.contacts, Key: { PK: row.PK, SK: row.SK } })
+        );
+        deleted++;
+      }
+      cursor = res.LastEvaluatedKey;
+    } while (cursor);
+    return deleted;
+  }
+
   // The owner's accepted external contacts (docs 18 §4/§6). Only `PEER#` rows in
   // the `accepted` state; used to authorize ringing someone outside your org.
   // Empty until external contacts are enabled.
@@ -1119,6 +1162,14 @@ export function createDb({ config, client } = {}) {
     return getUser(email);
   }
 
+  /** Account closure only — the USER# row goes last, after everything that
+   *  hangs off the identity, so a half-finished closure still has an account
+   *  to find and retry against (`closeAccount.js` owns the ordering). Settings
+   *  live on the same row and go with it. */
+  async function deleteUser(email) {
+    await doc.send(new DeleteCommand({ TableName: T.users, Key: { PK: `USER#${email}` } }));
+  }
+
   async function putRefreshToken(item) {
     await doc.send(new PutCommand({ TableName: T.refresh, Item: { PK: `RT#${item.tokenId}`, ...item } }));
   }
@@ -1159,6 +1210,21 @@ export function createDb({ config, client } = {}) {
       })
     );
     return res.Items || [];
+  }
+
+  /**
+   * Account closure: DELETE (not revoke) every refresh-table row for one
+   * person — both credential families the identity-index reaches, `RT#`
+   * refresh chains and `AGT#` agent tokens. Revocation is for a live account
+   * ("log out everywhere"); these rows carry the email itself, so a closed
+   * account leaves none behind. Returns rows deleted.
+   */
+  async function deleteRefreshRowsByIdentity(identityHash) {
+    const rows = await listRefreshTokensByIdentity(identityHash);
+    for (const row of rows) {
+      await doc.send(new DeleteCommand({ TableName: T.refresh, Key: { PK: row.PK } }));
+    }
+    return rows.length;
   }
 
   async function listRecordsByParticipant(identity) {
@@ -1506,10 +1572,13 @@ export function createDb({ config, client } = {}) {
     getUserSettings,
     putUserSettings,
     upsertUser,
+    deleteUser,
     putRefreshToken,
     getRefreshToken,
     setRefreshRevoked,
     listRefreshTokensByIdentity,
+    deleteRefreshRowsByIdentity,
+    deleteContactsForIdentity,
     putDeviceCode,
     getDeviceCode,
     getDeviceCodeByUserCode,
