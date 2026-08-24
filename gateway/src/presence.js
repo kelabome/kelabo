@@ -96,8 +96,12 @@ export function createPresence(c) {
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
-      "Access-Control-Allow-Origin": c.config.portalUrl,
-      "Access-Control-Allow-Credentials": "true",
+      // No CORS headers here on purpose. `setCorsHeaders` has already put them
+      // on this response with `setHeader`, and anything named again in
+      // `writeHead` WINS — so re-stating them here silently overrode the
+      // allowed-origin decision with a hard-coded one. The preflight (which
+      // never reaches this code) kept answering correctly while the stream
+      // itself was refused, which is a very quiet way to be broken.
     });
     res.write(`: connected\n\n`);
 

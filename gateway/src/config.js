@@ -15,6 +15,13 @@ function fromEnv() {
     tenantId: e.KELABO_TENANT_ID || "",
     allowedEmailDomain: e.KELABO_TENANT_ID || "",
     portalUrl: e.KELABO_PORTAL_URL || "http://localhost:5173",
+    // Every host that serves the app and therefore talks to this Gateway from a
+    // browser. The portal, and any alias it also answers on — an apex beside a
+    // `www`, say: the browser sends *that* origin, and a list of one would
+    // refuse the presence stream on the very hostname the user typed.
+    allowedOrigins: [e.KELABO_PORTAL_URL || "http://localhost:5173", ...(e.KELABO_PORTAL_ALIASES || "").split(",")]
+      .map((s) => s.trim())
+      .filter(Boolean),
     tableNames: {
       kelabos: e.KELABO_TABLE_KELABOS,
       history: e.KELABO_TABLE_HISTORY,
@@ -80,6 +87,7 @@ function fromBase(base) {
     tenantId: base.allowedEmailDomain || "",
     allowedEmailDomain: base.allowedEmailDomain || "",
     portalUrl: base.portalUrl,
+    allowedOrigins: [base.portalUrl, ...(base.portalAliases ?? []).map((d) => `https://${d}`)].filter(Boolean),
     tableNames: {
       kelabos: base.tableNames.kelabos,
       history: base.tableNames.history,

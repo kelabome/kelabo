@@ -111,6 +111,11 @@ export class GatewayEcsStack extends Stack {
           KELABO_ENV: cfg.endpoint,
           KELABO_REGION: cfg.region,
           KELABO_PORTAL_URL: cfg.portalUrl,
+          // Every other hostname the portal answers on — an apex beside a
+          // `www`, say. The browser sends the origin the user typed, and the
+          // presence stream is credentialed, so an alias missing from this list
+          // is a stream that fails CORS on a hostname we deliberately serve.
+          ...(cfg.portalAliases?.length ? { KELABO_PORTAL_ALIASES: cfg.portalAliases.map((d) => `https://${d}`).join(",") } : {}),
           KELABO_GATEWAY_BASE_URL: cfg.gatewayBaseUrl,
           KELABO_COOKIE_DOMAIN: cfg.cookieDomain,
           KELABO_TENANT_ID: cfg.allowedEmailDomain,

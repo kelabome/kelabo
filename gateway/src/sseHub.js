@@ -3,8 +3,23 @@ import { putContrib } from "./db.js";
 
 const PING_INTERVAL_MS = 25_000;
 
-export function setCorsHeaders(c, res) {
-  res.setHeader("Access-Control-Allow-Origin", c.config.portalUrl);
+/**
+ * Which browser origins may talk to the Gateway with credentials.
+ *
+ * More than one, because the portal can answer on more than one hostname (an
+ * apex beside a `www`), and the browser sends whichever the user typed.
+ * `Access-Control-Allow-Origin` cannot be a list and cannot be `*` on a
+ * credentialed request, so the request's own origin is echoed back when it is
+ * one we serve, and the portal is the answer otherwise (which fails the
+ * browser's check, exactly as an unknown origin should).
+ */
+export function corsOrigin(c, origin) {
+  const allowed = c.config.allowedOrigins?.length ? c.config.allowedOrigins : [c.config.portalUrl];
+  return allowed.includes(origin) ? origin : c.config.portalUrl;
+}
+
+export function setCorsHeaders(c, res, req) {
+  res.setHeader("Access-Control-Allow-Origin", corsOrigin(c, req?.headers?.origin));
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Headers", "content-type, authorization");
   // PUT is needed by /rtc/sfu/renegotiate and /rtc/sfu/tracks/close.
@@ -132,8 +147,12 @@ export function createSseHub(c) {
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
-      "Access-Control-Allow-Origin": c.config.portalUrl,
-      "Access-Control-Allow-Credentials": "true",
+      // No CORS headers here on purpose. `setCorsHeaders` has already put them
+      // on this response with `setHeader`, and anything named again in
+      // `writeHead` WINS — so re-stating them here silently overrode the
+      // allowed-origin decision with a hard-coded one. The preflight (which
+      // never reaches this code) kept answering correctly while the stream
+      // itself was refused, which is a very quiet way to be broken.
     });
     res.write(`: connected\n\n`);
     let set = c.state.sseSubscribers.get(kelaboId);

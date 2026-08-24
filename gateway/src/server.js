@@ -54,12 +54,12 @@ async function route(c, req, res) {
   // non-kelabo-scoped one (docs 18 §5).
   const corsPaths = captionPaths || path === "/presence/stream" || RTC_PATHS.has(path);
   if (method === "OPTIONS" && corsPaths) {
-    setCorsHeaders(c, res);
+    setCorsHeaders(c, res, req);
     res.writeHead(204);
     res.end();
     return;
   }
-  if (corsPaths) setCorsHeaders(c, res);
+  if (corsPaths) setCorsHeaders(c, res, req);
 
   if (method === "GET" && path === "/health") {
     return send(res, 200, { ok: true, service: "kelabo-gateway" });
