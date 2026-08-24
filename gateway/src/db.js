@@ -60,7 +60,11 @@ export async function updateMeta(c, kelaboId, fields) {
   );
 }
 
-export async function putUtt(c, utt) {
+// `ttl` is for rows written to a kelabo that has already ended: the end-time
+// TTL sweep (`stampKelaboTtl`) has run or is about to, and a row landing after
+// it — a caption a browser flushes as it disconnects — would otherwise outlive
+// the partition forever. Live-kelabo rows carry no TTL; the sweep stamps them.
+export async function putUtt(c, utt, { ttl } = {}) {
   const sk = `UTT#${pad(utt.tStart)}#${randSeq()}`;
   await c.db.send(
     new PutCommand({
@@ -77,6 +81,7 @@ export async function putUtt(c, utt) {
         ...(utt.source ? { source: utt.source } : {}),
         ...(typeof utt.at === "number" ? { at: utt.at } : {}),
         ...(utt.messageId ? { messageId: utt.messageId } : {}),
+        ...(ttl ? { ttl } : {}),
       },
     })
   );
@@ -137,6 +142,67 @@ export async function queryKelaboItems(c, kelaboId, skPrefix, { limit, desc = fa
 
 export const queryUtt = (c, kelaboId, opts) => queryKelaboItems(c, kelaboId, "UTT#", opts);
 export const queryContrib = (c, kelaboId, opts) => queryKelaboItems(c, kelaboId, "CONTRIB#", opts);
+
+/**
+ * Stamp the retention TTL onto every remaining row of a kelabo's partition.
+ *
+ * `endKelabo` writes `ttl` on META, but the partition holds more than META:
+ * without this, UTT#, CONTRIB#, MINUTES, PROMOTION and INVITE# rows outlive
+ * it forever — unreachable once META expires, yet still holding transcript
+ * text and invitee email addresses, while the published retention policy
+ * says a kelabo is gone `retentionDays` after it ends. The record in S3 is
+ * the copy that is kept; these rows are the working copy, and they expire
+ * with the kelabo.
+ *
+ * JOURNEY# mirrors are deliberately skipped: a link outlives the kelabo's
+ * own expiry so a record can still say which journeys it belongs to (docs
+ * 20 §4.3) — only an unlink or a purge removes one.
+ *
+ * Returns the number of rows stamped. Idempotent: re-stamping the same TTL
+ * is a no-op in effect, so a retried end costs writes, not correctness.
+ */
+export async function stampKelaboTtl(c, kelaboId, ttl) {
+  let cursor;
+  let stamped = 0;
+  do {
+    const out = await c.db.send(
+      new QueryCommand({
+        TableName: kelabosTable(c),
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: { ":pk": kelaboPk(kelaboId) },
+        ProjectionExpression: "PK, SK",
+        ...(cursor ? { ExclusiveStartKey: cursor } : {}),
+      })
+    );
+    const rows = (out.Items ?? []).filter(
+      (r) => r.SK !== "META" && !String(r.SK).startsWith("JOURNEY#")
+    );
+    // Bounded parallelism: a long kelabo has thousands of UTT# rows, and this
+    // runs post-end in the background — small chunks keep it from competing
+    // with live rooms for the table.
+    for (let i = 0; i < rows.length; i += 20) {
+      const chunk = rows.slice(i, i + 20);
+      await Promise.all(
+        chunk.map((r) =>
+          c.db.send(
+            new UpdateCommand({
+              TableName: kelabosTable(c),
+              Key: { PK: r.PK, SK: r.SK },
+              // `#ttl`: TTL is a DynamoDB reserved word — a bare `ttl = :ttl`
+              // fails the whole update with a ValidationException.
+              UpdateExpression: "SET #ttl = :ttl",
+              ExpressionAttributeNames: { "#ttl": "ttl" },
+              ExpressionAttributeValues: { ":ttl": ttl },
+            })
+          )
+        )
+      );
+      stamped += chunk.length;
+    }
+    cursor = out.LastEvaluatedKey;
+  } while (cursor);
+  return stamped;
+}
 
 // Retroactively rewrite the speaker label on all stored utterances for a kelabo.
 // Returns the number of rows updated.

@@ -154,7 +154,12 @@ export async function handleCaptionPost(c, req, res) {
   };
 
   try {
-    await putUtt(c, utt);
+    // A caption flushed as a browser disconnects can land after the kelabo
+    // ended — after the end-time TTL sweep has already walked the partition.
+    // Such a row stamps itself with the META's own expiry so it cannot outlive
+    // the kelabo it belongs to.
+    const endedTtl = meta?.status === "ended" && typeof meta.ttl === "number" ? meta.ttl : undefined;
+    await putUtt(c, utt, endedTtl ? { ttl: endedTtl } : undefined);
   } catch (err) {
     c.logError("utt_append_failed", err, { kelaboId: post.kelaboId });
     return send(res, 500, { error: "internal_error" });

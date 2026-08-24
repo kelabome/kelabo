@@ -11,6 +11,7 @@ import {
   putArchiveObject,
   putMinutes,
   getMinutes,
+  stampKelaboTtl,
 } from "./db.js";
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
 import { settleKelaboJoin } from "./journeys.js";
@@ -142,7 +143,14 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
       status: "ended",
       endedAt,
       hasMinutes: !!(minutes || meta.hasMinutes),
-      tenantStatus: `${meta.tenantId ?? ""}#ended`,
+      // REMOVE (null), not `<tenant>#ended`: nothing queries the ended
+      // partition of `status-index` — active and scheduled are the only
+      // statuses anything lists — so keeping ended rows in the GSI only made
+      // it grow without bound. The host-initiated path never showed it
+      // (rest-api REMOVEs tenantStatus right after this call), but an end the
+      // GATEWAY initiates has no rest-api follow-up, and those rows stayed
+      // forever.
+      tenantStatus: null,
       // Cleared only once the row is actually there, so a second retry still
       // finds something to resume.
       ...(archived ? { archivePending: null } : { archivePending: true }),
@@ -180,6 +188,19 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   c.sseHub.ended(kelaboId, { reason: "ended" });
   c.log("kelabo_ended", { kelaboId, mode: agentRuntime || "server", utterances: transcript.length, contributions: board.length });
 
+  // The whole partition expires with the kelabo, not just META (which the
+  // update above already stamped): the S3 record is the copy that is kept.
+  // Runs AFTER the minutes work below, deliberately — the minutes MINUTES row
+  // and the captions a browser flushes as it disconnects both land post-end,
+  // and a sweep that ran first would miss them. (caption.js stamps truly late
+  // stragglers itself, reading `ttl` off the ended META.) Background and
+  // logged, never blocking the response: a failure here is orphaned rows, not
+  // a broken end, and `retry` re-runs it.
+  const stampTtl = () =>
+    stampKelaboTtl(c, kelaboId, ttl)
+      .then((rows) => c.log("kelabo_ttl_stamped", { kelaboId, rows }))
+      .catch((err) => c.logError("kelabo_ttl_stamp_failed", err, { kelaboId }));
+
   // Generate the summary/minutes asynchronously so ending the kelabo is fast.
   // The dev-mode tunnel must stay open until the summary is requested, so
   // endTunnel (which closes it) is deferred until after the async work below.
@@ -192,10 +213,12 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
       .finally(() => {
         c.agentDispatcher.drop(kelaboId);
         c.tunnel.endTunnel(kelaboId);
+        stampTtl();
       });
   } else {
     c.agentDispatcher.drop(kelaboId);
     c.tunnel.endTunnel(kelaboId);
+    stampTtl();
   }
 
   return { status: 200, body: { ok: true, archived, archiveId: archive.archiveId, s3Key } };
