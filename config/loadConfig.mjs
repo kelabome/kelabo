@@ -397,6 +397,18 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       // this needs no config edit — only `make origin-secret` to create the
       // value, which is generated, never typed.
       apiOrigin: block.secrets?.apiOrigin ?? `kelabo/${block.endpoint}/api-origin`,
+      // The transcription credential, under the name the STT boundary reads —
+      // one secret holding a key per provider, so switching provider is a
+      // config change rather than a scramble to re-enter a credential.
+      //
+      // Derived, like every other secret here, because it was NOT: a config
+      // written before that boundary existed names `secrets.deepgram` and no
+      // `secrets.stt`, so this resolved to `undefined`. Nothing failed loudly.
+      // The Lambda took `KELABO_SECRET_STT=undefined`, the capability probe on
+      // a nameless secret answered "no", and the SPA correctly hid a feature
+      // the deployment believed it had switched on — a whole environment with
+      // no transcription and nothing in any log to say why.
+      stt: block.secrets?.stt ?? `kelabo/${block.endpoint}/stt`,
       // The outbound-mail provider's API key. Named for every environment,
       // created only where one is needed: SES authenticates with the Lambda's
       // IAM role and reads nothing here, so an SES deployment can leave this
