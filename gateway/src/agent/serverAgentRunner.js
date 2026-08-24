@@ -7,21 +7,38 @@
 // were plain strings. Both normalize to the object form so a record archived
 // before the richer minutes still renders — and so an opencode session that
 // answers in the old shape is not rejected.
+import { repairTruncatedJson } from "./repairJson.js";
 
+/**
+ * Minutes from a model's reply, or `null` if there are none to be had.
+ *
+ * **Unparseable used to mean "minutes whose only content is the raw reply"** —
+ * a record that reported `hasMinutes: true` and rendered a wall of escaped JSON
+ * where the summary should be. That is worse than no minutes: it looks like a
+ * failure of the product rather than of one call, and there is nothing a reader
+ * can do with it. Now the reply is repaired if it was merely cut short, and
+ * otherwise nothing is returned — the caller already logs `minutes_skipped`
+ * with a reason and the record honestly shows none.
+ */
 export function parseMinutesJson(text, kelaboId, generatedBy) {
-  const fallback = {
-    kelaboId,
-    topics: [],
-    decisions: [],
-    actionItems: [],
-    openQuestions: [],
-    findings: text ? [{ text: text.slice(0, 4000) }] : [],
-    generatedAt: Date.now(),
-    generatedBy,
-  };
-  if (!text) return fallback;
+  if (!text) return null;
   try {
-    const json = JSON.parse(text.replace(/```json|```/g, "").trim().match(/\{[\s\S]*\}/)?.[0] ?? "");
+    const stripped = String(text).replace(/```json|```/g, "").trim();
+    const open = stripped.indexOf("{");
+    if (open < 0) return null;
+    // Two candidates, tried in the order that loses the least.
+    //
+    // `{` to the **last** `}` is right when the model wrote the object and then
+    // kept talking. It is wrong when the reply was cut off, because the last
+    // `}` is then some *inner* object and everything after it — often whole
+    // sections — is thrown away before the repair ever sees it. So the exact
+    // parse of that candidate is tried first, and if it fails the repair works
+    // on the full tail instead.
+    const greedy = stripped.slice(open, stripped.lastIndexOf("}") + 1);
+    const toEnd = stripped.slice(open);
+    const source = parses(greedy) ?? repairTruncatedJson(toEnd) ?? repairTruncatedJson(greedy);
+    if (!source) return null;
+    const json = JSON.parse(source);
     return {
       kelaboId,
       ...(str(json.title) ? { title: str(json.title).slice(0, 80) } : {}),
@@ -45,7 +62,17 @@ export function parseMinutesJson(text, kelaboId, generatedBy) {
       generatedBy,
     };
   } catch {
-    return fallback;
+    return null;
+  }
+}
+
+/** The text itself when it is already valid JSON, else null. */
+function parses(text) {
+  try {
+    JSON.parse(text);
+    return text;
+  } catch {
+    return null;
   }
 }
 
