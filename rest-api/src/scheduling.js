@@ -301,6 +301,22 @@ export function createScheduling({ config, db, mailer, internal }) {
       }
     }
 
+    // "A cancelled scheduled kelabo leaves nothing behind" — and the invite
+    // rows are the part that matters, because they name people who may never
+    // have used the product. Deleted, not TTL'd: nothing is left for them to
+    // serve (rsvp refuses cancelled kelabos), and the promise is "nothing",
+    // not "nothing, eventually". After the email loop, which needed the
+    // addresses one last time. Per-row and non-fatal, but logged loudly: a
+    // row that survives this loop has no other exit until the account is
+    // closed.
+    for (const inv of invites) {
+      try {
+        await db.removeInvite(kelaboId, inv.inviteKey);
+      } catch (e) {
+        console.warn(JSON.stringify({ level: "warn", msg: "invite delete on cancel failed", kelaboId, inviteKey: inv.inviteKey, error: String(e) }));
+      }
+    }
+
     return { status: 200, body: { kelaboId, status: "cancelled" } };
   }
 
