@@ -13,6 +13,7 @@ import { Crumbs } from '../components/ui/Crumbs'
 import { Icon } from '../components/ui/Icon'
 import { Modal } from '../components/ui/Modal'
 import { Skeleton, SkeletonRows } from '../components/ui/Skeleton'
+import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
 import { JourneyHealthChip } from './Journeys'
@@ -271,6 +272,16 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
     toast('Status updated')
   }
 
+  const toggleAiCanPost = async v => {
+    try {
+      await api.patchJourney(journey.journeyId, { aiCanPost: v })
+      await reload()
+      toast(v ? 'Assistant posting turned on' : 'Assistant posting turned off')
+    } catch {
+      toast('Could not change assistant posting')
+    }
+  }
+
   return (
     <section className="anim-in vstack-lg">
       <div className="section-block">
@@ -311,6 +322,27 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
           {typeof journey.progress === 'number'
             ? <span className="chip chip-accent">{journey.progress}% complete</span>
             : <span className="text-meta">No health/progress set</span>}
+        </div>
+      </div>
+
+      {/* aiCanPost (docs 20 §7, §12.2): owner-only to change, visible to every
+          member — the same "a capability nobody can see is one nobody can
+          object to" disclosure rule historyEnabled follows. */}
+      <div className="section-block">
+        <div className="section-title">Assistant</div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Assistant can post to the board</div>
+            <div className="sr-sub">
+              Lets an attached assistant write or edit pinned board messages on its own initiative — for
+              example recording “X has been added and tested” when a piece of work completes, so it carries
+              to the journey's next kelabo. Off, the board stays human-curated and the assistant is refused
+              with a clear answer.{isOwner ? '' : ' Only the journey lead can change this.'}
+            </div>
+          </div>
+          {isOwner && journey.status === 'active'
+            ? <Switch checked={!!journey.aiCanPost} onChange={toggleAiCanPost} ariaLabel="Assistant can post to the board" />
+            : <span className={`chip${journey.aiCanPost ? ' chip-accent' : ''}`}>{journey.aiCanPost ? 'On' : 'Off'}</span>}
         </div>
       </div>
 
