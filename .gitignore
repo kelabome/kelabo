@@ -9,3 +9,6 @@ spa-ui-mockup/
 package-lock.json
 infra/cdk.context.json
 .claude/settings.local.json
+**/._.DS_Store
+**/.DS_Store
+.DS_Store

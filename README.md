@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo/mark.png" width="180" alt="Kelabo logo">
+  <img src="logo/mark_readme.png" width="180" alt="Kelabo logo">
 </p>
 
 <h1 align="center">Kelabo</h1>
