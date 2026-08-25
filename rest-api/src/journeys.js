@@ -368,14 +368,20 @@ export function createJourneys({ config, db, internal }) {
     await requireMember(meta, identity);
     const links = await db.listJourneyLinks(journeyId);
     return {
-      kelabos: links.map((l) => ({
-        kelaboId: l.kelaboId,
-        title: l.titleSnapshot,
-        hostIdentity: l.hostIdentitySnapshot,
-        linkedBy: l.linkedBy,
-        linkedAt: l.linkedAt,
-        statusSnapshot: l.statusSnapshot,
-      })),
+      // Most recently linked first — the same newest-first order the board,
+      // document and report lists already serve (and the timeline's own
+      // ordering). Unsorted, this came back in LINK#<kelaboId> key order,
+      // which is UUID order: effectively random.
+      kelabos: links
+        .sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0))
+        .map((l) => ({
+          kelaboId: l.kelaboId,
+          title: l.titleSnapshot,
+          hostIdentity: l.hostIdentitySnapshot,
+          linkedBy: l.linkedBy,
+          linkedAt: l.linkedAt,
+          statusSnapshot: l.statusSnapshot,
+        })),
     };
   }
 

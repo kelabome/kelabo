@@ -337,6 +337,23 @@ await test("linkKelabo: succeeds for the kelabo's host, mirrors onto the kelabo'
   assert.equal((await journeys.listLinkedKelabos({ journeyId: j.journeyId, identity: OWNER })).kelabos.length, 0);
 });
 
+await test("listLinkedKelabos: most recently linked first, not LINK# key order", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "Order", visibility: "public" } });
+  // Ids chosen so ascending key order would be ka, kb, kc — the exact
+  // opposite of the link order below. Unsorted, this test fails.
+  for (const kelaboId of ["ka-order", "kb-order", "kc-order"]) {
+    await seedKelabo({ kelaboId, host: OWNER });
+    await journeys.linkKelabo({ journeyId: j.journeyId, identity: OWNER, kelaboId });
+    await new Promise((r) => setTimeout(r, 5)); // distinct linkedAt stamps
+  }
+  const { kelabos } = await journeys.listLinkedKelabos({ journeyId: j.journeyId, identity: OWNER });
+  assert.deepEqual(
+    kelabos.map((k) => k.kelaboId),
+    ["kc-order", "kb-order", "ka-order"],
+    "newest link first — the same order the board, documents, reports and timeline serve"
+  );
+});
+
 await test("linkKelabo: refused once the journey is completed", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
   await seedKelabo({ kelaboId: "k2", host: OWNER });
