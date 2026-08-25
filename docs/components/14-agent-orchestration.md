@@ -143,6 +143,49 @@ the oldest span** (older transcript turns + closed task pairs) into a single
 `task_id` references that are still cited. Open (unresolved) tasks are never
 compacted.
 
+### 3.3 Cross-kelabo memory in the system prompt: EARLIER KELABOS and JOURNEY CONTEXT
+
+The `[ system ]` turn (§3.1) can end with two rendered sections, both
+assembled by `runner.js`'s `ensureContext()` whenever it (re)builds a
+kelabo's worker context — computed at load time, never fixed at kelabo
+creation — and passed into `MainAgent`'s constructor:
+
+- **`EARLIER KELABOS:`** — the host's opt-in record (`historyEnabled`,
+  `gateway/src/agent/history.js`): recent minutes reduced to
+  summary/decisions/actionItems.
+- **`JOURNEY CONTEXT:`** — rendered by `renderJourneyContext()`
+  (`persona.js`) directly **after** `EARLIER KELABOS:`, from
+  `gateway/src/agent/journeyContext.js`. Always attempted, no opt-in flag
+  (the link itself is the deliberate act). Per linked journey
+  (`JOURNEY_LIMIT = 3`): title, latest description (clipped 1,500 chars),
+  health/progress, up to 5 active board messages (300 chars each), up to 3
+  active documents (800 chars each), and up to 5 *other* linked kelabos
+  reduced to their minutes. Full design:
+  [docs 20 §12.1](../20-journey.md).
+
+**Supersession, not addition:** the moment the reduced journey context is
+non-empty, `historyStillApplies(meta, journeys)` is `false` and
+`loadKelaboHistory()` is skipped — a journey already *is* the narrower,
+deliberately-linked version of the continuity `historyEnabled` provides more
+diffusely, and holding both in the prompt serves nobody. A dangling or
+unreachable journey link falls back to `historyEnabled`. Because this is
+evaluated whenever the context is loaded, a kelabo linked to a journey after
+`historyEnabled` was turned on loses the broader record at the next context
+build, not at some later recompute.
+
+Both sections carry the same framing discipline as `TRANSCRIPT:` turns
+(rule 1 above): reference material other people wrote, a record of the past
+and not the current state of anything, name which kelabo/journey a fact came
+from — plus an explicit **"never dispatch a sub-agent to look up something
+already answered here, including inside a document."** That last clause and
+the documents in the digest exist because of a production miss, not a design
+decision: a participant asked a question whose answer lived only in a
+journey document, and the orchestrator — correctly, given what it could see —
+dispatched a worker to research the term externally. `activeDocuments` was
+already built for journey reports; it simply hadn't been wired into this
+always-on path (docs 20 §12.1). Documents are clipped harder here (800 vs.
+3,000 chars) because this cost is paid on every turn, not once per request.
+
 ---
 
 ## 4. Sub-agent context construction

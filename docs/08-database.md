@@ -19,6 +19,7 @@ where it fits (ARCHITECTURE §15.8), add OTP + MCP.
 | `kelabo-<env>-refresh` | `RT#<tokenId>` | — | `identity-index` | yes (~30–90d) | rotating, revocable refresh tokens (long sessions) |
 | `kelabo-<env>-mcp` | `MCP#<scope>` | `SK` | — | none | org/host/kelabo MCP config |
 | `kelabo-<env>-contacts` | `CONTACT#<owner>` | `SK` | — | on external decline-cleanup | favourites (`FAV#`) + external links (`PEER#`) — docs 18 §4 |
+| `kelabo-<env>-journeys` | `PK` | `SK` | `tenant-status-index`, `accessor-index` | **none, deliberately** | journeys: container linking related kelabos — docs 20, §6b |
 
 S3: `kelabo-<env>-archives-<acct>` — full transcript/board JSON.
 
@@ -39,6 +40,7 @@ Partition per kelabo: `PK = KELABO#<kelaboId>`.
 | contribution | `KELABO#<id>` | `CONTRIB#<at:13>#<rand6>` | `tag`, `kind`, `to`, `title`, `markdown`, `sources`, `author`, `origin`(server/local/opencode), `runtime?`, `agentLabel?`, `at`, `tenantId` |
 | minutes | `KELABO#<id>` | `MINUTES` | `MinutesDoc` fields, `generatedAt`, `generatedBy` |
 | agent binding (dev) | `KELABO#<id>` | `PROMOTION` | `runtime`, `sessionRef`, `workspace`, `label`, `boundBy`, `boundAt` — records **which local agent session receives transcript** (docs 16). Runtime-agnostic: `sessionRef` and `workspace` are opaque. Rows written before docs 16 carry `opencodeSessionId`/`opencodeProjectId`/`opencodeDirectory` instead and are read as `runtime: "opencode"`. |
+| journey mirror | `KELABO#<id>` | `JOURNEY#<journeyId>` | `{journeyId, journeyTitleSnapshot, journeyVisibilitySnapshot, linkedAt, linkedBy}` — the backward half of a journey link (docs 20 §4.3). Exists so "does/which journey(s) does this kelabo belong to" is one `begins_with(SK, "JOURNEY#")` query on the kelabo's own partition — the purge guard and the "Part of: …" banner — **without a new GSI and without a cross-table scan**. Written together with the journey's own `LINK#` row in **one cross-table `TransactWriteItems`** conditioned on the journey not being `completed` (plus `ADD kelaboCount 1` on its META). |
 
 **GSI `status-index`:** PK **`tenantStatus` = `<tenantId>#<status>`**, SK
 `startedAt` (sparse — written only on META). Powers "list active kelabos" **scoped
@@ -111,6 +113,10 @@ Guarantees:
 - `dryRun: true` returns the identical report without deleting; the SPA always
   previews first.
 - A kelabo with no `endedAt` is never purged (reported under `skipped`).
+- A kelabo with any `JOURNEY#` mirror row (§2 above) is never host-purged —
+  409 `kelabo_in_journey` until it is unlinked from every journey
+  (docs 20 §14.3). The single-record `DELETE /records/:archiveId` host-purge
+  outcome applies the same guard.
 - The history row is deleted **last**: it is the only pointer to the S3 key and
   the participant list, so a mid-way failure leaves the job resumable rather than
   orphaning both.
@@ -287,6 +293,46 @@ watch" and "who watches me", which is why there is no GSI.
 
 ---
 
+## 6b. `journeys` table (docs 20)
+
+One partition per journey, `PK = JOURNEY#<journeyId>` — the same single-table
+style as `kelabos`. PAY_PER_REQUEST, PITR on. **No `ttl` attribute is
+declared, deliberately:** a journey is long-lived by nature and never
+auto-expires; every removal is an explicit write, which sidesteps the
+orphaned-child trap the §2 warning documents on `kelabos`. Full field lists
+and semantics: [20-journey.md](20-journey.md) §4; condensed catalogue:
+
+| SK | Item |
+|---|---|
+| `META` | Root: title, visibility, status, `ownerIdentity`, `tenantId`, `tenantStatus`, health/progress, `aiCanPost`, counts, timestamps |
+| `DESC#<pad(version,6)>` | Description version (immutable chain) |
+| `STATUS#<pad(version,6)>` | Health/progress snapshot (immutable chain) |
+| `ACCESSOR#<identity>` | Private-journey roster entry |
+| `LINK#<kelaboId>` | Kelabo membership, forward half (the backward half is the `JOURNEY#` mirror on `kelabos`, §2) |
+| `REPORT#<reportId>` | One Q&A report, append-only; `status: pending\|ready\|failed` |
+| `BOARDMSG#<msgId>` (+ `#V#<pad(version,6)>`) | Pinned message head + its immutable version chain; archive is soft and reversible |
+| `DOC#<docId>` | Pasted-text document head (inline, or `s3Key`+excerpt over the 400KB cap); removal is soft, one-way |
+| `CONTRIBUTOR#<identity>` | Per-person rollup: `kelaboJoinCount`, `reportRequestCount` — maintained by `ADD` at write time, never derived by scan |
+| `TL#<pad(at,13)>#<rand6>` | Timeline projection row, written in the same call as every mutation — a genuine index, not a derived one |
+| `SETTLED#<kelaboId>` | Idempotency marker for `kelaboJoinCount` settling on kelabo end; no reader of its own |
+
+**GSI `tenant-status-index`:** PK `tenantStatus` (`<tenantId>#<status>`, sparse —
+META only), SK `updatedAt` — "journeys in my tenant", public-journey discovery,
+visibility filtered in the handler (the same "query broad, filter in code"
+idiom as `kelabos.status-index`).
+
+**GSI `accessor-index`:** PK `accessorIdentity` (sparse — `ACCESSOR#` items
+only), SK `addedAt` — "private journeys I'm an accessor of", a structural copy
+of the kelabos `invitee-index`.
+
+Access is shared: the REST API has read/write (the whole §11 surface of docs
+20), and the **Gateway task role also has read+write** — it generates reports,
+writes their `ready`/`failed` rows, reads journey context for the agent's
+system prompt, and settles contributor counts on kelabo end
+(`infra/lib/gateway-ecs-stack.js`).
+
+---
+
 ## 7. S3 archive bucket
 
 - Key: `archives/<host>/<archiveId>.json` = full `Archive` object (transcript +
@@ -326,6 +372,10 @@ watch" and "who watches me", which is why there is no GSI.
 | 16 | Read a record | history `archiveId` → S3 `s3Key` (access check first) |
 | 17 | Resolve MCP config | mcp `MCP#host#…` (`MCP#org` + `MCP#kelabo#…` reserved) |
 | 18 | Session guard (promoted id) | kelabos `PROMOTION` (or in-proc Gateway cache) |
+| 19 | Load journey detail / any sub-resource | journeys `JOURNEY#<id>` + SK prefix (`DESC#`, `REPORT#`, `TL#`, …) |
+| 19b | Journeys in my tenant (list, public discovery) | journeys `tenant-status-index` (`<tenant>#<status>`) |
+| 19c | Private journeys I can access | journeys `accessor-index` (`accessorIdentity`) |
+| 19d | Which journeys is this kelabo in? (purge guard, "Part of:") | kelabos `KELABO#<id>`, `begins_with(SK, "JOURNEY#")` |
 
 ---
 
@@ -361,6 +411,7 @@ watch" and "who watches me", which is why there is no GSI.
 | history rows | permanent |
 | S3 archives | permanent (configurable lifecycle) |
 | guest identities | ephemeral (cookie only) |
+| journeys | permanent — no TTL attribute at all; deletion is always an explicit owner act (docs 20 §14) |
 
 Ephemeral-by-default posture for privacy (ARCHITECTURE §14.3): only registered
 participants retain access; guests leave no durable identity.

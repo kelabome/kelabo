@@ -14,8 +14,8 @@ not the change.
 
 | Concept | 中文 | Definition |
 |---|---|---|
-| **Tail** | 未确定尾段 | Deepgram output with `is_final: false` — its current guess at the words being spoken. Lives *inside* its message, is replaced wholesale on each revision, and is relayed to the room for liveness. A message has **at most one**, always at its end, and it is the only part rendered as live text. Never persisted and never shown to the LLM. |
-| **Fragment** | 转录片段 | Deepgram output with `is_final: true`. Immutable words, but only part of an utterance. Client-internal: a fragment never crosses a boundary on its own, only folded into a delta. |
+| **Tail** | 未确定尾段 | Unconfirmed STT output (Deepgram's `is_final: false`, Soniox's provisional tokens) — the provider's current guess at the words being spoken. Lives *inside* its message, is replaced wholesale on each revision, and is relayed to the room for liveness. A message has **at most one**, always at its end, and it is the only part rendered as live text. Never persisted and never shown to the LLM. |
+| **Fragment** | 转录片段 | Finalized STT output (Deepgram's `is_final: true`, Soniox's final tokens). Immutable words, but only part of an utterance. Client-internal: a fragment never crosses a boundary on its own, only folded into a delta. |
 | **Message** | 消息 | What a speaker produces between two seals: **committed text plus a live tail**. `{ messageId, speakerId, speakerLabel, text, tail, state: 'open' \| 'sealed', … }`. **The** unit of display, persistence and LLM submission — and one box on screen, never two. |
 | **`messageId`** | 消息标识 | Minted by the speaker when a message opens. Carried by every delta and by the seal. The **sole** grouping key on every client. |
 | **MessageDelta** | 增量 | An append to an open message: `{ messageId, seq, text, tStart, tEnd }`. Relayed live to the room; never persisted, never buffered, never shown to the LLM. |
@@ -35,16 +35,16 @@ One module per stage, one job each.
 
 | # | Stage | Module | Job |
 |---|---|---|---|
-| 1 | **Capture** | `spa/src/capture/useCapture.js` + `capture/vad.js` + `transcript/deepgram.js` | mic → VAD gate → Deepgram socket → **interims and fragments**. Owns no message logic. Reading the wire (`readResult`) is pure and tested; the hook only maps it onto the composer and converts Deepgram's audio clock to wall time. |
-| 2 | **Compose** | `spa/src/transcript/composer.js` | Deepgram output + seal triggers → **tails, deltas and seals**. Pure JS, injected clock. |
+| 1 | **Capture** | `spa/src/capture/useCapture.js` + `capture/vad.js` + `stt/<provider>.js` + `transcript/stt/<provider>.js` | mic → VAD gate → STT provider (Deepgram or Soniox — see `docs/components/06-stt.md`) → **interims and fragments**. Owns no message logic. Reading the wire (`readResult`) is pure and tested per provider; the hook only maps the normalised result onto the composer and converts the provider's audio clock to wall time. |
+| 2 | **Compose** | `spa/src/transcript/composer.js` | STT output + seal triggers → **tails, deltas and seals**. Pure JS, injected clock. |
 | 3 | **Publish** | `spa/src/transcript/publisher.js` | events → `POST /caption`. The only module that knows the wire format. |
 | 4 | **Distribute** | `gateway/src/caption.js` | tail/delta → relay to the room and forget. Sealed → persist, fan out, dispatch to the agent. |
 | 5 | **Project** | `spa/src/transcript/transcriptStore.js` | events → **Transcript**. Pure `apply(state, event) → state`. |
 | 6 | **Render** | `spa/src/capture/CapturePanel.jsx` | draw the transcript: settled text, then the live tail. No grouping logic, and no opinion about where the tail begins — that is `messageParts`. |
 
 ```
-Deepgram              capturing browser                        gateway / agent
-────────             ──────────────────                       ────────────────
+STT provider          capturing browser                        gateway / agent
+────────────         ──────────────────                       ────────────────
 interim ──────▶ COMPOSE ── MessageTail ───┬─▶ publish ──▶ relayed live (throttled)
                       │                   └─▶ PROJECT (my own screen)
 is_final ─────▶ FRAGMENT (settled — committed on arrival, never buffered)
@@ -53,7 +53,7 @@ is_final ─────▶ FRAGMENT (settled — committed on arrival, never bu
                 COMPOSE ── MessageDelta ──┬─▶ publish ──▶ relayed live to the room
                       │  (tail cleared)   └─▶ PROJECT (my own screen)
                       │
-                      │ seal: 1s with no TEXT from Deepgram (5s if the last
+                      │ seal: 1s with no TEXT from the provider (5s if the last
                       │       segment is still an unconfirmed tail)
                       │       · word/time cap · speaker change · mute · stop · end
                       │       ✗ NOT the VAD gate — it is a cost gate only
@@ -70,15 +70,15 @@ kelabo end: UTT records ──▶ archive (S3) ──▶ MINUTES
 ### The seal rule
 
 > A message exists as soon as there is **any** text, confirmed or not — it is
-> rendered and relayed at once. Every Deepgram result carrying text resets a 1 s
+> rendered and relayed at once. Every STT result carrying text resets a 1 s
 > timer. **1 s with no text arriving seals the message.** If its last segment is
-> still an unconfirmed tail, it waits `staleTimeoutMs` (5 s) instead: Deepgram
+> still an unconfirmed tail, it waits `staleTimeoutMs` (5 s) instead: the provider
 > normally confirms within a beat, so silence there means it or the network
 > failed us, and the message is closed on what was heard rather than left
 > hanging. Caps: open longer than `maxOpenMs` (60 s), or more than `maxWords`
 > (250) words, seals on the next finalization.
 
-**Empty results are not text.** Deepgram emits them continuously while receiving
+**Empty results are not text.** A provider emits them continuously while receiving
 audio containing no speech. Counting them as activity kept the clock alive
 forever and a message never closed at all.
 
@@ -90,13 +90,13 @@ rendered two unclosed boxes for a single utterance.
 immutable body plus *at most one* trailing guess. Only that guess is drawn as
 live (dimmed, italic). Styling the whole box while any tail was outstanding made
 a minute of already-final transcript flicker as if it were about to change, and
-hid the one thing the live style is for — where Deepgram has actually got to.
+hid the one thing the live style is for — where the transcription has actually got to.
 The split is `messageParts`, next to `mergeTail` and tested with it, because a
 tail may *restate* the confirmed words rather than follow them: the boundary is
 not `text.length`, and `settled + live` must equal `messageText` exactly or the
 box gains or loses words the instant the tail clears.
 
-**Tails are throttled** (`TAIL_MIN_INTERVAL_MS`) before relay: Deepgram revises
+**Tails are throttled** (`TAIL_MIN_INTERVAL_MS`) before relay: a provider revises
 several times a second, the room cannot perceive the difference, and a delta or
 seal always flushes the newest one first, so nothing is lost.
 
@@ -109,7 +109,7 @@ Also sealed by: speaker change (diarization), mute, stop, kelabo end. A remote
 participant speaking is deliberately **not** a trigger (I6).
 
 **The VAD gate gets no vote.** It is a cost gate — it decides which audio is
-worth paying Deepgram to transcribe — and nothing else. Earlier versions let it
+worth paying the STT provider to transcribe — and nothing else. Earlier versions let it
 decide message boundaries too, which coupled the transcript to *how a room
 sounds*: where background noise sits near speech level the gate latches open,
 reports voice forever, and a message never sealed until the speaker muted.
@@ -119,19 +119,23 @@ whether words are still coming back.
 That also makes the rule uniform. With silence skipping off there is no gate at
 all and the rule is unchanged; there is no special case to get wrong.
 
-The gate still sends Deepgram a `Finalize` when it shuts, because with the
-trailing silence cut Deepgram's own endpointer may never fire and the last words
+The gate still tells the provider speech has ended when it shuts (the Deepgram
+provider sends a `Finalize` frame; Soniox stops the billable stream), because with
+the trailing silence cut the provider's own endpointer may never fire and the last words
 would be stranded. The answer is just another message: it resets the clock like
 any other, and the seal lands a second later if nothing follows. Nothing
 *depends* on that answer, though — see below.
 
 ### A final is settled on arrival
 
-Deepgram's streaming format is two kinds of Results frame: `is_final: false` is
-its guess for the segment in progress, restated in full about once a second;
-`is_final: true` means that segment is finalized and will never be revised, and
-the next segment starts where it ended. An utterance is the concatenation of its
-finals.
+Each provider's wire format lives in its own pure reader under
+`spa/src/transcript/stt/` (docs 06); the principle here holds for all of them.
+The Deepgram provider's streaming format is two kinds of Results frame:
+`is_final: false` is its guess for the segment in progress, restated in full
+about once a second; `is_final: true` means that segment is finalized and will
+never be revised, and the next segment starts where it ended. An utterance is
+the concatenation of its finals. (Soniox sends a token stream with per-token
+`is_final` instead; its reader normalises to the same shape.)
 
 `speech_final`, `UtteranceEnd` and `Finalize` mark where Deepgram thinks the
 *speaker* paused. **We use none of them**, and the reason is structural: the VAD
@@ -175,7 +179,7 @@ cycles normally down to about −35 dBFS.
 - **I3** — The LLM (gate, agent, minutes) only ever sees sealed messages. The room needs text immediately and the agent needs whole thoughts; tails and deltas serve the first without compromising the second.
 - **I4** — **One reducer.** A speaker's own view is produced by the same `apply()`, from the same events, that every listener receives. *This is the load-bearing invariant.* Grouping implemented twice — once for local speech, once for remote — is what let a speaker and a listener disagree about where messages began and ended.
 - **I5** — Message boundaries belong to the **speaker**. `messageId` is the sole grouping key; nothing re-derives boundaries from speaker identity, adjacency or timing.
-- **I5a** — Sealing depends on **Deepgram's output alone**. The VAD gate is a cost gate and never decides a message boundary, so the transcript cannot be broken by how a room sounds.
+- **I5a** — Sealing depends on **the STT provider's output alone**. The VAD gate is a cost gate and never decides a message boundary, so the transcript cannot be broken by how a room sounds.
 - **I5b** — An `is_final` result is committed to the composer **on arrival**. Nothing between the socket and the composer buffers text, and no stage waits for `speech_final`, `UtteranceEnd` or a `Finalize` answer — all three are unreliable once the gate has removed the silence they measure.
 - **I6** — A participant's message is sealed by their **own** silence, never by anyone else's speech. On a Kelabo call somebody is talking almost continuously, so sealing on remote speech shredded messages mid-sentence.
 - **I7** — The sealed message is authoritative: on arrival it **replaces** whatever its deltas built, so a dropped or duplicated delta self-heals.
@@ -216,7 +220,7 @@ rather than inferred.
 
 | Stage | Code |
 |---|---|
-| Capture | `spa/src/transcript/deepgram.js` (`readResult`: wire format, span cursor, diarization split — pure), `spa/src/capture/useCapture.js` (socket, audio clock, composer binding), `capture/vad.js` (gate; `stats()` feeds the Debug readout used to tune `hangoverMs`) |
+| Capture | `spa/src/transcript/stt/<provider>.js` (`readResult`: wire format, pure — one reader per provider, e.g. `stt/deepgram.js` with its span cursor and diarization split), `spa/src/stt/<provider>.js` (transport: connections, billable stream edges; resolved by `spa/src/stt/interface.js`), `spa/src/capture/useCapture.js` (audio clock, composer binding), `capture/vad.js` (gate; `stats()` feeds the Debug readout used to tune `hangoverMs`) |
 | Compose | `spa/src/transcript/composer.js` (`setTail`, `addFragment`, `seal`, `noteActivity`/`sealIfIdle`, `countWords`, caps) |
 | Publish | `spa/src/transcript/publisher.js` (`kind: 'delta' \| 'sealed'`) |
 | Distribute | `gateway/src/caption.js` (delta relay, duplicate suppression, persistence, agent dispatch) |

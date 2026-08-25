@@ -3,8 +3,8 @@
 All AWS infrastructure as one CDK app. **One config file** drives everything; no
 hard-coded values in source. Three standalone environments (**dev / staging /
 prod**); every resource **tagged** `app=kelabo` + `endpoint=<env>`. Reuses the prior art's
-stack decomposition (ARCHITECTURE §15.9), minus Cognito/orchestrator; add Deepgram
-token + SES + OTP.
+stack decomposition (ARCHITECTURE §15.9), minus Cognito/orchestrator; add STT
+credential mint + SES + OTP.
 
 ---
 
@@ -26,7 +26,7 @@ the selected env; nothing env-specific is hard-coded.
       "subdomains": { "portal": "dev", "gateway": "dev-gw" },
       "allowedEmailDomain": "example.com",
       "secrets": {
-        "deepgram": "kelabo/dev/deepgram",
+        "stt":      "kelabo/dev/stt",
         "llm":      "kelabo/dev/llm",
         "cookieSigningKey": "kelabo/dev/cookie-key",
         "oidcGoogle": "kelabo/dev/oidc-google",
@@ -42,6 +42,8 @@ the selected env; nothing env-specific is hard-coded.
       "llm": { "provider": "deepseek", "model": "deepseek-v4-flash",
                "smallModel": "deepseek-v4-flash",
                "baseUrl": "https://api.deepseek.com/v1" },
+      "stt": { "provider": "deepgram", "language": "en",
+               "providers": { "deepgram": { "…": "…" }, "soniox": { "…": "…" } } },
       "rtc": { "provider": "cloudflare", "defaultMode": "sfu",
                "meshMaxParticipants": 6, "iceTtlSeconds": 3600, "video": true },
       "ses": { "fromAddress": "otp@kelabo-dev.example.com" },
@@ -76,7 +78,7 @@ home region + `us-east-1` (CloudFront ACM), via `crossRegionReferences: true`.
 | **DnsStack** | import existing Route53 hosted zone | creates nothing |
 | **CertStack (home region)** | ACM certs for Gateway ALB domain | DNS-validated |
 | **CertStack (us-east-1)** | ACM certs for Portal CloudFront | required in us-east-1 |
-| **DynamoDbStack** | 7 tables (kelabos, users, otp, **refresh**, history, mcp, contacts) + S3 archive bucket | see [08-database.md](../08-database.md) |
+| **DynamoDbStack** | 8 tables (kelabos, users, otp, **refresh**, history, mcp, contacts, **journeys**) + S3 archive bucket | see [08-database.md](../08-database.md) |
 | **SesStack / config** | SES identity + from-address; (sandbox in dev). Not synthesized when `mail.provider` is not `ses` | OTP email |
 | **LambdaStack** | REST API Lambda (Node20); IAM (DynamoDB RW incl. refresh, SES send, Secrets read incl. social OIDC); **no `transcribe:*`** | control plane only |
 | **ApiGatewayStack** | HTTP API `/{proxy+}` → Lambda | no JWT authorizer |
@@ -209,7 +211,7 @@ The Gateway ECS uses the **default VPC, public subnets, no NAT** (cost),
 - **OpencodeSurfaceStack** (CloudFront reverse-proxy to opencode) → surface not built.
 - **AgentStack** (agent Lambda) → the agent runs **inside the Gateway task**, not
   Lambda (no 15-min cap). No separate agent stack.
-- AWS Transcribe IAM → Deepgram.
+- AWS Transcribe IAM → external STT providers (Deepgram/Soniox, docs 06).
 
 ---
 
@@ -229,7 +231,7 @@ not through CloudFront. *(No opencode subdomain — surface not built.)*
 
 | Secret | Used by |
 |--------|---------|
-| `kelabo/<env>/deepgram` | REST API (mint STT token) |
+| `kelabo/<env>/stt` | REST API (mint STT credentials; one key per provider — `{"deepgram":"…","soniox":"…"}`, managed by `make stt-key`) |
 | `kelabo/<env>/llm` | Agent worker in Gateway (server mode) |
 | `kelabo/<env>/cookie-key` | REST API + Gateway (sign/verify cookies + tunnel JWT) |
 | `kelabo/<env>/oidc-google`, `.../oidc-apple` | REST API (social login client id/secret) |
@@ -242,14 +244,15 @@ Dev may use inline values in local profiles; prod always references secrets.
 
 ## 5. IAM highlights
 
-- **REST Lambda:** DynamoDB RW (kelabos/users/otp/refresh/mcp/contacts), read
-  history + read S3 archive (plus narrow `dynamodb:DeleteItem` on history and
+- **REST Lambda:** DynamoDB RW (kelabos/users/otp/refresh/mcp/contacts/journeys),
+  read history + read S3 archive (plus narrow `dynamodb:DeleteItem` on history and
   `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`
   **when `mail.provider` is `ses`** and a read grant on `kelabo/<env>/mail`
-  when it is not, Secrets read (deepgram, cookie-key, oidc-*) and
+  when it is not, Secrets read (stt, cookie-key, oidc-*) and
   Create/Put/Get/Delete/Describe under the `kelabo/<env>/mcp/` prefix (host MCP
   tokens). No `transcribe:*`.
-- **Gateway task role:** DynamoDB — kelabos RW, history RW (incl.
+- **Gateway task role:** DynamoDB — kelabos RW, journeys RW (journey reports +
+  context + join settling, docs 20), history RW (incl.
   `participant-index`), mcp read + narrow `dynamodb:PutItem` (persists rotated
   OAuth tokens; cannot delete user config) + encrypt/decrypt on the mcp table's
   KMS key, contacts read, refresh `GetItem` (agent-token revocation check); S3
@@ -334,8 +337,8 @@ cdk deploy -c env=prod  --all
 - Root tags `app=kelabo`, `endpoint=<env>` on all resources → per-env cost
   allocation and easy teardown.
 - Cost levers: no NAT, `desiredCount:1` ECS (agent runs in-task — no extra compute
-  service), audio direct to Deepgram (no server audio egress), DG mute closes
-  sockets, cheap trigger gate keeps the agent idle on ordinary chatter.
+  service), audio direct to the STT provider (no server audio egress), mute closes
+  sockets/streams, cheap trigger gate keeps the agent idle on ordinary chatter.
 
 ---
 

@@ -2,7 +2,8 @@
 
 Sequence diagrams for every key flow. Components: **SPA**, **REST** (Lambda),
 **Gateway** (ECS, hosts the server-agent worker), **agent bridge** + the developer's own coding agent (dev
-laptop), **Deepgram**, **DynamoDB/S3**, **SES**, social **OIDC** providers.
+laptop), the **STT provider** (Deepgram or Soniox — [components/06-stt.md](components/06-stt.md)),
+**DynamoDB/S3**, **SES**, social **OIDC** providers.
 
 Legend: `──▶` request, `◀──` response/event, `···` async/background.
 
@@ -119,10 +120,10 @@ A person joining at minute 20 sees earlier AI posts, then live ones.
 ## 4. Capture → board — SERVER-AGENT mode (no developer)
 
 ```
-SPA          REST         Deepgram      Gateway       Agent        DynamoDB
+SPA          REST         STT           Gateway       Agent        DynamoDB
  │ POST /kelabos/:id/stt-token          │             │            │
- │──────────▶│ mint temp token ◀─Secrets │             │            │
- │◀──────────│ {token,params}            │             │            │
+ │──────────▶│ mint credential ◀─Secrets │             │            │
+ │◀──────────│ SttSession {provider,url,token,params}  │            │
  │ open WSS ─────────────▶│ (audio, direct)            │            │
  │ mic PCM ··············▶│                            │            │
  │◀── diarized results ───│                            │            │
@@ -257,6 +258,8 @@ SPA        REST        Gateway        agent bridge/AgentWorker  DynamoDB   S3
  │                         │ build Archive                             │
  │                         │ put history row (+participant-index) ─────▶│
  │                         │ put full JSON ───────────────────────────────▶│
+ │                         │ settle kelaboJoinCount per linked journey │
+ │                         │   (idempotent — §14c)                     │
  │                         │ SSE 'ended' to subscribers; drop worker   │
  │◀ 200 {ended}            │ kelabo{event:"ended"} down; socket STAYS  │
  │                         │ open so a late summary still lands        │
@@ -329,14 +332,71 @@ desktop app, which is not built).
 
 ---
 
-## 13. Deepgram token refresh (long kelabo)
+## 13. STT credential refresh (long kelabo)
 
 ```
-SPA                     REST/Deepgram
- │ token near expiry / socket closed          │
+SPA                     REST / STT provider
+ │ credential near expiry / socket closed     │
  │ POST /kelabos/:id/stt-token ▶ mint fresh   │
- │◀ {token} ; reopen WSS to Deepgram           │
+ │◀ SttSession ; reopen WSS to the provider    │
 ```
-Mute → close socket (stop billing); unmute → fresh token + reopen.
-Between utterances the VAD gate stops streaming audio and the socket idles on
-`KeepAlive` — billed audio ≈ speech, not kelabo length (06 §3.1).
+Mute → close socket (stop billing); unmute → fresh credential + reopen. When
+and how a billable stream idles or renews between utterances is the
+provider's transport's business — billed audio ≈ speech, not kelabo length
+(06 §3.1, §4).
+
+---
+
+## 14. Journey flows (docs 20)
+
+### 14a. Journey report — a member asks a question
+
+```
+SPA           REST                Gateway                LLM       DynamoDB(journeys)
+ │ POST /journeys/:id/reports {question} ▶│                │           │
+ │              │ put REPORT# (pending); ADD reportRequestCount ───────▶│
+ │              │ POST /internal/journeys/:id/report ▶│    │           │
+ │              │                    │ read META/DESC#/BOARDMSG#/DOC#/LINK#-minutes ◀│
+ │              │                    │ buildContext() — budgeted, docs 20 §6.2
+ │              │                    │ call ────────────▶│            │
+ │              │                    │ update REPORT# ready|failed ───▶│
+ │              │◀ done              │                    │           │
+ │◀ 200 {reportId, status:"pending"} │                    │           │
+ │ GET /journeys/:id/reports/:reportId ▶│ read ◀──────────────────────│
+ │◀ {question, answer, status}       │                    │           │
+```
+Generation runs in the Gateway because only its task role may read the LLM
+secret (docs 20 §6.1). The row always ends `ready` or `failed`; the one
+failure the Gateway cannot observe — being unreachable at all — is written by
+REST as `failed: gateway_unreachable`.
+
+### 14b. Agent turn — journey context supersedes host history
+
+```
+Gateway(runner)                 DynamoDB
+ │ ensureContext(kelaboId)         │
+ │ query KELABO#<id> JOURNEY#* ───▶│ (mirror rows, up to JOURNEY_LIMIT=3)
+ │ per journey: digest = description/health/board/documents/other minutes
+ │ historyStillApplies(meta, journeys)?
+ │   journeys non-empty ⇒ skip loadKelaboHistory()
+ │   journeys empty/unreachable ⇒ load it if historyEnabled
+ │ system prompt += "JOURNEY CONTEXT:" section
+```
+Gated on the *reduced, reachable* result, not the raw link count, so a
+dangling journey link falls back to host history rather than leaving the
+assistant with neither (docs 20 §12.1). Evaluated fresh every turn.
+
+### 14c. Kelabo end — contributor settling
+
+```
+Gateway(archive.js)                       DynamoDB(journeys)
+ │ endKelabo: archive written, then        │
+ │ query KELABO#<id> JOURNEY#* mirrors     │
+ │ per journey: settleKelaboJoin()         │
+ │   put SETTLED#<kelaboId> (attribute_not_exists) ▶│
+ │   marker fresh ⇒ ADD kelaboJoinCount per participant ▶│
+ │   marker exists ⇒ no-op (resumed end)   │
+```
+Independent of whether the archive write succeeded — a journey's roster
+reflects the kelabo having happened either way — and idempotent against
+`endKelabo`'s retry machinery via the marker (docs 20 §10).

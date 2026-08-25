@@ -32,6 +32,10 @@ SSE subscriber sets); (b) it terminates **long-lived WSS + SSE**; (c) it runs th
    (per-user) or accept the diarization label (room).
 5. **Archive:** on kelabo end, persist transcript + board to history (DynamoDB +
    S3).
+6. **Journey duties (docs 20):** generate journey reports on behalf of the REST
+   API (the LLM secret is readable here and nowhere else), push linked-journey
+   context into the agent's system prompt, serve the dev-mode journey tools
+   over the tunnel, and settle journey contributor counts on kelabo end — §6a.
 
 ---
 
@@ -50,6 +54,7 @@ SSE subscriber sets); (b) it terminates **long-lived WSS + SSE**; (c) it runs th
 | `/internal/kelabos/:id/minutes` | POST | REST Lambda requests a minutes job | internal app JWT |
 | `/internal/kelabos/:id/cancel`, `.../reschedule` | POST | REST Lambda signals a scheduled kelabo cancelled / rescheduled | internal app JWT |
 | `/internal/kelabos/:id/ring`, `.../ring/answer`, `.../ring/cancel` | POST | REST Lambda asks the Gateway to deliver / answer / cancel a ring over presence streams (docs 18 §6) | internal app JWT |
+| `/internal/journeys/:id/report` | POST | REST Lambda asks for a journey report to be generated (docs 20 §6.1) — §6a | internal app JWT |
 
 That's the whole surface. Board history backfill is served by the **REST API**
 (`GET /kelabos/:id/board`), not here — the Gateway only streams the live tail. The
@@ -96,6 +101,9 @@ Runtime-agnostic — nothing here names a coding agent, and `sessionRef` /
 | `rename` | `{ kelaboId, title }` | rename the kelabo |
 | `board_request` | `{ requestId, kelaboId }` | read the board |
 | `history_request` | `{ requestId, kelaboId }` | read the minutes of the host's past kelabos (host opt-in, `historyEnabled`) |
+| `journey_info_request` / `journey_timeline_request` / `journey_board_request` | `{ requestId, kelaboId, journeyId?, … }` | the dev-mode journey read tools (docs 20 §12.2) — §6a |
+| `journey_report_submit` | `{ requestId, kelaboId, journeyId?, question, answer }` | store the agent's own synthesis as a report — no LLM round-trip |
+| `journey_post` | `{ requestId, kelaboId, journeyId?, content, msgId? }` | write/edit a journey board message, gated by `aiCanPost` |
 | `detach` | `{ kelaboId? }` | leave |
 
 **Down (Gateway → bridge):**
@@ -109,6 +117,7 @@ Runtime-agnostic — nothing here names a coding agent, and `sessionRef` /
 | `request` | `{ kind, requestId, kelaboId }` | summary or archive, correlated |
 | `board` | `{ requestId, kelaboId, contributions[] }` | answer to `board_request` |
 | `history` | `{ requestId, kelaboId, enabled, entries[] }` | answer to `history_request`; `enabled:false` = the host never opted in, served by the same loader as the in-ECS agent's memory (`agent/history.js`) |
+| `journey_info` / `journey_timeline` / `journey_board` / `journey_report_submitted` / `journey_posted` | `{ requestId, kelaboId, resolved, journeys[], … }` | answers to the five journey frames above; `resolved` says how the journey was found ([10-data-contracts.md](../10-data-contracts.md) §3.2a) |
 | `ping` | `{}` | liveness |
 
 **Attach has two modes, decided by the kelabo's status and never by the client:**
@@ -192,10 +201,57 @@ Tests: `gateway/test/roster.mjs`.
 
 ---
 
+## 6a. Journey integration (docs 20)
+
+Four pieces, all in this task because they need what only the Gateway has —
+the LLM secret, the live agent context, the tunnel, and the archive hook.
+
+- **Report generation** — `POST /internal/journeys/:id/report` →
+  `generateJourneyReport` (`gateway/src/journeys.js`), run inline (no worker
+  thread, no dev-tunnel): a bounded synthesis over rows already in DynamoDB.
+  The task role has **read+write on the journeys table**
+  (`gateway-ecs-stack.js`), so the handler reads the journey's own context
+  directly, builds an explicitly *budgeted* prompt (`buildContext()` — per-item
+  caps and limits, docs 20 §6.2, unlike the unbounded main-agent thread), calls
+  the LLM via `agent/llm.js`, and writes the `REPORT#` row back `ready` or
+  `failed` — never left `pending`. This runs here and not in rest-api because
+  only this task role holds `GetSecretValue` on the LLM secret (docs 20 §6.1).
+- **Agent context push** — `agent/journeyContext.js`, sibling to `history.js`,
+  loaded in `runner.js`'s `ensureContext()` on every turn, no opt-in flag. For
+  up to `JOURNEY_LIMIT = 3` linked journeys (found via the kelabo's own
+  `JOURNEY#` mirror rows) it builds a digest from the same reducers a report
+  uses: latest description, health/progress, active board messages, active
+  documents (clipped harder than a report gets — this cost is paid every turn),
+  and *other* linked kelabos reduced to their minutes. `persona.js` renders it
+  as a `JOURNEY CONTEXT:` system-prompt section — reference material, not
+  instructions, wrapped in the same untrusted framing as transcript.
+  **It supersedes `historyEnabled`:** `ensureContext()` loads journey context
+  first and gates `loadKelaboHistory()` on `historyStillApplies(meta,
+  journeys)` — false the moment the *reduced, reachable* journey result is
+  non-empty, so a dangling link still falls back to host history rather than
+  leaving the agent with neither (docs 20 §12.1).
+- **Dev-mode journey tools** — five new KAP frame pairs in `tunnel.js` (§4
+  tables) serve `kelabo_journey_info/timeline/board/report_submit/post`. Reads
+  call straight into `journeys.js`'s reducers; the two writes are its own
+  exports (`submitJourneyReport`, `postJourneyBoardMessage`). An omitted
+  `journeyId` resolves against the kelabo's own links
+  (`resolveJourneyForKelabo`); an explicit one is trusted **only if it is one
+  of that kelabo's links** — never a bare lookup key. `journey_post` enforces
+  the journey's `aiCanPost` gate (docs 20 §12.2).
+- **Contributor settling** — `archive.js`'s `endKelabo`, after archiving,
+  queries the ending kelabo's `JOURNEY#` mirror rows and calls
+  `settleKelaboJoin()` (`journeys.js`) per linked journey, bumping every
+  participant's `kelaboJoinCount`. Idempotent against end-retry
+  (`archivePending`/`resuming`): a `SETTLED#<kelaboId>` marker written with
+  `attribute_not_exists(SK)` means a resumed end bumps nobody twice
+  (docs 20 §10).
+
+---
+
 ## 7. Speaker identity stamping
 
 - **Per-user capture:** speaker = participant display name (from the cookie).
-- **Room capture:** browser attached a Deepgram diarization label (`A/B/C`); Gateway
+- **Room capture:** browser attached an STT diarization label (`A/B/C`); Gateway
   forwards it as the speaker. **Trust note:** the label is accepted from the client
   body — trusted-but-unverified; a malicious room client could forge speaker tags.
   Accepted (room capture is a convenience mode); per-user capture is the
@@ -238,7 +294,11 @@ On end (host `POST /kelabos/:id/end` → REST sets status + calls
 2. Build `Archive {archiveId,title,startedAt,endedAt,participants,transcript,board,
    minutes?}`; write history row (DynamoDB, incl. `participant-index`) + full JSON to
    S3 (`archives/<host>/<archiveId>.json`).
-3. Emit SSE `ended` to subscribers; detach the agent; drop the agent worker. The
+3. Settle `kelaboJoinCount` on every journey the kelabo is linked to
+   (`settleKelaboJoin`, idempotent via the `SETTLED#` marker — §6a), independent
+   of whether the archive write itself succeeded: the journey's roster reflects
+   the kelabo having happened either way.
+4. Emit SSE `ended` to subscribers; detach the agent; drop the agent worker. The
    socket is deliberately left open past `ended` so a late summary still lands.
 
 ---

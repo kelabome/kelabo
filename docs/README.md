@@ -3,7 +3,8 @@
 Detailed design following `../ARCHITECTURE.md`. Read the architecture doc first
 (high-level design, locked decisions, and the prior-art mapping in §15).
 These documents drill into each **system component** and the **interfaces between
-them**.
+them**. (Deploying rather than reading? The operator's guide is
+[self-hosting.md](./self-hosting.md).)
 
 ## What "component" means here
 
@@ -18,9 +19,10 @@ responsibilities, and interfaces — **not** a React UI widget. The components a
    audio (WSS) │  board (SSE tail) + caption (POST)    │ read/write
    direct      │            ▲                          ▼
         ┌──────▼───────┐    │                    ┌───────────┐
-        │  Deepgram    │    │                    │ DynamoDB  │
-        │  (STT, ext.) │    │                    │  + S3     │
-        └──────────────┘    │                    └───────────┘
+        │ STT provider │    │                    │ DynamoDB  │
+        │ (Deepgram or │    │                    │  + S3     │
+        │ Soniox, ext.)│    │                    └───────────┘
+        └──────────────┘    │
                             │
                     ┌───────┴──────────────────┐  WSS tunnel   ┌───────────────┐
                     │        Gateway (one ECS)  │◄─────────────►│ Agent bridge  │
@@ -61,7 +63,7 @@ about.
 | 03 | [03-gateway.md](./components/03-gateway.md) | Gateway — caption channel, SSE board hub, caption-only tunnel, **in-task agent worker**, frame protocol, in-proc state | ECS Fargate ×1 |
 | 04 | [04-connector-rig.md](./components/04-connector-rig.md) | Rig — the prepackaged container for people who do not configure a coding agent themselves. One way in to dev mode; see 16 for the interface | dev laptop (Docker) |
 | 05 | [05-agent-mcp.md](./components/05-agent-mcp.md) | LLM/MCP/Agent layer — main+sub agent, ServerAgentRunner (**in the ECS task**), MCP layering, providers, trigger | Gateway ECS (server mode) / opencode (dev mode) |
-| 06 | [06-deepgram.md](./components/06-deepgram.md) | Deepgram STT integration — temp token, direct streaming, diarization, Utterance production | external + Lambda token minter |
+| 06 | [06-stt.md](./components/06-stt.md) | Speech-to-text — the STT provider boundary (Deepgram, Soniox): credential minting, direct streaming, per-provider billing shapes, diarization, Utterance production | external + Lambda credential minter |
 | 07 | [07-cdk-infra.md](./components/07-cdk-infra.md) | CDK / Infra — stacks, resources, one config file, envs, tagging, secrets | AWS CDK |
 | 14 | [14-agent-orchestration.md](./components/14-agent-orchestration.md) | Main-agent / sub-agent split — roles, both system prompts, brief/result contracts, per-agent chat-history construction, result nesting by `task_id`, summary provenance | Gateway ECS (server mode) |
 | 15 | [15-conference-rtc.md](./components/15-conference-rtc.md) | Conference audio — `sfu` vs `mesh` transports, the shared-microphone invariant, `rtc` SSE signalling, SFU proxy ownership rules, perfect negotiation, video seams | browser WebRTC + Cloudflare Realtime, signalled by Gateway ECS |
@@ -84,7 +86,7 @@ about.
 - **Language:** frontend + backend are **pure JS (no TS)**. Shared types are
   **JSDoc typedefs** (doc 10), validated with zod at trust boundaries.
 - **Speaker source:** a `speaker` is either an authenticated identity (per-user
-  capture) or a Deepgram diarization label `A/B/C` (room capture). Treated
+  capture) or an STT diarization label `A/B/C` (room capture). Treated
   identically downstream.
 - **Board gate (mode-split):** **server mode** — an agent reply reaches the shared
   board only if tagged as an LLM contribution: an `[LLM_CON]` line, then

@@ -1,6 +1,6 @@
 # 19 — Optional capabilities & graceful degradation
 
-Every external provider Kelabo uses can be absent: no Deepgram key, an expired
+Every external provider Kelabo uses can be absent: no STT key, an expired
 Cloudflare token, no LLM configured, a tier that opted a room out of the
 assistant. None of that is an error. It is a *smaller kelabo*, and the product
 must shrink to fit it rather than jam.
@@ -19,7 +19,7 @@ optional is gone:
 | 0 | join + presence + typed messages | gateway only | (never — this is the floor) |
 | 1 | P2P call (mesh) | rung 0 | messages-only room |
 | 2 | SFU conference, TURN | Cloudflare creds | fall back to mesh (capped) |
-| 3 | live transcription | Deepgram key | typed messages only |
+| 3 | live transcription | an STT provider key (`kelabo/<env>/stt`, docs 06) | typed messages only |
 | 4 | assistant / board | LLM key or dev agent | no board tab, no @kelabo |
 | 5 | minutes, records, history | archive + rung 3 | no record after the kelabo |
 
@@ -29,8 +29,8 @@ gatekeeper for it.
 
 The incident that named this rule: `muted` — the flag that gates the outgoing
 *call* track (rung 1) — lived in the STT hook (rung 3) and was only cleared
-inside the Deepgram socket's `onopen`. "Unmute" therefore *meant* "successfully
-connect to Deepgram", and on any deployment where Deepgram was absent or broken
+inside the STT socket's `onopen` (Deepgram, then hard-wired). "Unmute" therefore
+*meant* "successfully connect to Deepgram", and on any deployment where STT was absent or broken
 the mic could never be unmuted while the UI complained about transcription.
 Two visible bugs, one inverted dependency.
 
@@ -87,7 +87,9 @@ inputs, and all three live server-side:
 3. **Runtime health** — the token mint failed, the provider is down.
 
 The kelabo META response carries this as `capabilities`, a map of
-`{ name: { on, mode? } }` computed by the REST API (`rest-api/src/kelabos.js`):
+`{ name: { on, … } }` computed by the REST API (`rest-api/src/kelabos.js`) —
+`stt` carries `{ on, provider }` (which STT provider will transcribe, so the
+client can pick its defaults before minting anything), `rtc` carries `mode`:
 `stt`, `assistant` and `rtc` from provider-secret **existence** (DescribeSecret
 only — the API can state that the LLM key exists without being able to read
 it; `rest-api/src/secrets.js secretExists`), `video` from deployment config.

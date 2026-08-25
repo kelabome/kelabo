@@ -23,8 +23,10 @@ session against their private codebase.
   permission prompt appears in the developer's own terminal. The interface is
   three contracts (wire protocol, MCP tools, a per-runtime injection adapter):
   [`docs/components/16-agent-bridge.md`](./docs/components/16-agent-bridge.md).
-- **Audio goes browser → Deepgram directly** (not through the Kelabo server) to
-  cut cost and server load. The server receives **transcripts**, not audio.
+- **Audio goes browser → the STT provider directly** (not through the Kelabo
+  server) to cut cost and server load. The server receives **transcripts**, not
+  audio. STT is a pluggable boundary with two providers, Deepgram and Soniox
+  ([`docs/components/06-stt.md`](./docs/components/06-stt.md)).
 - **Kelabo hosts the conference call, on Cloudflare Realtime, with two
   transports** (§16, docs 15). `sfu` (default) relays media through Cloudflare's
   edge and scales; `mesh` ("secure kelabo", host opt-in at creation) keeps media
@@ -57,6 +59,9 @@ session against their private codebase.
 - **Kelabo minutes** generated on demand when the **host** requests, at any time.
 - **Persistence:** sessions + transcripts (+ minutes if generated) can be saved;
   **registered** participants can access records. Guests cannot.
+- **Journeys** ([`docs/20-journey.md`](./docs/20-journey.md)): a persistent
+  container linking related kelabos, so context — minutes, documents, Q&A
+  reports — carries between meetings instead of starting cold each time.
 - **MCP config:** the **host's personal** MCP servers, managed in common
   Settings (`/me/mcp`), apply to every kelabo they host; the host can opt out
   per kelabo at creation. Org-wide MCP and groups/ACLs are not built.
@@ -103,7 +108,8 @@ session against their private codebase.
   Service Worker only.
 - **Prior art:** a working v0 of this exact system exists internally
   (browser STT → opencode kelabo-bot → shared reply feed). Kelabo reuses its
-  proven patterns (§15), changing: STT provider (Deepgram, not AWS Transcribe),
+  proven patterns (§15), changing: STT provider (a pluggable boundary — Deepgram
+  or Soniox, not AWS Transcribe),
   auth (OTP, not Cognito hosted-UI SSO), and config (one file, dev/staging/prod,
   tagged).
 - **Stack:** Vite + React + Tailwind (frontend). **Node.js + pure JS**
@@ -123,27 +129,30 @@ session against their private codebase.
 > mode the call is relayed by Cloudflare's edge, and an SFU terminates DTLS-SRTP,
 > so Cloudflare *can* decrypt it. In `mesh` mode nothing but the participants
 > can. Transcription is unchanged either way: each browser still streams only its
-> own microphone, direct to Deepgram.
+> own microphone, direct to the STT provider.
 
 
-**Browser captures mic → connects directly to Deepgram → receives diarized
-transcript in the browser → sends only finalized `Utterance` events to the server
-(`POST /caption` over HTTPS).**
+**Browser captures mic → connects directly to the STT provider (Deepgram or
+Soniox) → receives diarized transcript in the browser → sends only finalized
+`Utterance` events to the server (`POST /caption` over HTTPS).**
 
 Consequences (all good for the constraints above):
 - Server never processes audio → far less CPU/bandwidth/cost, and easier to run
   serverless.
-- Deepgram cost/usage is per client connection (each browser opens its own DG
-  session), attributable per participant. Billing follows the audio streamed, so
-  each client runs a local VAD gate and streams only speech — a participant is
-  silent for most of a kelabo, and silence is held with `KeepAlive` instead of
-  being transcribed (`spa/src/capture/vad.js`, docs 06 §3.1).
-- **Key handling:** the browser must not hold a long-lived Deepgram key. Use
-  **Deepgram temporary tokens**: a tiny Lambda mints a short-lived DG token (from a
-  server-side key in Secrets Manager) that the browser uses to open its DG socket.
+- STT cost/usage is per client connection (each browser opens its own provider
+  session), attributable per participant. Each client runs a local VAD gate so
+  only speech is billed — a participant is silent for most of a kelabo. How that
+  saving lands is the provider's business: Deepgram bills the audio it receives
+  (silence is held with `KeepAlive` instead of being transcribed), Soniox bills
+  stream wall-clock (the client starts/stops billable streams on speech edges)
+  (`spa/src/capture/vad.js`, docs 06).
+- **Key handling:** the browser must not hold a long-lived provider key. A tiny
+  Lambda mints a short-lived credential (a Deepgram temporary token, a Soniox
+  temporary API key) from the server-side key in Secrets Manager
+  (`kelabo/<env>/stt`) that the browser uses to open its provider socket.
   This is the only audio-related server touchpoint, and it's cheap + serverless.
 
-So the data plane is: **audio path = browser↔Deepgram**; **control/text path =
+So the data plane is: **audio path = browser↔STT provider**; **control/text path =
 browser↔the server (transcripts, board, agent I/O)**.
 
 ---
@@ -202,7 +211,7 @@ different places.
 ## 5. Core interfaces (keep both modes unified)
 
 ```js
-// Utterance: produced in the BROWSER (post-Deepgram), sent to server.
+// Utterance: produced in the BROWSER (post-STT), sent to server.
 /** @typedef {{
  *  kelaboId: string, clientId: string, speaker: string,
  *  text: string, tStart: number, tEnd: number, isFinal: boolean
@@ -219,7 +228,7 @@ different places.
 ```
 
 Three seams (pure-JS modules with a documented contract, no TS interfaces):
-1. **AudioSource** — always the browser+Deepgram; emits `Utterance`.
+1. **AudioSource** — always the browser+STT provider; emits `Utterance`.
 2. **AgentRunner** — `ServerAgentRunner` (server main/sub agents) or
    `OpencodeAgentRunner` (relay to the dev's opencode). Server code calls the same
    `run(ctx)` and gets `Contribution`s either way.
@@ -276,8 +285,8 @@ calls) and **one ECS Gateway data plane** (all live traffic + the server-agent).
 
 ```
 Browser (Vite/React SPA on CloudFront + S3)
-   │  audio  ├────────────────────────────────► Deepgram (direct)
-   │  (DG temp token from REST Lambda)
+   │  audio  ├────────────────────────────────► STT provider (Deepgram/Soniox, direct)
+   │  (short-lived STT credential from REST Lambda)
    │
    │  HTTPS REST (auth, kelabos, join, records, board backfill, stt-token)
    ▼
@@ -291,7 +300,7 @@ Connector (dev laptop) ── WSS /rig ──────────►   · ca
 ```
 
 - **Control plane (Lambda):** OTP/social auth + refresh rotation, kelabo CRUD, join,
-  records, minutes requests, board backfill, Deepgram token mint. All short and
+  records, minutes requests, board backfill, STT credential mint. All short and
   bounded — the 15-minute cap is irrelevant here. It reaches the Gateway through
   authenticated internal endpoints (`POST /internal/kelabos/:id/end`,
   `/internal/kelabos/:id/minutes`) so kelabo lifecycle and agent jobs signaled via
@@ -343,7 +352,7 @@ truth consumed by CDK. Nothing environment-specific is hard-coded in source.
   "environments": {
     "dev":     { "endpoint": "dev",     "domain": "kelabo-dev.example.com",
                  "allowedEmailDomain": "example.com",
-                 "deepgram": { "secretName": "kelabo/dev/deepgram" },
+                 "stt":      { "provider": "deepgram", "secretName": "kelabo/dev/stt" },
                  "llm":      { "provider": "deepseek", "secretName": "kelabo/dev/llm" },
                  "ses":      { "fromAddress": "otp@kelabo-dev.example.com" },
                  "retentionDays": 30, "tenantId": "self" },
@@ -366,8 +375,8 @@ Rules baked into CDK:
 ## 12. Frontend (Vite + React + Tailwind, pure JS)
 
 - SPA on **S3 + CloudFront**.
-- Panels in one window: **Capture** (mic + DG temp-token connect + diarization
-  toggle from current prototype) and **Board** (live contributions).
+- Panels in one window: **Capture** (mic + short-lived STT credential connect +
+  diarization toggle from current prototype) and **Board** (live contributions).
 - **Service Worker** for OS notifications.
 - Guest join screen (name only, `localStorage`).
 - Host controls: "Generate minutes", session settings. MCP lives in common
@@ -389,7 +398,7 @@ MIT (see `README.md`).
    when the browser is fully closed**. If you truly want tray icons with the
    browser closed, that requires a small native/desktop companion. What ships
    delivers "you don't need to watch the tab," not "no browser at all."
-2. **Direct-to-Deepgram + "developer trigger not on server"** means in dev mode the
+2. **Direct-to-STT + "developer trigger not on server"** means in dev mode the
    transcript must also reach the developer's opencode. Two options: (a) browser
    sends transcript to server, server relays to the Connector/Rig; (b)
    browser/Connector peer path. (a) is simpler and keeps one transport — recommended.
@@ -401,8 +410,9 @@ MIT (see `README.md`).
    is the only ECS service; everything else stays Lambda.
 4. **OTP cost/deliverability:** SES must be out of sandbox in prod; dev/staging can
    use verified addresses. Rate-limit OTP issuance (abuse + cost).
-5. **Deepgram temp tokens** are one-time/short-lived; the browser must fetch a
-   fresh one per session. Cheap, but it's a required round-trip before capture.
+5. **STT credentials are short-lived** (a Deepgram temp token, a Soniox
+   temporary API key); the browser must fetch a fresh one per session. Cheap,
+   but it's a required round-trip before capture.
 6. **Pure JS (no TS) for shared contracts** loses compile-time safety on the
    `Utterance`/`Contribution` seams; mitigate with JSDoc typedefs + runtime
    validation (e.g. zod) at the server boundary.
@@ -421,8 +431,8 @@ MIT (see `README.md`).
 The internal v0 is a working prototype of this exact product: browser captures
 audio, streams it directly to a cloud STT, captions flow to an **opencode
 `kelabo-bot` agent**, and the agent's replies fan out to a shared reply feed.
-**We reuse its architecture almost wholesale.** Kelabo's deltas are: Deepgram STT
-(the v0 uses AWS Transcribe), OTP auth (the v0 uses Cognito hosted-UI SSO), and
+**We reuse its architecture almost wholesale.** Kelabo's deltas are: pluggable STT
+(Deepgram or Soniox; the v0 uses AWS Transcribe), OTP auth (the v0 uses Cognito hosted-UI SSO), and
 one-file/tagged CDK config. Everything below is extracted from the actual v0
 source and is directly applicable.
 
@@ -519,7 +529,7 @@ opencode plugin hooks get no HTTP headers, so identity is stamped upstream:
    prepends `[name] ` to the visible text.
 
 For Kelabo: the **speaker** field already comes from either (a) per-user capture
-(authenticated identity) or (b) Deepgram diarization label (room mode). We keep the
+(authenticated identity) or (b) STT diarization label (room mode). We keep the
 same "stamp identity as message metadata, plugin re-reads it" pattern so the agent
 sees `[transcript] [Alice] …` regardless of source; the metadata field is
 `kelaboSpeaker`.
@@ -575,7 +585,7 @@ Either way → Gateway per-kelabo **SSE hub** `GET /caption/replies?kelaboId=…
 (EventSource, `withCredentials`) → board. **Late-comers/backfill:** SPA first calls
 `GET /kelabos/:id/board` (persisted Contributions) then subscribes to the SSE tail.
 
-### 15.6 STT: swap AWS Transcribe → Deepgram (the one real change)
+### 15.6 STT: swap AWS Transcribe → a pluggable STT provider (the one real change)
 
 The v0's pattern (keep the *shape*, change the provider):
 - Lambda vends a **short-lived presigned/temp credential** to the browser
@@ -585,13 +595,15 @@ The v0's pattern (keep the *shape*, change the provider):
   Float32→Int16 PCM ~100ms frames → WS to STT (matches our current `index.html`
   prototype exactly).
 
-Kelabo change: replace the Transcribe presign Lambda with a **Deepgram
-temp-token Lambda** (mints a short-lived Deepgram key via Deepgram's management
-API, server key in Secrets Manager; exact endpoint confirmed at build time).
-Browser opens `wss://api.deepgram.com/v1/listen?diarize_model=latest&…`
-directly (our prototype). Diarized `Utterance`s (final only) are POSTed to the
-Gateway `/caption` endpoint exactly like the v0. **Audio still never touches
-Kelabo infra.**
+Kelabo change: replace the Transcribe presign Lambda with an **STT credential
+mint** behind a provider boundary (`rest-api/src/stt/<id>.js`; server key in
+Secrets Manager, `kelabo/<env>/stt`). The Deepgram provider mints a short-lived
+token via `/v1/auth/grant`; the Soniox provider mints a temporary API key via
+`/v1/auth/temporary-api-key`. The browser opens the provider's socket directly
+with that credential (`SttSession {provider, url, token, …}`). Diarized
+`Utterance`s (final only) are POSTed to the Gateway `/caption` endpoint exactly
+like the v0. **Audio still never touches Kelabo infra.** Full design:
+[`docs/components/06-stt.md`](./docs/components/06-stt.md).
 
 ### 15.6a Server-agent runs INSIDE the Gateway ECS (not Lambda)
 
@@ -674,7 +686,7 @@ Kelabo changes to CDK:
 - Drop the **Cognito** stack (OTP + social OIDC instead); drop
   **hosted-workspace/orchestrator** stacks; **drop the opencode-surface
   CloudFront stack** (surface not built).
-- Add: **Deepgram temp-token** Lambda + **SES** (OTP email) + **otp** table +
+- Add: **STT credential-mint** Lambda + **SES** (OTP email) + **otp** table +
   **refresh-tokens** table + **social OIDC** client secrets (Google/Apple).
 - **Scale-out (future):** raise `desiredCount` with **kelabo-affinity routing**
   (per-task endpoints registered in DynamoDB, handed out by REST; ALB per-task
@@ -683,7 +695,7 @@ Kelabo changes to CDK:
 
 ### 15.10 What to explicitly NOT carry over
 
-- AWS Transcribe / SigV4 presign (→ Deepgram temp token).
+- AWS Transcribe / SigV4 presign (→ short-lived STT provider credential).
 - Cognito hosted UI + PKCE + `mode=rig`/`mode=launch` blobs (→ OTP + social OIDC).
 - Orchestrator + hosted-workspace + PTY/TUI server (not adopted).
 - **opencode-in-browser surface + its HTTP/SSE reverse-proxy** — the
@@ -717,11 +729,11 @@ guarantee people joined under):
    `rtc.meshMaxParticipants` (default 6) a joiner gets `409 mesh_room_full` and
    keeps the board and transcript. Spilling over to the SFU would quietly break
    the promise the host chose.
-2. **`mesh` secures media only.** Deepgram, the board, the agent and persistence
+2. **`mesh` secures media only.** Transcription, the board, the agent and persistence
    are unchanged. A secure kelabo is not an off-the-record kelabo.
 3. **STT stays per-browser.** Each participant transcribes only their own mic;
    the call carries playback audio and is never a transcription source. That is
-   what keeps speaker attribution exact and the Deepgram bill per-participant.
+   what keeps speaker attribution exact and the STT bill per-participant.
 
 ### Where it lives
 
@@ -737,7 +749,7 @@ in-process (`state.rtcRooms`), like `sseSubscribers`; the durable half is
 
 - `desiredCount: 1` is now load-bearing for RTC signalling too. Any future
   kelabo-affinity scale-out (§1, §15.5) must route RTC connections with the rest.
-- Deepgram spend rises: a hosted call means everyone is genuinely on it for the
+- STT spend rises: a hosted call means everyone is genuinely on it for the
   whole kelabo, rather than several people sharing one room mic. The VAD gate
   still bounds it.
 - Mesh sizing is calibrated for audio. **Video multiplies per-peer uplink and

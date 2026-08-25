@@ -1,7 +1,7 @@
 # AGENTS.md — Kelabo
 
-Kelabo assistant: browser SPA captures audio → Deepgram (direct, never through our
-infra) → captions POSTed to a single ECS Gateway → LLM agent → contributions fanned
+Kelabo assistant: browser SPA captures audio → STT provider (Deepgram or Soniox —
+direct, never through our infra) → captions POSTed to a single ECS Gateway → LLM agent → contributions fanned
 to a live SSE "board". The SPA also hosts the **conference call** over Cloudflare
 Realtime (`sfu` or peer-to-peer `mesh`), signalled by the same Gateway. Design docs:
 `ARCHITECTURE.md` first, then `docs/README.md` (component docs in `docs/components/`).
@@ -16,7 +16,7 @@ installs nothing but esbuild.
 |---|---|---|
 | `config/` | `loadConfig.mjs` — single source of truth for every env-specific value | build/deploy time |
 | `contracts/` | `@kelabo/contracts`: constants, zod schemas, WSS frames, `[LLM_CON]` parsing | shared |
-| `rest-api/` | control plane (auth/OTP/OIDC, kelabos, records, deepgram token) | Lambda + API GW |
+| `rest-api/` | control plane (auth/OTP/OIDC, kelabos, records, STT credential mint — `stt-token`) | Lambda + API GW |
 | `gateway/` | caption ingest, SSE hub, `/rig` WSS tunnel, in-task agent worker | ECS Fargate ×1 |
 | `connector/` | the agent bridge: an MCP server a developer's own coding agent spawns, which tunnels to the Gateway (docs 16). `private`; publishes as `@kelabome/agents` via `build/pack.mjs` (docs 17) | dev laptop |
 | `rig/` | Docker image packaging opencode + the bridge for people who do not configure an agent themselves; no `package.json` — it bundles `connector/` | dev laptop |
@@ -297,7 +297,7 @@ Order matters and is non-obvious:
 - **Three token families share one signing key** (browser cookies, the internal
   REST→Gateway JWT, agent tokens). `aud` is the only thing separating them, so
   every verifier must check it.
-- Speaker is either an authenticated identity or a Deepgram diarization label
+- Speaker is either an authenticated identity or an STT diarization label
   (`A`/`B`/`C`); both are treated identically downstream.
 - **One `getUserMedia` per kelabo.** `spa/src/rtc/useMicStream.js` owns the
   device; `useCapture` and `useRtc` both consume its stream. Acquiring twice gives

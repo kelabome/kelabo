@@ -9,10 +9,11 @@ push, §12.2 pull), and the SPA (§13, including the "Part of: …"
 breadcrumb). Not built, and not planned in this document — see §17:
 real file upload, an agent-triggered server-side report (§12.3, by
 design), any wallet/billing scope, and the AI-suggested-status/
-apply-status flow (§5/§6). Component docs (01-spa, 02-rest-api,
-03-gateway, 08-database, 09-data-flows, 10-data-contracts) still describe
-pre-Journey behaviour and have not yet been updated to include it — that
-update is itself still open work.
+apply-status flow (§5/§6). Also designed below but **not yet built**:
+`GET /journeys/search` and the global-search dialog's journeys tab
+(§11/§13) — the rows are kept in the tables, marked. Component docs
+(01-spa, 02-rest-api, 03-gateway, 08-database, 09-data-flows,
+10-data-contracts) now include Journey behaviour (updated 2026-08-25).
 
 §6.1 records a correction made mid-implementation: the original draft put
 report generation in rest-api and was wrong to. Read it if you are
@@ -556,9 +557,9 @@ as `kelabos.js`/`records.js`.
 | GET/POST/DELETE | `/journeys/:id/documents[/:docId]` | member | §8 |
 | POST | `/journeys/:id/reports` | member | `{question}` → synchronous report — §6 |
 | GET | `/journeys/:id/reports[/:reportId]` | member | List / one |
-| POST | `/journeys/:id/reports/:reportId/apply-status` | member | Apply a suggested health/progress — §5 |
+| POST | `/journeys/:id/reports/:reportId/apply-status` | member | Apply a suggested health/progress — §5 *(designed, not built — §17)* |
 | GET | `/journeys/:id/timeline?type=&before=&limit=` | §3.2 | §9.2 |
-| GET | `/journeys/search?q=` | session | Title/description/timeline text search, same "open candidates, cache, cap N" shape as `/records/search` |
+| GET | `/journeys/search?q=` | session | Title/description/timeline text search, same "open candidates, cache, cap N" shape as `/records/search` *(designed, not built)* |
 
 Touch-ups to existing endpoints:
 
@@ -801,8 +802,9 @@ there than a metaphor the model would have to already know to parse.
   journey — §11), capped at 10 (`journeyIds`, `contracts/src/schemas.js`).
   `historyEnabled` hides and resets to `false` the moment one is picked
   (§12.1's supersession rule) rather than staying offered pointlessly.
-- **Global search:** `SearchDialog.jsx` gains a third tab, following the
-  exact seam already built for two (`TABS` array, a third
+- **Global search:** *(designed, not built — `GET /journeys/search` does
+  not exist yet either)* `SearchDialog.jsx` would gain a third tab,
+  following the exact seam already built for two (`TABS` array, a third
   `Promise.allSettled` arm, `api.searchJourneys(q)`).
 - **Avatar:** the existing generated-identicon component, seeded by
   `journeyId` (`spa/src/components/ui/Avatar.jsx`), re-rolled the same way

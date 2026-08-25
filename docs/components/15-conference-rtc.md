@@ -2,7 +2,7 @@
 
 **Component:** the live call. **Runtime:** browser WebRTC + Cloudflare Realtime,
 signalled by the Gateway ECS task. Read [03-gateway.md](./03-gateway.md) and
-[06-deepgram.md](./06-deepgram.md) first — this doc sits between them.
+[06-stt.md](./06-stt.md) first — this doc sits between them.
 
 Kelabo hosts the kelabo's audio. Before this, participants were assumed to be in
 one room or on somebody else's call, and Kelabo only listened; now the call is

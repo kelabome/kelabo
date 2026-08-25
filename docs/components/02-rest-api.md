@@ -2,8 +2,8 @@
 
 **Runtime:** single Lambda (Node 20) behind API Gateway **HTTP API** with a
 `/{proxy+}` catch-all; a tiny in-code router dispatches by method + path. **Trust:** the control plane. It handles human-facing REST — auth,
-kelabos, join, records, and minting the Deepgram token. It **never** carries live
-audio/board traffic (that's the Gateway).
+kelabos, join, records, journeys, and minting the STT credential. It **never**
+carries live audio/board traffic (that's the Gateway).
 
 No API-Gateway JWT authorizer: the Lambda validates its own **httpOnly cookies**
 against DynamoDB on every call (simple, serverless).
@@ -21,9 +21,11 @@ against DynamoDB on every call (simple, serverless).
 4. **Board backfill** — serve persisted Contributions so late-comers see prior AI
    messages before subscribing to the live SSE tail.
 5. **Records** — list/read archived kelabos + minutes (registered participants).
-6. **Deepgram token** — vend a short-lived streaming token to the browser.
+6. **STT credential** — vend a short-lived, provider-shaped streaming credential
+   to the browser ([06-stt.md](./06-stt.md)).
 7. **Identity** — `/me`, `/logout`, `/logout-all`.
 8. **Minutes** — host-triggered minutes request.
+9. **Journeys** — the full CRUD + sub-resource surface of docs 20 (§3.5c).
 
 It does **not**: run agents (that's the Gateway's in-task worker), hold WSS/SSE
 connections, or process audio.
@@ -68,6 +70,7 @@ actions that touch live state must reach it synchronously:
 | `POST <gatewayBase>/internal/kelabos/:id/cancel` | notify a scheduled kelabo's cancellation |
 | `POST <gatewayBase>/internal/kelabos/:id/reschedule` | notify a schedule change |
 | `POST <gatewayBase>/internal/kelabos/:id/ring(/answer\|/cancel)` | deliver / answer / cancel a ring over the targets' presence streams (docs 18 §6) |
+| `POST <gatewayBase>/internal/journeys/:id/report` | generate a journey report (docs 20 §6.1) — the LLM secret is Gateway-only, so the synthesis cannot run here |
 
 All are authenticated with an **internal app JWT** minted by the Lambda (HS256,
 Secrets Manager key, short exp, `aud:"gateway-internal"`); the Gateway rejects them
@@ -272,15 +275,17 @@ List archived kelabos the caller participated in or hosted.
   transcript: [Utterance], board: [Contribution], minutes?: MinutesDoc }`
 - **Errors:** `not_a_participant` (403), `record_not_found` (404).
 
-### 3.5 Deepgram token
+### 3.5 STT credential
 
 #### `POST /kelabos/:id/stt-token` 🎟
-Mint a short-lived Deepgram streaming token for the browser.
-- **Behavior:** require valid participant cookie + kelabo `active`. Call Deepgram
-  `GET /v1/token` (or temporary-key API) using the server key from Secrets Manager;
-  return the temp token + connection params. Details in
-  [06-deepgram.md](./06-deepgram.md).
-- **200:** `{ token, expiresInSeconds, params: { model, diarize_model, ... } }`
+Mint a short-lived STT streaming credential for the browser.
+- **Behavior:** require valid participant cookie + kelabo `active`. The
+  provider-neutral core (`rest-api/src/stt/index.js`) reads the long-lived key
+  from the `kelabo/<env>/stt` secret and dispatches to the configured
+  provider's mint (`rest-api/src/stt/<id>.js` — Deepgram or Soniox); every
+  failure maps to `stt_unavailable`. Details in [06-stt.md](./06-stt.md).
+- **200:** `SttSession` = `{ provider, url, token, expiresInSeconds, params }`
+  — `params` are provider-shaped and opaque to the core.
 - **Errors:** `kelabo_ended` (410), `stt_unavailable` (502).
 
 ### 3.5a Contacts & people
@@ -298,6 +303,58 @@ Host-personal MCP server config ([05-agent-mcp.md](./05-agent-mcp.md) §5, §7a)
 `GET /me/mcp/:name/oauth/start` 🔑, `GET /me/mcp/oauth/callback` 🔑,
 `DELETE /me/mcp/:name/oauth` 🔑. Pasted bearer tokens are written to Secrets
 Manager under `kelabo/<env>/mcp/<identity>/<name>`; items store only `secretRef`.
+
+### 3.5c Journeys (docs 20)
+
+`rest-api/src/journeys.js`, same `createApp(deps)` factory convention as
+`kelabos.js`/`records.js`. Every route requires a session (🔑); *per-journey*
+access is then resolved fresh inside `journeys.js` on every request — owner →
+public-tenant-match (`identity.tenantId === journey.tenantId`) → private
+`ACCESSOR#<identity>` point-read → 403 — never a cached membership flag
+(docs 20 §3.2). Full semantics, permission matrix and item shapes:
+[20-journey.md](../20-journey.md) §3, §11.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST / GET | `/journeys` | Create `{title, description?, visibility}` / list `{mine, accessible, public}` |
+| GET / PATCH / DELETE | `/journeys/:id` | Detail (counts, description head, `myRole`) / title-visibility (owner) / cascading delete (owner, docs 20 §14.1) |
+| POST | `/journeys/:id/complete` \| `/reopen` | Status flip (owner); `completed` freezes every write |
+| GET/POST/DELETE | `/journeys/:id/accessors[/:identity]` | Private roster — member reads, owner writes |
+| POST/GET/DELETE | `/journeys/:id/kelabos[/:kelaboId]` | Link (`{kelaboId}`, caller must be host/participant of *that* kelabo) / linked list / unlink |
+| POST + GET | `/journeys/:id/description[/history]` | New immutable version / version list |
+| POST + GET | `/journeys/:id/status[/history]` | Health/progress snapshot (docs 20 §5) / version list |
+| GET/POST/PATCH | `/journeys/:id/board[/:msgId]` (+ `/archive`, `/unarchive`, `/history`) | Pinned messages; archive is soft and reversible (docs 20 §7) |
+| GET/POST/DELETE | `/journeys/:id/documents[/:docId]` | Pasted-text documents; removal is soft, one-way (docs 20 §8) |
+| POST + GET | `/journeys/:id/reports[/:reportId]` | Ask a free-text question / list / read one (docs 20 §6) |
+| GET | `/journeys/:id/timeline?type=&before=&limit=` | Backward-cursor timeline (docs 20 §9.2) |
+| GET | `/journeys/:id/contributors` | Per-person rollups (docs 20 §10) |
+
+*(Not built, deliberately: `POST .../reports/:reportId/apply-status` and
+`GET /journeys/search` — docs 20 §17 for the first; the second is designed in
+docs 20 §11 but has no route yet.)*
+
+**Report generation does not run in this Lambda.** `POST /journeys/:id/reports`
+writes the `pending` `REPORT#` row, bumps the requester's rollup, then *awaits*
+`POST <gatewayBase>/internal/journeys/:id/report` (§2a) — the LLM secret is
+`GetSecretValue`-readable only by the Gateway's task role, by design, so the
+synthesis happens there (docs 20 §6.1 records the correction). The Gateway
+writes the row `ready` or `failed`, never leaves it `pending`; the one failure
+it cannot observe — being unreachable at all — is written here as
+`failed: gateway_unreachable`. The response carries only `{reportId, status}`;
+the client re-fetches the finished row via GET.
+
+**Touch-ups to existing endpoints:**
+
+- `POST /kelabos` / `POST /kelabos/schedule` bodies accept optional
+  `journeyIds: string[]` (max 10) — best-effort links at creation, reported
+  back as `journeyLinks` per journey.
+- `GET /kelabos/:id` (and `/scheduled`) responses gain
+  `journeys: [{id, title, visibility}]` — the link-time snapshot from the
+  kelabo's own `JOURNEY#` mirror rows, feeding the "Part of: …" chips.
+- `DELETE /records/:archiveId`, **host-purge outcome only**: 409
+  `kelabo_in_journey` while any `JOURNEY#` mirror row exists on the kelabo —
+  unlink from every journey first (docs 20 §14.3). The participant-only
+  "drop from my list" outcome is untouched.
 
 ### 3.6 Health
 
@@ -325,7 +382,8 @@ Manager under `kelabo/<env>/mcp/<identity>/<name>`; items store only `secretRef`
 | `mcpOauth` | MCP OAuth 2.1 client: discovery (RFC 9728/8414), dynamic registration (RFC 7591), PKCE authorize + callback |
 | `agent` | agent-bridge device-code pairing; token list/revoke; attachable-kelabo discovery (docs 16 §6) |
 | `records` | archive read + access control; S3 fetch for large transcripts |
-| `deepgramToken` | mint temp STT token from server key |
+| `journeys` | the docs 20 surface: lifecycle, access checks, link/unlink, description/status versions, board, documents, reports (pending row + Gateway dispatch), timeline, contributor rollups |
+| `stt/` | STT credential minting: provider-neutral core (`index.js`) + one mint per provider (`deepgram.js`, `soniox.js`) — [06-stt.md](./06-stt.md) |
 | `db` | DynamoDB access (see [08-database.md](../08-database.md)) |
 | `config` | load env-injected config (allowed domain, table names, secrets ARNs) |
 
@@ -340,21 +398,25 @@ touching route handlers (ARCHITECTURE §15.7).
 `unauthenticated, refresh_invalid, oidc_failed, domain_not_allowed, rate_limited,
 invalid_email, invalid_code, code_expired, too_many_attempts, kelabo_not_found,
 kelabo_ended, not_host, already_ended, name_required, not_a_participant,
-record_not_found, stt_unavailable`.
+record_not_found, stt_unavailable, kelabo_in_journey` — plus the journey codes
+of docs 20 (`not_journey_owner`, `journey_completed`,
+`not_message_author_or_lead`, `not_document_owner_or_lead`, …).
 
 ---
 
 ## 6. IAM (least privilege)
 
-- DynamoDB: RW on kelabos/users/otp/refresh/mcp/contacts tables; read on history;
-  read S3 archive bucket. Plus a deliberately narrow `dynamodb:DeleteItem` on
+- DynamoDB: RW on kelabos/users/otp/refresh/mcp/contacts/journeys tables; read on
+  history; read S3 archive bucket. Plus a deliberately narrow `dynamodb:DeleteItem` on
   history and `s3:DeleteObject` on archive objects (for `POST /records/purge`) —
   the API still cannot *write* history rows or archives, which stay gateway-owned.
 - SES: `ses:SendEmail`, fenced by a `ses:FromAddress` condition — and granted
   **only when `mail.provider` is `ses`**. A deployment sending through another
   provider gets a read grant on `kelabo/<env>/mail` instead, so it cannot still
   send from the SES identity long after it stopped meaning to.
-- Secrets Manager: read Deepgram key, cookie/JWT signing key, social OIDC client
-  secrets (Google/Apple); Create/Put/Get/Delete/Describe on secrets under the
-  `kelabo/<env>/mcp/` prefix (host-pasted MCP bearer tokens).
-- No `transcribe:*` (we use Deepgram, not AWS Transcribe).
+- Secrets Manager: read the STT secret (`kelabo/<env>/stt`), cookie/JWT signing
+  key, social OIDC client secrets (Google/Apple); Create/Put/Get/Delete/Describe
+  on secrets under the `kelabo/<env>/mcp/` prefix (host-pasted MCP bearer
+  tokens). On the LLM secret: `DescribeSecret` **only**, never
+  `GetSecretValue` — the reason journey reports run in the Gateway (§3.5c).
+- No `transcribe:*` (STT is an external provider, not AWS Transcribe).

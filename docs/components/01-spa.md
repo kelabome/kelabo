@@ -2,7 +2,7 @@
 
 **Runtime:** static assets on S3 served via CloudFront. **Stack:** Vite + React +
 Tailwind, pure JS/JSX. **Trust:** untrusted client; holds no long-lived
-secrets (Deepgram key never reaches it; only short-lived temp tokens and an
+secrets (the STT provider key never reaches it; only short-lived temp tokens and an
 httpOnly session cookie set by the REST API).
 
 ---
@@ -14,15 +14,16 @@ httpOnly session cookie set by the REST API).
    every open).
 2. Let registered users create/list kelabos and open records.
 3. Let anyone join a kelabo from an invite link with a display name.
-4. In a kelabo: capture microphone audio and stream it **directly to Deepgram**,
-   render the diarized transcript, and render the shared board.
+4. In a kelabo: capture microphone audio and stream it **directly to the STT
+   provider** (Deepgram or Soniox — [06-stt.md](./06-stt.md)), render the
+   diarized transcript, and render the shared board.
 5. Post finalized utterances (captions) to the Gateway; **backfill prior board
    messages** via REST, then subscribe to the board SSE stream and render new
    Contributions.
 6. Host controls: end kelabo, generate minutes, MCP override, copy invite link.
 7. Raise OS notifications (Service Worker) for new board messages when unfocused.
 
-**Explicitly NOT the SPA's job:** holding the Deepgram key, deciding when the agent
+**Explicitly NOT the SPA's job:** holding the STT provider key, deciding when the agent
 speaks, running MCP, persisting transcripts (server does these). **No
 opencode-in-browser surface** — there is no collaboration tab.
 
@@ -33,12 +34,12 @@ opencode-in-browser surface** — there is no collaboration tab.
 | Target | Transport | Purpose | Auth |
 |--------|-----------|---------|------|
 | REST API | HTTPS (fetch, `credentials:include`) | auth (OTP+social), refresh, kelabos, join, **board backfill**, records, STT token | session/participant cookie |
-| Deepgram | WSS (direct) | stream mic audio, receive diarized transcript | short-lived temp token (from REST API) |
+| STT provider (Deepgram or Soniox) | WSS (direct) | stream mic audio, receive diarized transcript | short-lived credential (`SttSession` from REST API) |
 | Gateway | HTTPS POST `/caption` | send finalized utterances | participant cookie |
 | Gateway | SSE `GET /caption/replies?kelaboId=` (EventSource, `withCredentials`) | receive live board Contributions | participant cookie |
 | Cloudflare Realtime SFU / peers | WebRTC (media) | conference audio/video | signalled over the existing SSE stream + `POST /rtc/*` (participant cookie) |
 
-The SPA **never** opens a WebSocket to the Gateway. Audio = WSS to Deepgram only;
+The SPA **never** opens a WebSocket to the Gateway. Audio = WSS to the STT provider only;
 board = REST backfill + SSE tail. No opencode collaboration tab. Contract details in
 [10-data-contracts.md](../10-data-contracts.md).
 
@@ -58,6 +59,8 @@ board = REST backfill + SSE tail. No opencode collaboration tab. Contract detail
 /invite/:kelaboId   Accept or decline an invitation  ← works without an account
 /kelabos             Past kelabos — records list (registered)
 /kelabos/:id         Record + minutes (registered)
+/journeys            Journeys list — mine / accessible / public (registered)
+/journeys/:id        One journey: tabs, timeline, board, documents (registered)
 /contacts            Contacts (registered)
 /settings            Personal settings (registered)
 /pair                Agent device pairing
@@ -357,8 +360,14 @@ remount every card and there would be nothing to animate.
   back to grid / close panel.
 - **Dev-mode chip** if any participant has a bound Rig; contributions from a dev's
   opencode carry a "from local repo" chip. (Still no opencode tab — only the chip.)
+- **Journey chip** (`RoomShell.jsx`) in the identity strip when the kelabo is
+  linked to any journey — generically labelled ("journey" / "N journeys", titles
+  in the tooltip), rendered from `kelabo.journeys` and mutually exclusive with
+  the `historyEnabled` chip beside it, because a live journey link supersedes
+  the host-history context (docs 20 §12.1). Same disclosure reasoning as
+  `historyEnabled`: context nobody can see is context nobody can object to.
 
-`routes/Kelabo.jsx` owns the four live connections — microphone, Deepgram
+`routes/Kelabo.jsx` owns the four live connections — microphone, STT
 capture, conference transport and the kelabo's single SSE stream (`room/useBoard.js`,
 extracted from the old `BoardPanel` so that no layout decision can drop a
 stream) — and nothing about how the room looks. `room/RoomShell.jsx` owns the
@@ -390,15 +399,15 @@ answers) are testable: `spa/test/tabClaim.mjs`. Scope is one browser profile —
 a phone and a laptop are a legitimate pair of tabs.
 
 **Multilingual (not built):** participants may speak different languages in the same
-kelabo — **no per-participant language setting**: Deepgram's `detect_language`
-identifies each speaker's language automatically. Translation is a **host
+kelabo — **no per-participant language setting**: the STT provider's language
+detection identifies each speaker's language automatically. Translation is a **host
 control**: the host enables it in a Translation drawer and picks the target
 language (default = the kelabo's auto-detected **major language**, shown as a
 `🌐 major: EN` chip in the room's identity cluster). When on, the Transcript
 side panel shows a read-only `translated → <LANG>` chip and every finalized transcript line renders
 bilingually — original text with the translation beneath it in accent color
 tagged with the target-language label. Interim lines are never translated
-(finals only). Pipeline: Deepgram stamps the detected `lang` on each
+(finals only). Pipeline: the STT provider stamps the detected `lang` on each
 `Utterance`; translation would run server-side and be delivered as an
 optional `tr` field on captions/records — the SPA only renders it, never calls
 a translation API itself.
@@ -448,23 +457,69 @@ document stored plain strings; each section renders either shape.
 Sections: Profile, Notifications (enable OS notifications → SW permission), MCP
 (personal defaults), Appearance (theme), Danger (sign out everywhere).
 
+### 5.9 Journeys (`/journeys`, `/journeys/:id`) — docs 20 §13
+
+The persistent container that links related kelabos ([20-journey.md](../20-journey.md));
+this section is the SPA surface only, the design is there.
+
+- **Nav:** a `Journeys` sidebar entry beside Kelabos, and a **New journey**
+  sidebar *action* beside New kelabo/Schedule/Join (`AppShell.jsx`) — a
+  `<button>`, not a route, opening `NewJourneyModal`
+  (`components/NewJourneyModal.jsx`) from wherever the user already is.
+- **`/journeys`** (`routes/Journeys.jsx`): bucketed list `{mine, accessible,
+  public}` — reusing the Records bucketed-sections pattern. Each row: avatar,
+  title, status chip, health dot, progress badge, kelabo count, last activity.
+- **`/journeys/:id`** (`routes/JourneyDetail.jsx`): header (avatar, title,
+  status, health/progress, lead) + `Tabs`: **Overview** · **Timeline** ·
+  **Kelabos** (linked list + New kelabo/Schedule shortcuts via `?journeyId=`) ·
+  **Reports** · **Board** ("Show archived (N)" reveal) · **Documents** ("Show
+  removed (N)" reveal) · **Accessors** (appended only when the journey is
+  private; lead-managed). Details per tab: docs 20 §13.
+- **Creation-time linking:** `NewKelabo.jsx` / `Schedule.jsx` gain
+  `JourneyPicker` (`components/JourneyPicker.jsx`), a chip-list + modal picker
+  over `api.listJourneys()`, capped at 10 (`journeyIds`,
+  `contracts/src/schemas.js`). Picking any journey **hides the
+  `historyEnabled` toggle and resets it to `false`** — a journey link
+  supersedes host-history context (docs 20 §12.1), so offering both would be
+  offering a dead switch.
+- **"Part of: …" breadcrumb:** `RecordDetail.jsx` and `ScheduledKelabo.jsx`
+  render journey chips (linking to `/journeys/:id`) from the `journeys:
+  [{id,title,visibility}]` field on the kelabo GET; the live room shows the
+  generic chip via `RoomShell.jsx` (§5.4).
+- **Display vocabulary — labels only, stored enums unchanged:** the SPA renders
+  `ownerIdentity`/`myRole:"owner"` as **"Lead"**, and `health`'s stored
+  `green|yellow|red` as **"Full Steam"** / **"Shoal Waters"** / **"Anchored"**
+  (`Journeys.jsx` `HEALTH_LABEL`, `JourneyDetail.jsx` `HEALTH_OPTIONS`). The
+  wire, the database and anything fed to an LLM keep the raw enum words
+  (docs 20 §13).
+- Health chips reuse the fixed `--success`/`--warn`/`--danger` tokens — no new
+  palette, no new CSS system.
+
+*(Global search (`SearchDialog.jsx`) still has two tabs — contacts and kelabos;
+a journeys tab is not built.)*
+
 ---
 
-## 6. Capture behavior (interface to Deepgram)
+## 6. Capture behavior (interface to the STT provider)
 
 The capture pipeline lives in `src/capture/` (`useCapture.js`, `vad.js`):
-`getUserMedia` → `AudioContext` @ device rate → PCM16 → **WSS directly to
-Deepgram** with `diarize_model=latest&punctuate=true&interim_results=true`.
+`getUserMedia` → `AudioContext` @ device rate → PCM16 → **WSS directly to the
+STT provider** — connection params come from the minted `SttSession`, never
+hard-coded. The transport is provider-specific (`spa/src/stt/<id>.js`), the
+wire reader pure and provider-specific (`spa/src/transcript/stt/<id>.js`); the
+pipeline itself names no provider ([06-stt.md](./06-stt.md)).
 - Interim results render live (italic) unless "Final only" is on.
 - **Only finalized** utterances are POSTed to the Gateway `/caption` endpoint.
-- Deepgram temp token fetched from REST API before opening the socket.
-- Mute closes the Deepgram socket (no billing) but keeps the mic track alive.
+- A short-lived STT credential (`SttSession = {provider, url, token,
+  expiresInSeconds, params}`) is fetched from the REST API before opening the
+  socket.
+- Mute closes the provider socket (no billing) but keeps the mic track alive.
 - "Mute when tab is hidden" (off by default) mutes on tab switch and unmutes on
   return, never undoing a mute the participant set themselves.
 - A local VAD gate streams only speech ("Skip silence", toggled in the mic
   chevron menu in the control bar, on by default); silence is held with
   `KeepAlive`. The mic control in the control bar reflects `listening` / `idle`.
-- Full capture-side details in [06-deepgram.md](./06-deepgram.md).
+- Full capture-side details in [06-stt.md](./06-stt.md).
 
 ---
 

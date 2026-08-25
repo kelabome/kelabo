@@ -9,7 +9,7 @@ Gateway, REST inputs). One source module `contracts/` shared by frontend + backe
 ## 1. Core domain objects
 
 ### 1.1 Utterance
-Produced in the **browser** after Deepgram; the unit of transcript.
+Produced in the **browser** after the STT provider; the unit of transcript.
 ```js
 /**
  * @typedef {Object} Utterance
@@ -21,7 +21,7 @@ Produced in the **browser** after Deepgram; the unit of transcript.
  * @property {number}  tEnd
  * @property {boolean} isFinal     // only finals are persisted / sent to agent
  * @property {string}  [tenantId]  // stamped server-side
- * @property {string}  [lang]      // reserved: BCP-47 language auto-detected by Deepgram
+ * @property {string}  [lang]      // reserved: BCP-47 language auto-detected by the STT provider
  * @property {string}  [tr]        // reserved: translation into the host-chosen target language
  */
 ```
@@ -137,6 +137,17 @@ bridge rather than a protocol change.
 /** @typedef {{type:"rename", kelaboId:string, title:string}} FrameRename */
 /** @typedef {{type:"board_request", requestId:string, kelaboId:string}} FrameBoardRequest */
 /** @typedef {{type:"history_request", requestId:string, kelaboId:string}} FrameHistoryRequest */
+/** @typedef {{type:"journey_info_request", requestId:string, kelaboId:string,
+ *             journeyId?:string}} FrameJourneyInfoRequest */
+/** @typedef {{type:"journey_timeline_request", requestId:string, kelaboId:string,
+ *             journeyId?:string, entryType?:string, before?:number,
+ *             limit?:number}} FrameJourneyTimelineRequest */
+/** @typedef {{type:"journey_board_request", requestId:string, kelaboId:string,
+ *             journeyId?:string}} FrameJourneyBoardRequest */
+/** @typedef {{type:"journey_report_submit", requestId:string, kelaboId:string,
+ *             journeyId?:string, question:string, answer:string}} FrameJourneyReportSubmit */
+/** @typedef {{type:"journey_post", requestId:string, kelaboId:string,
+ *             journeyId?:string, content:string, msgId?:string}} FrameJourneyPost */
 /** @typedef {{type:"detach", kelaboId?:string}} FrameDetach */
 ```
 
@@ -160,8 +171,47 @@ bridge rather than a protocol change.
  *             contributions:{id,title,to,markdown,author,at}[]}} FrameBoard */
 /** @typedef {{type:"history", requestId:string, kelaboId:string, enabled:boolean,
  *             entries:{kelaboId,title,endedAt,summary,decisions,actionItems}[]}} FrameHistory */
+/** @typedef {"ok"|"no_journey"|"ambiguous"|"journey_not_found"} JourneyResolved */
+/** @typedef {{type:"journey_info", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved, journeys:{journeyId,title}[],
+ *             journeyId?:string, title?:string, visibility?:"public"|"private",
+ *             status?:"active"|"completed", description:string,
+ *             health?:"green"|"yellow"|"red"|null, progress?:number|null,
+ *             counts?:Object}} FrameJourneyInfo */
+/** @typedef {{type:"journey_timeline", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved, journeys:{journeyId,title}[],
+ *             entries:{type,summary,actor?,at}[], nextBefore?:number}} FrameJourneyTimeline */
+/** @typedef {{type:"journey_board", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved, journeys:{journeyId,title}[],
+ *             messages:{msgId,content,createdBy?,createdAt?}[]}} FrameJourneyBoard */
+/** @typedef {{type:"journey_report_submitted", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved, journeys:{journeyId,title}[],
+ *             reportId?:string}} FrameJourneyReportSubmitted */
+/** @typedef {{type:"journey_posted", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved|"ai_posting_disabled"|"message_not_found"
+ *             |"already_archived", journeys:{journeyId,title}[],
+ *             msgId?:string, version?:number}} FrameJourneyPosted */
 /** @typedef {{type:"ping"}} FramePing */
 ```
+
+### 3.2a Journey tool frames (docs 20 §12.2)
+
+Five request/response pairs serving the dev-mode journey tools
+(`kelabo_journey_info/timeline/board/report_submit/post`). All ten carry a
+`requestId`; even the two *writes* are request/response, not fire-and-forget
+like `contribution` — a bad journey or an `aiCanPost` refusal is a real
+outcome the calling model needs back ("off is an answer, not an error", the
+same shape as `history`'s `enabled:false`).
+
+`resolved` reports how the target journey was found before anything else
+happened: `ok`, `no_journey` (this kelabo is linked to none), `ambiguous`
+(linked to more than one and no `journeyId` given — `journeys` lists the
+candidates, the same "enumerate rather than guess" idiom as `kelabo_join`),
+or `journey_not_found` (an explicit `journeyId` that is not one of this
+kelabo's links — an id is **never** honoured as a bare lookup key).
+`journey_posted` alone adds `ai_posting_disabled`, `message_not_found` and
+`already_archived`. There is deliberately no archive/unarchive frame — that
+stays a human action via SPA/REST (docs 20 §7, §12.2).
 
 ### 3.3 Two things that are deliberately absent
 
@@ -208,6 +258,9 @@ it accepts the diarization label. `human:true` marks a manual board note.
 /** @typedef {{email:string, code:string}} OtpVerifyBody */
 /** @typedef {{email:string, displayName:string}} Identity */
 /** @typedef {{title?:string,
+ *             journeyIds?:string[], // link into existing journeys at creation,
+ *                                   // max 10 (docs 20 §11); also on the
+ *                                   // schedule body (contracts/src/schemas.js)
  *             translation?:{enabled:boolean, targetLang?:string} /* reserved; targetLang
  *             omitted ⇒ kelabo major language (auto-detected) *&#47;}} CreateKelaboBody */
 /** @typedef {{kelaboId:string, title:string,
@@ -219,8 +272,21 @@ it accepts the diarization label. `human:true` marks a manual board note.
 /** @typedef {{displayName:string, mode:"audio-board"|"board-only"}} JoinBody */
 /** @typedef {{kelaboId:string, gatewayBaseUrl:string,
  *             participant:{identity:string, displayName:string, isGuest:boolean}}} JoinResult */
-/** @typedef {{token:string, expiresInSeconds:number, params:Object}} SttToken */
+/** The STT credential (components/06-stt.md). `provider` is stamped by the
+ *  provider-neutral core from the registry key; `params` are provider-shaped
+ *  and opaque to everything but that provider's own transport.
+ *  @typedef {{provider:string, url:string, token:string,
+ *             expiresInSeconds:number, params:Object}} SttSession */
 ```
+
+Journey additions on existing kelabo payloads (docs 20 §11): `GET /kelabos/:id`
+(and `/scheduled`) responses carry `journeys: [{id, title, visibility}]` — the
+link-time snapshot from the kelabo's `JOURNEY#` mirror rows — and
+`capabilities.stt = { on, provider }` says which STT provider is configured
+before the client ever mints (06-stt.md §2). The journey REST bodies
+(`createJourneyBodySchema`, `journeyStatusBodySchema`, …) live in
+`contracts/src/schemas.js`; endpoint catalog in
+[components/02-rest-api.md](./components/02-rest-api.md) §3.5c.
 
 ---
 

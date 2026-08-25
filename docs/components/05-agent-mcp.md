@@ -144,6 +144,47 @@ Config knobs (per kelabo, host-settable later): `sensitivity`,
 
 ---
 
+## 4a. Cross-kelabo context push: history and journeys
+
+The main agent's system prompt can carry two kinds of prior-kelabo memory,
+both loaded in `runner.js`'s `ensureContext()` when a kelabo's worker context
+is built:
+
+- **`historyEnabled`** (host opt-in): the minutes of the host's recent
+  kelabos, reduced by `gateway/src/agent/history.js` and rendered as an
+  `EARLIER KELABOS:` section — the same loader that serves dev mode's
+  `kelabo_history` tool (docs 16 §2.B).
+- **Journey context** ([docs 20 §12.1](../20-journey.md)): if the kelabo is
+  linked to a journey, `gateway/src/agent/journeyContext.js` (sibling of
+  `history.js`) is **always attempted — no opt-in flag**, because linking a
+  kelabo into a journey is already the deliberate, visible act
+  `historyEnabled` exists to gate for an automatic record. Per linked journey
+  (`JOURNEY_LIMIT = 3` in the prompt) it builds a budgeted digest: title,
+  latest description (clipped 1,500 chars), health/progress, up to 5 active
+  board messages (300 chars each), up to 3 active documents (800 chars each),
+  and up to 5 *other* linked kelabos reduced to their minutes
+  (summary/decisions/actionItems). `renderJourneyContext()` in `persona.js`
+  renders it as a `JOURNEY CONTEXT:` section after `EARLIER KELABOS:`.
+
+**Journey context supersedes `historyEnabled` rather than joining it.**
+`historyStillApplies(meta, journeys)` (`journeyContext.js`) is `false` the
+moment the *reduced* journey context is non-empty, so a linked kelabo drops
+the broader host record — but a dangling or momentarily-unreachable journey
+link falls back to `historyEnabled`, keeping the pipeline's "best-effort,
+never total silence" posture.
+
+Both sections are framed as reference material — a record other people wrote,
+not instructions and not the current state of anything — the same untrusted
+boundary journey content gets everywhere it enters a prompt (docs 20 §6.3),
+and both carry an explicit "never dispatch a sub-agent to look up something
+already answered here" rule. Like `historyEnabled`, journey context is
+disclosed to the room: a "Part of: N journeys" chip (docs 20 §12.1).
+
+In **dev mode** the same journey is reachable by pull instead: the five
+`kelabo_journey_*` MCP tools (docs 16 §2.B, docs 20 §12.2).
+
+---
+
 ## 5. MCP configuration (host-personal)
 
 **Rule:** MCP servers are a **common, host-personal setting** — not per-kelabo.
@@ -286,7 +327,7 @@ reaches them only by dispatching a brief.
 | Peer | Direction | Contract |
 |------|-----------|----------|
 | Gateway | in (captions) / out (Contributions to SSE hub) | in-process `AgentRunner.run(AgentContext)` |
-| DynamoDB | in (rolling window, host MCP config, prior board) | [08-database.md](../08-database.md) |
+| DynamoDB | in (rolling window, host MCP config, prior board, history + journey digests — §4a) | [08-database.md](../08-database.md) |
 | Secrets Manager | in (LLM keys, MCP secrets) | by name |
 | Web search API | out | `webSearch()` (currently disabled — §7) |
 | Web pages/APIs | out | `webFetch()` |

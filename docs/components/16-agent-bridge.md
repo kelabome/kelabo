@@ -24,6 +24,7 @@ exactly two things: a **token** and a **channel**.
                         kelabo_working · kelabo_info             opencode:    POST /session/:id/prompt_async
                         kelabo_board · kelabo_minutes
                         kelabo_history · kelabo_leave
+                        kelabo_journey_* ×5 (§2.B)
                                      └────────────────────┬────────────────────┘
                                                           ▼
                                             the developer's interactive session
@@ -95,6 +96,11 @@ string the Gateway stores and never interprets.
 | `rename` | `{kelaboId, title}` |
 | `board_request` | `{requestId, kelaboId}` |
 | `history_request` | `{requestId, kelaboId}` |
+| `journey_info_request` | `{requestId, kelaboId, journeyId?}` |
+| `journey_timeline_request` | `{requestId, kelaboId, journeyId?, entryType?, before?, limit?}` |
+| `journey_board_request` | `{requestId, kelaboId, journeyId?}` |
+| `journey_report_submit` | `{requestId, kelaboId, journeyId?, question, answer}` |
+| `journey_post` | `{requestId, kelaboId, journeyId?, content, msgId?}` |
 | `detach` | `{kelaboId?}` |
 
 **Down (Gateway → bridge)**
@@ -109,6 +115,11 @@ string the Gateway stores and never interprets.
 | `request` | `{kind:"summary"\|"archive", requestId, kelaboId}` |
 | `board` | `{requestId, kelaboId, contributions[]}` |
 | `history` | `{requestId, kelaboId, enabled, entries[]}` |
+| `journey_info` | `{requestId, kelaboId, resolved, journeys[], journeyId?, title?, visibility?, status?, description, health?, progress?, counts?}` |
+| `journey_timeline` | `{requestId, kelaboId, resolved, journeys[], entries[], nextBefore?}` |
+| `journey_board` | `{requestId, kelaboId, resolved, journeys[], messages[]}` |
+| `journey_report_submitted` | `{requestId, kelaboId, resolved, journeys[], reportId?}` |
+| `journey_posted` | `{requestId, kelaboId, resolved, journeys[], msgId?, version?}` |
 | `ping` | — |
 
 Two things left the protocol deliberately:
@@ -137,6 +148,32 @@ This is the surface to keep stable. Every runtime sees exactly this.
 | `kelabo_history()` | The minutes of the host's past kelabos — summaries, decisions, action items — behind the same host opt-in (`historyEnabled`) that feeds the in-ECS agent's memory (`gateway/src/agent/history.js`, one loader for both modes). `enabled:false` is a real answer: the host never opted in, which is different from opted in with nothing recorded. |
 | `kelabo_minutes({minutes})` | Submit the minutes as one JSON object, when Kelabo asks. Stored as the kelabo record; never posted to the board. |
 | `kelabo_leave()` | Detach. |
+| `kelabo_journey_info({journeyId?})` | The journey this kelabo is linked to: title, visibility, status, description, health/progress, counts. |
+| `kelabo_journey_timeline({journeyId?, entryType?, before?, limit?})` | The journey's timeline, newest first (docs 20 §9.2, over the tunnel). |
+| `kelabo_journey_board({journeyId?})` | The journey's pinned board messages — distinct from this kelabo's own board. |
+| `kelabo_journey_report_submit({journeyId?, question, answer})` | Store the agent's **own synthesis** as a journey report, directly — no server-side LLM round-trip. |
+| `kelabo_journey_post({journeyId?, content, msgId?})` | Write or edit a pinned journey board message, gated by the journey owner's `aiCanPost` flag (docs 20 §7) — **off by default**, and off is a clear refusal, not a silent no-op. |
+
+The five `kelabo_journey_*` tools (docs 20 §12.2) share two rules:
+
+- **An omitted `journeyId` resolves against the kelabo's own links**
+  (`resolveJourneyForKelabo`, `gateway/src/journeys.js`): the one link if
+  there is exactly one, an explicit refusal enumerating the candidates if
+  there are several — the same "enumerate rather than guess" idiom
+  `kelabo_join`'s omitted `kelaboId` uses. An explicit `journeyId` is trusted
+  only if it is one of the kelabo's links, never as a bare lookup key —
+  otherwise an attached agent could read or write any journey in the
+  deployment by guessing an id.
+- **The two writes are request/response, not fire-and-forget.** Unlike
+  `kelabo_post`, a bad `journeyId` or an `aiCanPost` refusal is a real
+  outcome the calling model needs back. Every journey frame carries a
+  `resolved` field: `ok`, `no_journey`, `ambiguous`, `journey_not_found` —
+  plus `ai_posting_disabled`, `message_not_found` and `already_archived` on
+  `journey_posted` alone.
+
+The agent can create or edit a journey board message; it can **never archive
+or unarchive one** — that stays a human action via the SPA/REST, so there is
+deliberately no `kelabo_journey_archive` tool.
 
 There is deliberately **no `kelabo_transcript`**. Transcript is pushed, never
 polled. A pull path would be a second implementation of one concept, which is
