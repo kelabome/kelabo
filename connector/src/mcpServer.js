@@ -161,15 +161,82 @@ const TOOLS = [
   {
     name: "kelabo_journey_post",
     description:
-      "Write or edit a pinned message on the journey's board. Gated by the journey owner's aiCanPost setting, off by default — a clear refusal, not a silent no-op, when it is off.",
+      "Write or edit a pinned message on the journey's board. Gated by the journey owner's aiCanPost setting, off by default — a clear refusal, not a silent no-op, when it is off. Use it to record the outcome of a piece of work (e.g. \"X has been added and tested\") so it carries to the journey's next kelabo.",
     inputSchema: {
       type: "object",
       properties: {
-        journeyId: { type: "string", description: "Which journey, if this kelabo is linked to more than one." },
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
         content: { type: "string", description: "The message body." },
         msgId: { type: "string", description: "An existing message's id, to edit it in place. Omit to post a new one." },
       },
       required: ["content"],
+    },
+  },
+  {
+    name: "kelabo_journey_join",
+    description:
+      "Attach this session to a journey directly — no kelabo, no transcript. For working between kelabos: read the journey's accumulated context, do the work in this session, post the outcome with kelabo_journey_post. Call with no arguments to list the journeys you can join. Independent of kelabo_join: either or both may be active.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "The journey to join. Omit to list what is available." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_leave",
+    description: "Detach from a directly-joined journey. Omit journeyId to detach from all of them.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "The journey to leave. Omit to leave every directly-joined journey." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_context",
+    description:
+      "The journey's context in one call: description, status, pinned board messages, document excerpts, every linked kelabo reduced to its minutes, and recent reports. Use it first when a question or task reaches across the journey's kelabos; drill into full text with kelabo_journey_documents / kelabo_journey_reports.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_kelabos",
+    description:
+      "The kelabos linked to the journey, each reduced to its stored minutes: summary, decisions, action items. Use it for \"what did we decide in the kickoff\" questions — it is a record of the past, not the current state, and never a transcript.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_documents",
+    description:
+      "The journey's documents. Without docId: the list (titles, sizes, authors). With docId: that document's full text — specs, notes and anything else pasted into the journey.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+        docId: { type: "string", description: "A document's id, to read it in full. Omit to list." },
+      },
+    },
+  },
+  {
+    name: "kelabo_journey_reports",
+    description:
+      "The journey's ready reports (past Q&A). Without reportId: the list of questions. With reportId: that report's full question and answer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+        reportId: { type: "string", description: "A report's id, to read it in full. Omit to list." },
+      },
     },
   },
 ];
@@ -233,6 +300,18 @@ export function createMcpServer({
           return ok(await handlers.journeyReportSubmit(args));
         case "kelabo_journey_post":
           return ok(await handlers.journeyPost(args));
+        case "kelabo_journey_join":
+          return ok(await handlers.journeyJoin(args));
+        case "kelabo_journey_leave":
+          return ok(await handlers.journeyLeave(args));
+        case "kelabo_journey_context":
+          return ok(await handlers.journeyContext(args));
+        case "kelabo_journey_kelabos":
+          return ok(await handlers.journeyKelabos(args));
+        case "kelabo_journey_documents":
+          return ok(await handlers.journeyDocuments(args));
+        case "kelabo_journey_reports":
+          return ok(await handlers.journeyReports(args));
         default:
           return fail(`unknown tool: ${req.params.name}`);
       }

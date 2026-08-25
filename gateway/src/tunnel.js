@@ -21,16 +21,25 @@ import {
   getMeta,
   queryInvites,
   queryContrib,
+  queryKelaboItems,
   isAgentTokenRevoked,
 } from "./db.js";
 import {
   getJourneyMeta,
   latestDescription,
   activeBoardMessages,
+  activeDocuments,
+  linkedKelaboSummaries,
+  listReadyReports,
+  getJourneyDocument,
+  getJourneyReport,
+  getJourneyAccessor,
+  queryJourneyLinks,
   resolveJourneyForKelabo,
   queryJourneyTimeline,
   submitJourneyReport,
   postJourneyBoardMessage,
+  clip,
 } from "./journeys.js";
 
 const REGISTER_TIMEOUT_MS = 10_000;
@@ -43,6 +52,23 @@ const BOARD_LIMIT = 50;
 // than the terse digest agent/journeyContext.js pins into the system prompt
 // per turn (5) — generous without being the unbounded whole collection.
 const JOURNEY_BOARD_LIMIT = 20;
+// The pull-tool list budgets (docs 20 §12.3). Same posture as
+// JOURNEY_BOARD_LIMIT: generous for a deliberate read, never unbounded.
+const JOURNEY_KELABOS_LIMIT = 20;
+const JOURNEY_DOCUMENTS_LIMIT = 50;
+const JOURNEY_REPORTS_LIMIT = 20;
+// `journey_context` is the one-call bundle — the same shape the in-ECS
+// agent's per-turn push gets (agent/journeyContext.js), with the report
+// pipeline's slightly roomier clips (journeys.js buildContext): a pull
+// happens once, on demand, not on every turn.
+const CONTEXT_DESCRIPTION_CLIP = 4000;
+const CONTEXT_BOARD_LIMIT = 10;
+const CONTEXT_BOARD_CLIP = 500;
+const CONTEXT_DOCUMENTS_LIMIT = 5;
+const CONTEXT_DOCUMENT_EXCERPT = 800;
+const CONTEXT_REPORTS_LIMIT = 3;
+const CONTEXT_REPORT_QUESTION_CLIP = 200;
+const CONTEXT_REPORT_ANSWER_CLIP = 1000;
 // Open card references remembered per connection. Generous: an agent running
 // several background lookups at once holds several open at a time.
 const MAX_CARDS_PER_CONN = 200;
@@ -101,6 +127,11 @@ export function createTunnel(c) {
       // only preparing for. Kept apart so a disconnect unwinds each correctly.
       kelabos: new Set(),
       prepKelabos: new Set(),
+      // Journeys this connection is attached to directly (docs 20 §12.3),
+      // journeyId -> title. Per-connection only — nothing routes *to* a
+      // journey attachment the way transcript routes to `tunnelByKelabo`, so
+      // no global map exists and a closed socket cleans itself up.
+      journeys: new Map(),
       // Contribution `ref`s already accepted, so a retry after a dropped socket
       // does not double-post.
       seenRefs: new Set(),
@@ -208,8 +239,20 @@ export function createTunnel(c) {
         return onBoardRequest(conn, frame);
       case "history_request":
         return onHistoryRequest(conn, frame);
+      case "journey_attach":
+        return onJourneyAttach(conn, frame);
+      case "journey_detach":
+        return onJourneyDetach(conn, frame);
       case "journey_info_request":
         return onJourneyInfoRequest(conn, frame);
+      case "journey_context_request":
+        return onJourneyContextRequest(conn, frame);
+      case "journey_kelabos_request":
+        return onJourneyKelabosRequest(conn, frame);
+      case "journey_documents_request":
+        return onJourneyDocumentsRequest(conn, frame);
+      case "journey_reports_request":
+        return onJourneyReportsRequest(conn, frame);
       case "journey_timeline_request":
         return onJourneyTimelineRequest(conn, frame);
       case "journey_board_request":
@@ -323,6 +366,18 @@ export function createTunnel(c) {
     } catch (err) {
       c.logError("briefing_invites_failed", err, { kelaboId });
     }
+    // Journey membership (docs 20 §12.3) — the same `JOURNEY#` mirror rows
+    // agent/journeyContext.js reads. Names only: the agent learns there is
+    // journey context worth pulling, not the context itself.
+    let journeys = [];
+    try {
+      journeys = (await queryKelaboItems(c, kelaboId, "JOURNEY#")).map((l) => ({
+        journeyId: l.journeyId,
+        title: l.journeyTitleSnapshot || "Untitled journey",
+      }));
+    } catch (err) {
+      c.logError("briefing_journeys_failed", err, { kelaboId });
+    }
     sendDown(conn.ws, {
       type: "briefing",
       kelaboId,
@@ -342,6 +397,7 @@ export function createTunnel(c) {
         displayName: p.displayName || p.identity,
         isGuest: !!p.isGuest,
       })),
+      journeys,
     });
   }
 
@@ -586,23 +642,171 @@ export function createTunnel(c) {
   }
 
   /** Same attachment check `onBoardRequest`/`onHistoryRequest` already
-   *  inline — factored out for the five journey handlers below, which all
+   *  inline — factored out for the journey handlers below, which all
    *  need it, without touching those two's already-tested bodies. */
   function attachedOrPreparing(conn, kelaboId) {
     return c.state.tunnelByKelabo.get(kelaboId) === conn || c.state.prepByKelabo.get(kelaboId) === conn;
   }
 
+  // --- direct journey attachment (docs 20 §12.3) ----------------------------
+
+  /**
+   * Whether this identity may attach to the journey directly — the same
+   * access rule rest-api's `resolveAccess` applies to every journey read
+   * (docs 20 §3.2), re-derived here rather than widened: owner, or same-tenant
+   * on a public journey, or on a private journey's `ACCESSOR#` roster. Being
+   * host or invitee of a *linked kelabo* is deliberately not enough: that
+   * grant is kelabo-scoped and already served by attaching to the kelabo.
+   */
+  async function mayAttachJourney(conn, meta) {
+    if (meta.tenantId && conn.tenant && meta.tenantId !== conn.tenant) return false;
+    if (meta.ownerIdentity === conn.identity) return true;
+    if (meta.visibility === "public") return true;
+    try {
+      return !!(await getJourneyAccessor(c, meta.journeyId, conn.identity));
+    } catch (err) {
+      c.logError("journey_attach_accessor_lookup_failed", err, { journeyId: meta.journeyId });
+      return false;
+    }
+  }
+
+  /**
+   * Serve `journey_attach` (docs 20 §12.3): bind this connection to a journey
+   * with no kelabo involved. No transcript ever flows from this — the
+   * attachment only widens which journeys the `journey_*` requests below may
+   * resolve to. A journey in another tenant answers `journey_not_found`, not
+   * `not_journey_member`, so an id cannot be probed for existence.
+   */
+  async function onJourneyAttach(conn, frame) {
+    const { requestId, journeyId } = frame;
+    const meta = await getJourneyMeta(c, journeyId).catch((err) => {
+      c.logError("journey_attach_meta_failed", err, { journeyId });
+      return null;
+    });
+    if (!meta || (meta.tenantId && conn.tenant && meta.tenantId !== conn.tenant)) {
+      sendDown(conn.ws, { type: "journey_briefing", requestId, resolved: "journey_not_found" });
+      return;
+    }
+    if (!(await mayAttachJourney(conn, meta))) {
+      c.log("journey_attach_denied", { journeyId, identity: conn.identity });
+      sendDown(conn.ws, { type: "journey_briefing", requestId, resolved: "not_journey_member" });
+      return;
+    }
+    conn.journeys.set(journeyId, meta.title || "");
+    c.log("agent_journey_attached", { journeyId, identity: conn.identity, runtime: conn.agent.runtime });
+    await sendJourneyBriefing(conn, requestId, meta);
+  }
+
+  /** The journey briefing — for a direct attachment this is the whole of the
+   *  agent's starting context, the role `sendBriefing` plays for a kelabo. */
+  async function sendJourneyBriefing(conn, requestId, meta) {
+    const journeyId = meta.journeyId;
+    const [description, links] = await Promise.all([
+      latestDescription(c, journeyId).catch(() => ""),
+      queryJourneyLinks(c, journeyId).catch(() => []),
+    ]);
+    sendDown(conn.ws, {
+      type: "journey_briefing",
+      requestId,
+      resolved: "ok",
+      journeyId,
+      title: meta.title || "",
+      visibility: meta.visibility,
+      status: meta.status,
+      description: clip(description, CONTEXT_DESCRIPTION_CLIP),
+      health: meta.health ?? null,
+      progress: typeof meta.progress === "number" ? meta.progress : null,
+      aiCanPost: !!meta.aiCanPost,
+      counts: {
+        kelaboCount: meta.kelaboCount || 0,
+        documentCount: meta.documentCount || 0,
+        reportCount: meta.reportCount || 0,
+        boardMessageCount: meta.boardMessageCount || 0,
+        accessorCount: meta.accessorCount || 0,
+      },
+      kelabos: links.map((l) => ({
+        kelaboId: l.kelaboId,
+        title: l.titleSnapshot || "Untitled kelabo",
+        ...(l.linkedAt ? { linkedAt: l.linkedAt } : {}),
+      })),
+    });
+  }
+
+  function onJourneyDetach(conn, frame) {
+    const ids = frame.journeyId ? [frame.journeyId] : [...conn.journeys.keys()];
+    for (const journeyId of ids) {
+      if (conn.journeys.delete(journeyId)) {
+        c.log("agent_journey_detached", { journeyId, identity: conn.identity });
+      }
+    }
+  }
+
+  /** Resolve against this connection's *direct* journey attachments — the
+   *  same ok/no_journey/ambiguous/journey_not_found answers
+   *  `resolveJourneyForKelabo` gives for a kelabo's links, so every handler
+   *  below renders one shape regardless of which mode the request came from. */
+  function resolveDirectJourney(conn, journeyId) {
+    if (journeyId) {
+      // Not-attached and nonexistent read the same, deliberately.
+      if (!conn.journeys.has(journeyId)) return { resolved: "journey_not_found", journeys: [] };
+      return { resolved: "ok", journeyId };
+    }
+    if (conn.journeys.size === 0) return { resolved: "no_journey", journeys: [] };
+    if (conn.journeys.size > 1) {
+      return {
+        resolved: "ambiguous",
+        journeys: [...conn.journeys].map(([id, title]) => ({ journeyId: id, title: title || "Untitled journey" })),
+      };
+    }
+    return { resolved: "ok", journeyId: conn.journeys.keys().next().value };
+  }
+
+  /**
+   * One answer to "which journey does this request mean" for every
+   * `journey_*` handler (docs 20 §12.3), across both modes:
+   *
+   *   * `kelaboId` present — the kelabo path, exactly as before: the caller
+   *     must be attached to (or preparing for) that kelabo, and the journey
+   *     resolves against the kelabo's own links. Falls back to the
+   *     connection's direct attachments only when the kelabo path found
+   *     nothing, so a live kelabo's own journey always wins.
+   *   * `kelaboId` absent — the direct path: resolves against the journeys
+   *     this connection attached to with `journey_attach`.
+   *
+   * Returns `null` only for the drop case (naming a kelabo the connection is
+   * not attached to) — the caller logs and sends nothing, exactly what the
+   * per-handler attachment checks did before.
+   */
+  async function resolveJourneyRequest(conn, frame) {
+    const { kelaboId, journeyId } = frame;
+    if (kelaboId) {
+      if (!attachedOrPreparing(conn, kelaboId)) return null;
+      const viaKelabo = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
+        c.logError("journey_resolve_failed", err, { kelaboId });
+        return { resolved: "no_journey", journeys: [] };
+      });
+      if (viaKelabo.resolved === "ok") return viaKelabo;
+      // An explicit journeyId that is not one of the kelabo's links may still
+      // be a journey this connection attached to directly.
+      if (journeyId && conn.journeys.has(journeyId)) return { resolved: "ok", journeyId };
+      // A kelabo with no links does not blind a session that also holds
+      // direct attachments.
+      if (viaKelabo.resolved === "no_journey" && conn.journeys.size > 0) {
+        return resolveDirectJourney(conn, journeyId);
+      }
+      return viaKelabo;
+    }
+    return resolveDirectJourney(conn, journeyId);
+  }
+
   /** Serve `kelabo_journey_info` (docs 20 §12.2). */
   async function onJourneyInfoRequest(conn, frame) {
-    const { kelaboId, requestId, journeyId } = frame;
-    if (!attachedOrPreparing(conn, kelaboId)) {
+    const { kelaboId, requestId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
       c.log("journey_info_request_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
-    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
-      c.logError("journey_info_resolve_failed", err, { kelaboId });
-      return { resolved: "no_journey", journeys: [] };
-    });
     if (resolution.resolved !== "ok") {
       sendDown(conn.ws, { type: "journey_info", requestId, kelaboId, ...resolution });
       return;
@@ -638,15 +842,12 @@ export function createTunnel(c) {
 
   /** Serve `kelabo_journey_timeline` (docs 20 §9.2, §12.2). */
   async function onJourneyTimelineRequest(conn, frame) {
-    const { kelaboId, requestId, journeyId, entryType, before, limit } = frame;
-    if (!attachedOrPreparing(conn, kelaboId)) {
+    const { kelaboId, requestId, entryType, before, limit } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
       c.log("journey_timeline_request_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
-    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
-      c.logError("journey_timeline_resolve_failed", err, { kelaboId });
-      return { resolved: "no_journey", journeys: [] };
-    });
     if (resolution.resolved !== "ok") {
       sendDown(conn.ws, { type: "journey_timeline", requestId, kelaboId, ...resolution, entries: [] });
       return;
@@ -672,15 +873,12 @@ export function createTunnel(c) {
   /** Serve `kelabo_journey_board` (docs 20 §12.2) — the journey's pinned
    *  board, distinct from this kelabo's own (`onBoardRequest`, above). */
   async function onJourneyBoardRequest(conn, frame) {
-    const { kelaboId, requestId, journeyId } = frame;
-    if (!attachedOrPreparing(conn, kelaboId)) {
+    const { kelaboId, requestId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
       c.log("journey_board_request_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
-    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
-      c.logError("journey_board_resolve_failed", err, { kelaboId });
-      return { resolved: "no_journey", journeys: [] };
-    });
     if (resolution.resolved !== "ok") {
       sendDown(conn.ws, { type: "journey_board", requestId, kelaboId, ...resolution, messages: [] });
       return;
@@ -706,18 +904,229 @@ export function createTunnel(c) {
     });
   }
 
+  /**
+   * Serve `kelabo_journey_context` (docs 20 §12.3) — the one-call bundle: the
+   * same shape agent/journeyContext.js pushes into the in-ECS agent's system
+   * prompt each turn, pulled on demand. Every collection carries an explicit
+   * clip; the full text of one document or report is the two handlers below.
+   */
+  async function onJourneyContextRequest(conn, frame) {
+    const { kelaboId, requestId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("journey_context_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_context", requestId, kelaboId, ...resolution });
+      return;
+    }
+    const journeyId = resolution.journeyId;
+    const meta = await getJourneyMeta(c, journeyId).catch(() => null);
+    if (!meta) {
+      sendDown(conn.ws, { type: "journey_context", requestId, kelaboId, resolved: "journey_not_found", journeys: [] });
+      return;
+    }
+    const [description, board, documents, kelabos, reports] = await Promise.all([
+      latestDescription(c, journeyId).catch(() => ""),
+      activeBoardMessages(c, journeyId, CONTEXT_BOARD_LIMIT).catch(() => []),
+      activeDocuments(c, journeyId, CONTEXT_DOCUMENTS_LIMIT).catch(() => []),
+      linkedKelaboSummaries(c, journeyId).catch(() => []),
+      listReadyReports(c, journeyId, CONTEXT_REPORTS_LIMIT).catch(() => []),
+    ]);
+    sendDown(conn.ws, {
+      type: "journey_context",
+      requestId,
+      kelaboId,
+      resolved: "ok",
+      journeys: [],
+      journeyId,
+      title: meta.title || "",
+      status: meta.status,
+      description: clip(description, CONTEXT_DESCRIPTION_CLIP),
+      health: meta.health ?? null,
+      progress: typeof meta.progress === "number" ? meta.progress : null,
+      aiCanPost: !!meta.aiCanPost,
+      board: board.map((m) => ({ content: clip(m.content, CONTEXT_BOARD_CLIP) })),
+      documents: documents.map((d) => ({
+        docId: d.docId,
+        title: d.title || "",
+        excerpt: clip(d.content, CONTEXT_DOCUMENT_EXCERPT),
+        ...(typeof d.sizeBytes === "number" ? { sizeBytes: d.sizeBytes } : {}),
+      })),
+      // When the request came through a kelabo, that kelabo's own minutes are
+      // not "other kelabos in this journey" — same exclusion the push context
+      // applies to the kelabo currently live.
+      kelabos: kelabos.filter((k) => k.kelaboId !== kelaboId),
+      reports: reports.map((r) => ({
+        reportId: r.reportId,
+        question: clip(r.question, CONTEXT_REPORT_QUESTION_CLIP),
+        answer: clip(r.answer, CONTEXT_REPORT_ANSWER_CLIP),
+      })),
+    });
+  }
+
+  /** Serve `kelabo_journey_kelabos` (docs 20 §12.3): every linked kelabo
+   *  reduced to its stored minutes — the same minutes-not-transcripts
+   *  reduction `kelabo_history` applies, granted here by journey membership
+   *  the way the push context already grants it to the in-ECS agent. */
+  async function onJourneyKelabosRequest(conn, frame) {
+    const { kelaboId, requestId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("journey_kelabos_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_kelabos", requestId, kelaboId, ...resolution, entries: [] });
+      return;
+    }
+    let entries = [];
+    try {
+      entries = await linkedKelaboSummaries(c, resolution.journeyId, JOURNEY_KELABOS_LIMIT);
+    } catch (err) {
+      c.logError("journey_kelabos_query_failed", err, { kelaboId, journeyId: resolution.journeyId });
+    }
+    sendDown(conn.ws, { type: "journey_kelabos", requestId, kelaboId, resolved: "ok", journeys: [], entries });
+  }
+
+  /** Serve `kelabo_journey_documents` (docs 20 §12.3): the list without
+   *  content, or one document's full text when `docId` names it. A removed
+   *  document is structurally excluded, same rule as everywhere else. */
+  async function onJourneyDocumentsRequest(conn, frame) {
+    const { kelaboId, requestId, docId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("journey_documents_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_documents", requestId, kelaboId, ...resolution, documents: [] });
+      return;
+    }
+    const journeyId = resolution.journeyId;
+    if (docId) {
+      const doc = await getJourneyDocument(c, journeyId, docId).catch((err) => {
+        c.logError("journey_document_read_failed", err, { kelaboId, journeyId, docId });
+        return null;
+      });
+      if (!doc || doc.removed) {
+        sendDown(conn.ws, { type: "journey_documents", requestId, kelaboId, resolved: "document_not_found", journeys: [], documents: [] });
+        return;
+      }
+      sendDown(conn.ws, {
+        type: "journey_documents",
+        requestId,
+        kelaboId,
+        resolved: "ok",
+        journeys: [],
+        documents: [
+          {
+            docId: doc.docId,
+            title: doc.title || "",
+            ...(doc.addedBy ? { addedBy: doc.addedBy } : {}),
+            ...(doc.addedAt ? { addedAt: doc.addedAt } : {}),
+            ...(typeof doc.sizeBytes === "number" ? { sizeBytes: doc.sizeBytes } : {}),
+            content: doc.content || "",
+          },
+        ],
+      });
+      return;
+    }
+    let docs = [];
+    try {
+      docs = await activeDocuments(c, journeyId, JOURNEY_DOCUMENTS_LIMIT);
+    } catch (err) {
+      c.logError("journey_documents_query_failed", err, { kelaboId, journeyId });
+    }
+    sendDown(conn.ws, {
+      type: "journey_documents",
+      requestId,
+      kelaboId,
+      resolved: "ok",
+      journeys: [],
+      documents: docs.map((d) => ({
+        docId: d.docId,
+        title: d.title || "",
+        ...(d.addedBy ? { addedBy: d.addedBy } : {}),
+        ...(d.addedAt ? { addedAt: d.addedAt } : {}),
+        ...(typeof d.sizeBytes === "number" ? { sizeBytes: d.sizeBytes } : {}),
+      })),
+    });
+  }
+
+  /** Serve `kelabo_journey_reports` (docs 20 §12.3): the list of ready
+   *  reports without answers, or one report's full question and answer when
+   *  `reportId` names it. Pending/failed reports are never served. */
+  async function onJourneyReportsRequest(conn, frame) {
+    const { kelaboId, requestId, reportId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("journey_reports_request_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_reports", requestId, kelaboId, ...resolution, reports: [] });
+      return;
+    }
+    const journeyId = resolution.journeyId;
+    if (reportId) {
+      const report = await getJourneyReport(c, journeyId, reportId).catch((err) => {
+        c.logError("journey_report_read_failed", err, { kelaboId, journeyId, reportId });
+        return null;
+      });
+      if (!report || report.status !== "ready") {
+        sendDown(conn.ws, { type: "journey_reports", requestId, kelaboId, resolved: "report_not_found", journeys: [], reports: [] });
+        return;
+      }
+      sendDown(conn.ws, {
+        type: "journey_reports",
+        requestId,
+        kelaboId,
+        resolved: "ok",
+        journeys: [],
+        reports: [
+          {
+            reportId: report.reportId,
+            question: report.question || "",
+            ...(report.requestedAt ? { requestedAt: report.requestedAt } : {}),
+            ...(report.generatedBy ? { generatedBy: report.generatedBy } : {}),
+            answer: report.answer || "",
+          },
+        ],
+      });
+      return;
+    }
+    let reports = [];
+    try {
+      reports = await listReadyReports(c, journeyId, JOURNEY_REPORTS_LIMIT);
+    } catch (err) {
+      c.logError("journey_reports_query_failed", err, { kelaboId, journeyId });
+    }
+    sendDown(conn.ws, {
+      type: "journey_reports",
+      requestId,
+      kelaboId,
+      resolved: "ok",
+      journeys: [],
+      reports: reports.map((r) => ({
+        reportId: r.reportId,
+        question: r.question || "",
+        ...(r.requestedAt ? { requestedAt: r.requestedAt } : {}),
+        ...(r.generatedBy ? { generatedBy: r.generatedBy } : {}),
+      })),
+    });
+  }
+
   /** Serve `kelabo_journey_report_submit` (docs 20 §12.2) — the agent's own
    *  synthesis, stored directly with no LLM round trip. */
   async function onJourneyReportSubmit(conn, frame) {
-    const { kelaboId, requestId, journeyId, question, answer } = frame;
-    if (!attachedOrPreparing(conn, kelaboId)) {
+    const { kelaboId, requestId, question, answer } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
       c.log("journey_report_submit_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
-    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
-      c.logError("journey_report_resolve_failed", err, { kelaboId });
-      return { resolved: "no_journey", journeys: [] };
-    });
     if (resolution.resolved !== "ok") {
       sendDown(conn.ws, { type: "journey_report_submitted", requestId, kelaboId, ...resolution });
       return;
@@ -739,15 +1148,12 @@ export function createTunnel(c) {
   /** Serve `kelabo_journey_post` (docs 20 §7, §12.2) — write or edit a pinned
    *  journey board message, gated by the owner-controlled `aiCanPost`. */
   async function onJourneyPost(conn, frame) {
-    const { kelaboId, requestId, journeyId, content, msgId } = frame;
-    if (!attachedOrPreparing(conn, kelaboId)) {
+    const { kelaboId, requestId, content, msgId } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
       c.log("journey_post_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
-    const resolution = await resolveJourneyForKelabo(c, kelaboId, journeyId).catch((err) => {
-      c.logError("journey_post_resolve_failed", err, { kelaboId });
-      return { resolved: "no_journey", journeys: [] };
-    });
     if (resolution.resolved !== "ok") {
       sendDown(conn.ws, { type: "journey_posted", requestId, kelaboId, ...resolution });
       return;

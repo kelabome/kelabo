@@ -24,7 +24,7 @@ exactly two things: a **token** and a **channel**.
                         kelabo_working · kelabo_info             opencode:    POST /session/:id/prompt_async
                         kelabo_board · kelabo_minutes
                         kelabo_history · kelabo_leave
-                        kelabo_journey_* ×5 (§2.B)
+                        kelabo_journey_* ×11 (§2.B)
                                      └────────────────────┬────────────────────┘
                                                           ▼
                                             the developer's interactive session
@@ -96,12 +96,22 @@ string the Gateway stores and never interprets.
 | `rename` | `{kelaboId, title}` |
 | `board_request` | `{requestId, kelaboId}` |
 | `history_request` | `{requestId, kelaboId}` |
-| `journey_info_request` | `{requestId, kelaboId, journeyId?}` |
-| `journey_timeline_request` | `{requestId, kelaboId, journeyId?, entryType?, before?, limit?}` |
-| `journey_board_request` | `{requestId, kelaboId, journeyId?}` |
-| `journey_report_submit` | `{requestId, kelaboId, journeyId?, question, answer}` |
-| `journey_post` | `{requestId, kelaboId, journeyId?, content, msgId?}` |
+| `journey_attach` | `{requestId, journeyId}` — direct attachment, no kelabo (docs 20 §12.3) |
+| `journey_detach` | `{journeyId?}` |
+| `journey_info_request` | `{requestId, kelaboId?, journeyId?}` |
+| `journey_context_request` | `{requestId, kelaboId?, journeyId?}` |
+| `journey_kelabos_request` | `{requestId, kelaboId?, journeyId?}` |
+| `journey_documents_request` | `{requestId, kelaboId?, journeyId?, docId?}` |
+| `journey_reports_request` | `{requestId, kelaboId?, journeyId?, reportId?}` |
+| `journey_timeline_request` | `{requestId, kelaboId?, journeyId?, entryType?, before?, limit?}` |
+| `journey_board_request` | `{requestId, kelaboId?, journeyId?}` |
+| `journey_report_submit` | `{requestId, kelaboId?, journeyId?, question, answer}` |
+| `journey_post` | `{requestId, kelaboId?, journeyId?, content, msgId?}` |
 | `detach` | `{kelaboId?}` |
+
+`kelaboId` on the journey requests is optional (docs 20 §12.3): present, the
+journey resolves against that kelabo's links; absent, against the journeys
+this connection attached to with `journey_attach`.
 
 **Down (Gateway → bridge)**
 
@@ -109,7 +119,7 @@ string the Gateway stores and never interprets.
 |---|---|
 | `registered` | `{agentId, kelaboId}` |
 | `rejected` | `{reason}` |
-| `briefing` | `{kelaboId, status, title, host, scheduledAt?, durationMinutes?, note?, invitees[], participants[]}` |
+| `briefing` | `{kelaboId, status, title, host, scheduledAt?, durationMinutes?, note?, invitees[], participants[], journeys[]}` |
 | `transcript` | `{kelaboId, messageId, seq, speaker, text, at, final, human}` |
 | `kelabo` | `{kelaboId, event:"started"\|"ended"\|"renamed", title?}` |
 | `request` | `{kind:"summary"\|"archive", requestId, kelaboId}` |
@@ -120,6 +130,11 @@ string the Gateway stores and never interprets.
 | `journey_board` | `{requestId, kelaboId, resolved, journeys[], messages[]}` |
 | `journey_report_submitted` | `{requestId, kelaboId, resolved, journeys[], reportId?}` |
 | `journey_posted` | `{requestId, kelaboId, resolved, journeys[], msgId?, version?}` |
+| `journey_briefing` | `{requestId, resolved:"ok"\|"journey_not_found"\|"not_journey_member", journeyId?, title, visibility?, status?, description, health?, progress?, aiCanPost, counts?, kelabos[]}` |
+| `journey_context` | `{requestId, kelaboId, resolved, journeys[], journeyId?, title, status?, description, health?, progress?, aiCanPost, board[], documents[], kelabos[], reports[]}` |
+| `journey_kelabos` | `{requestId, kelaboId, resolved, journeys[], entries[]}` — each entry the minutes reduction, never a transcript |
+| `journey_documents` | `{requestId, kelaboId, resolved(+document_not_found), journeys[], documents[]}` — content only on a single `docId` read |
+| `journey_reports` | `{requestId, kelaboId, resolved(+report_not_found), journeys[], reports[]}` — answer only on a single `reportId` read |
 | `ping` | — |
 
 Two things left the protocol deliberately:
@@ -148,28 +163,38 @@ This is the surface to keep stable. Every runtime sees exactly this.
 | `kelabo_history()` | The minutes of the host's past kelabos — summaries, decisions, action items — behind the same host opt-in (`historyEnabled`) that feeds the in-ECS agent's memory (`gateway/src/agent/history.js`, one loader for both modes). `enabled:false` is a real answer: the host never opted in, which is different from opted in with nothing recorded. |
 | `kelabo_minutes({minutes})` | Submit the minutes as one JSON object, when Kelabo asks. Stored as the kelabo record; never posted to the board. |
 | `kelabo_leave()` | Detach. |
-| `kelabo_journey_info({journeyId?})` | The journey this kelabo is linked to: title, visibility, status, description, health/progress, counts. |
+| `kelabo_journey_join({journeyId?})` | Bind this session to a **journey directly** — no kelabo, no transcript (docs 20 §12.3). With no argument, lists joinable journeys (`GET /agent/journeys`: owned, accessor, public-at-tenant; active only). On success returns the journey briefing — the offline mode's context load. Independent of `kelabo_join`: either or both may be active. |
+| `kelabo_journey_leave({journeyId?})` | Detach from one or every directly-joined journey. |
+| `kelabo_journey_info({journeyId?})` | The journey in scope: title, visibility, status, description, health/progress, counts. |
+| `kelabo_journey_context({journeyId?})` | The one-call bundle — the same digest the in-ECS agent is pushed per turn (docs 20 §12.1), pulled on demand: description, status, pinned board, document excerpts, linked kelabos as minutes, recent reports. |
+| `kelabo_journey_kelabos({journeyId?})` | Every linked kelabo reduced to its stored minutes — never a transcript, never another kelabo's board. |
+| `kelabo_journey_documents({journeyId?, docId?})` | The document list (no content), or one document's full text by `docId`. |
+| `kelabo_journey_reports({journeyId?, reportId?})` | Ready reports — questions only in the list, the full Q&A by `reportId`. |
 | `kelabo_journey_timeline({journeyId?, entryType?, before?, limit?})` | The journey's timeline, newest first (docs 20 §9.2, over the tunnel). |
 | `kelabo_journey_board({journeyId?})` | The journey's pinned board messages — distinct from this kelabo's own board. |
 | `kelabo_journey_report_submit({journeyId?, question, answer})` | Store the agent's **own synthesis** as a journey report, directly — no server-side LLM round-trip. |
-| `kelabo_journey_post({journeyId?, content, msgId?})` | Write or edit a pinned journey board message, gated by the journey owner's `aiCanPost` flag (docs 20 §7) — **off by default**, and off is a clear refusal, not a silent no-op. |
+| `kelabo_journey_post({journeyId?, content, msgId?})` | Write or edit a pinned journey board message, gated by the journey owner's `aiCanPost` flag (docs 20 §7) — **off by default**, and off is a clear refusal, not a silent no-op. The write that carries "X has been added and tested" to the journey's next kelabo. |
 
-The five `kelabo_journey_*` tools (docs 20 §12.2) share two rules:
+The `kelabo_journey_*` read/write tools (docs 20 §12.2, §12.3) share two
+rules:
 
-- **An omitted `journeyId` resolves against the kelabo's own links**
-  (`resolveJourneyForKelabo`, `gateway/src/journeys.js`): the one link if
-  there is exactly one, an explicit refusal enumerating the candidates if
-  there are several — the same "enumerate rather than guess" idiom
-  `kelabo_join`'s omitted `kelaboId` uses. An explicit `journeyId` is trusted
-  only if it is one of the kelabo's links, never as a bare lookup key —
-  otherwise an attached agent could read or write any journey in the
-  deployment by guessing an id.
+- **An omitted `journeyId` resolves against what the session is attached
+  to** (`resolveJourneyRequest`, `gateway/src/tunnel.js`): the attached
+  kelabo's links when there is a kelabo, this session's direct journey
+  attachments otherwise — the one candidate if there is exactly one, an
+  explicit refusal enumerating them if there are several, the same
+  "enumerate rather than guess" idiom `kelabo_join`'s omitted `kelaboId`
+  uses. An explicit `journeyId` is trusted only if it is one of the kelabo's
+  links or one of this connection's direct attachments, never as a bare
+  lookup key — otherwise an attached agent could read or write any journey
+  in the deployment by guessing an id.
 - **The two writes are request/response, not fire-and-forget.** Unlike
   `kelabo_post`, a bad `journeyId` or an `aiCanPost` refusal is a real
   outcome the calling model needs back. Every journey frame carries a
   `resolved` field: `ok`, `no_journey`, `ambiguous`, `journey_not_found` —
   plus `ai_posting_disabled`, `message_not_found` and `already_archived` on
-  `journey_posted` alone.
+  `journey_posted` alone, and `document_not_found`/`report_not_found` on the
+  two single-item reads.
 
 The agent can create or edit a journey board message; it can **never archive
 or unarchive one** — that stays a human action via the SPA/REST, so there is

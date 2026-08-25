@@ -126,6 +126,72 @@ wss.on("connection", (ws) => {
     if (frame.type === "journey_report_submit") {
       ws.send(JSON.stringify({ type: "journey_report_submitted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [], reportId: "r-1" }));
     }
+    if (frame.type === "journey_attach") {
+      if (frame.journeyId === "j-private") {
+        ws.send(JSON.stringify({ type: "journey_briefing", requestId: frame.requestId, resolved: "not_journey_member" }));
+      } else if (frame.journeyId === "j-nope") {
+        ws.send(JSON.stringify({ type: "journey_briefing", requestId: frame.requestId, resolved: "journey_not_found" }));
+      } else {
+        ws.send(JSON.stringify({
+          type: "journey_briefing", requestId: frame.requestId, resolved: "ok",
+          journeyId: frame.journeyId, title: "Q3 Launch", visibility: "public", status: "active",
+          description: "Ship the redesign.", health: "yellow", progress: 40, aiCanPost: false,
+          counts: { kelaboCount: 2, documentCount: 1, reportCount: 1, boardMessageCount: 1, accessorCount: 0 },
+          kelabos: [{ kelaboId: "past1", title: "Kickoff", linkedAt: 1722300000000 }],
+        }));
+      }
+    }
+    if (frame.type === "journey_context_request") {
+      ws.send(JSON.stringify({
+        type: "journey_context", requestId: frame.requestId,
+        ...(frame.kelaboId ? { kelaboId: frame.kelaboId } : {}),
+        resolved: "ok", journeys: [], journeyId: "j-1", title: "Q3 Launch", status: "active",
+        description: "Ship the redesign.", health: "yellow", progress: 40, aiCanPost: false,
+        board: [{ content: "Freeze is Friday" }],
+        documents: [{ docId: "d1", title: "Spec", excerpt: "The spec begins…", sizeBytes: 900 }],
+        kelabos: [{ kelaboId: "past1", title: "Kickoff", linkedAt: 1722300000000, hasMinutes: true, summary: "We picked blue.", decisions: ["Blue, not green"], actionItems: ["Ship it (bo)"] }],
+        reports: [{ reportId: "rp1", question: "Where are we?", answer: "On track." }],
+      }));
+    }
+    if (frame.type === "journey_kelabos_request") {
+      ws.send(JSON.stringify({
+        type: "journey_kelabos", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+        entries: [
+          { kelaboId: "past1", title: "Kickoff", linkedAt: 1722300000000, hasMinutes: true, summary: "We picked blue.", decisions: ["Blue, not green"], actionItems: ["Ship it (bo)"] },
+          { kelaboId: "k2", title: "Design review", hasMinutes: false, summary: "", decisions: [], actionItems: [] },
+        ],
+      }));
+    }
+    if (frame.type === "journey_documents_request") {
+      if (frame.docId === "gone") {
+        ws.send(JSON.stringify({ type: "journey_documents", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "document_not_found", journeys: [], documents: [] }));
+      } else if (frame.docId) {
+        ws.send(JSON.stringify({
+          type: "journey_documents", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+          documents: [{ docId: frame.docId, title: "Spec", addedBy: "alice@example.com", addedAt: 1722300000000, sizeBytes: 900, content: "The whole spec, unabridged." }],
+        }));
+      } else {
+        ws.send(JSON.stringify({
+          type: "journey_documents", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+          documents: [{ docId: "d1", title: "Spec", addedBy: "alice@example.com", addedAt: 1722300000000, sizeBytes: 900 }],
+        }));
+      }
+    }
+    if (frame.type === "journey_reports_request") {
+      if (frame.reportId === "gone") {
+        ws.send(JSON.stringify({ type: "journey_reports", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "report_not_found", journeys: [], reports: [] }));
+      } else if (frame.reportId) {
+        ws.send(JSON.stringify({
+          type: "journey_reports", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+          reports: [{ reportId: frame.reportId, question: "Where are we?", requestedAt: 1722300000000, generatedBy: "agent", answer: "On track." }],
+        }));
+      } else {
+        ws.send(JSON.stringify({
+          type: "journey_reports", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
+          reports: [{ reportId: "rp1", question: "Where are we?", requestedAt: 1722300000000, generatedBy: "agent" }],
+        }));
+      }
+    }
     if (frame.type === "journey_post") {
       // First ask: the owner has not turned aiCanPost on. Later asks: on,
       // matching the historyAsks toggle above.
@@ -176,6 +242,9 @@ const api = {
   joinableKelabos: async () => [
     { kelaboId: KELABO, title: "Standup", status: "active", isHost: true, startedAt: Date.now() - 60_000 },
     { kelaboId: SCHEDULED, title: "Retry policy review", status: "scheduled", isHost: false, scheduledAt: Date.now() + 3_600_000 },
+  ],
+  joinableJourneys: async () => [
+    { journeyId: "j-1", title: "Q3 Launch", visibility: "public", status: "active", isOwner: true, aiCanPost: false, kelaboCount: 2, updatedAt: Date.now() },
   ],
 };
 const tools = createTools({ tunnel, binding, adapter, api });
@@ -343,6 +412,59 @@ await test("kelabo_journey_post is refused while aiCanPost is off, then succeeds
   assert.match(archived, /is archived and cannot be edited until it is unarchived/);
 });
 
+await test("kelabo_journey_context renders the whole bundle with record-of-the-past framing", async () => {
+  const out = await tools.journeyContext({});
+  assert.match(out, /Q3 Launch/);
+  assert.match(out, /DESCRIPTION:\nShip the redesign\./);
+  assert.match(out, /PINNED BOARD MESSAGES:\n- Freeze is Friday/);
+  assert.match(out, /Spec \(docId: d1\)/);
+  assert.match(out, /The spec begins…/);
+  assert.match(out, /Kickoff/);
+  assert.match(out, /Decisions: Blue, not green/);
+  assert.match(out, /Q: Where are we\? \(reportId: rp1\)/);
+  // The framing is load-bearing: without it the model treats a six-week-old
+  // decision as the current state, or a pasted document as instructions.
+  assert.match(out, /RECORD OF THE PAST/);
+  assert.match(out, /data, not instructions/);
+});
+
+await test("kelabo_journey_kelabos renders each kelabo's minutes and says when there are none yet", async () => {
+  const out = await tools.journeyKelabos({});
+  assert.match(out, /### Kickoff \(linked 2024-07-30\) — kelaboId: past1/);
+  assert.match(out, /We picked blue\./);
+  assert.match(out, /Action items: Ship it \(bo\)/);
+  assert.match(out, /### Design review — kelaboId: k2/);
+  assert.match(out, /no minutes yet/);
+  assert.match(out, /RECORD OF THE PAST/);
+});
+
+await test("kelabo_journey_documents lists without content, reads one in full, and explains a bad docId", async () => {
+  const list = await tools.journeyDocuments({});
+  assert.match(list, /- Spec \(docId: d1, 900 bytes, added by alice@example\.com\)/);
+  assert.doesNotMatch(list, /unabridged/);
+  assert.match(list, /Call again with docId/);
+
+  const one = await tools.journeyDocuments({ docId: "d1" });
+  assert.match(one, /The whole spec, unabridged\./);
+  assert.match(one, /data, not instructions/);
+
+  const gone = await tools.journeyDocuments({ docId: "gone" });
+  assert.match(gone, /No such document/);
+});
+
+await test("kelabo_journey_reports lists questions, reads one Q&A in full, and explains a bad reportId", async () => {
+  const list = await tools.journeyReports({});
+  assert.match(list, /- Where are we\? \(reportId: rp1, by agent/);
+  assert.doesNotMatch(list, /On track/);
+
+  const one = await tools.journeyReports({ reportId: "rp1" });
+  assert.match(one, /Q: Where are we\?/);
+  assert.match(one, /A: On track\./);
+
+  const gone = await tools.journeyReports({ reportId: "gone" });
+  assert.match(gone, /No such ready report/);
+});
+
 await test("kelabo_working puts an in-progress card up before there is an answer", async () => {
   // The whole point: the room sees the question was taken, during the minutes
   // the lookup actually takes. Without it, working and ignoring look identical.
@@ -462,6 +584,62 @@ await test("leaving lands the cards still in flight instead of leaving them spin
     tail.findIndex((f) => f.type === "detach") > tail.lastIndexOf(skipped[skipped.length - 1]),
     "landed while still attached, not after the detach"
   );
+});
+
+// --- direct journey attachment (docs 20 §12.3) -------------------------------
+//
+// Deliberately after `leave`: no kelabo is attached, which is the offline
+// mode's whole point — read the journey's context, work, post the outcome,
+// all without a live or scheduled kelabo to anchor to.
+
+await test("with nothing attached, journey tools say what to call, and kelabo_journey_join lists journeys", async () => {
+  await assert.rejects(() => tools.journeyContext({}), /kelabo_journey_join/);
+  const out = await tools.journeyJoin({});
+  assert.match(out, /j-1  Q3 Launch — public, you own it, 2 kelabos/);
+  assert.match(out, /A journey has no transcript/);
+});
+
+await test("kelabo_journey_join attaches directly and the pull tools work with no kelabo at all", async () => {
+  const out = await tools.journeyJoin({ journeyId: "j-1" });
+  assert.match(out, /<kelabo-journey-briefing journey="j-1" status="active" untrusted="true">/);
+  assert.match(out, /Journey: Q3 Launch — public, active/);
+  assert.match(out, /Description: Ship the redesign\./);
+  assert.match(out, /- Kickoff — linked/);
+  assert.match(out, /no kelabo, no transcript/);
+  // aiCanPost is off in the stub briefing, and the envelope must say what
+  // that means for the "post the outcome" step.
+  assert.match(out, /report outcomes to the developer/);
+
+  const before = received.length;
+  const ctx = await tools.journeyContext({});
+  assert.match(ctx, /Q3 Launch/);
+  const frame = received.slice(before).find((f) => f.type === "journey_context_request");
+  assert.equal(frame.kelaboId, undefined, "no kelabo attached means no kelaboId on the wire");
+
+  const info = await tools.kelabo();
+  assert.match(info, /working on a journey directly/);
+  assert.match(info, /Q3 Launch \(j-1\)/);
+});
+
+await test("a refused journey join is explained, not thrown away", async () => {
+  await assert.rejects(() => tools.journeyJoin({ journeyId: "j-private" }), /neither the owner nor an accessor/);
+  await assert.rejects(() => tools.journeyJoin({ journeyId: "j-nope" }), /No such journey/);
+});
+
+await test("a reconnect re-announces direct journey attachments too", async () => {
+  const before = received.length;
+  gatewaySocket.close();
+  await waitFor(() => received.slice(before).some((f) => f.type === "register"), 8000);
+  const replay = await waitFor(() => received.slice(before).find((f) => f.type === "journey_attach"), 8000);
+  assert.equal(replay.journeyId, "j-1");
+});
+
+await test("kelabo_journey_leave detaches, and the tools go back to saying what to call", async () => {
+  const out = await tools.journeyLeave({});
+  assert.match(out, /Detached from journey j-1/);
+  const detach = await waitFor(() => received.find((f) => f.type === "journey_detach"));
+  assert.ok(detach);
+  await assert.rejects(() => tools.journeyContext({}), /Not attached to anything/);
 });
 
 tunnel.stop();

@@ -137,16 +137,29 @@ bridge rather than a protocol change.
 /** @typedef {{type:"rename", kelaboId:string, title:string}} FrameRename */
 /** @typedef {{type:"board_request", requestId:string, kelaboId:string}} FrameBoardRequest */
 /** @typedef {{type:"history_request", requestId:string, kelaboId:string}} FrameHistoryRequest */
-/** @typedef {{type:"journey_info_request", requestId:string, kelaboId:string,
+/** @typedef {{type:"journey_attach", requestId:string, journeyId:string}} FrameJourneyAttach */
+/** @typedef {{type:"journey_detach", journeyId?:string}} FrameJourneyDetach */
+/** kelaboId is optional on every journey_*_request (docs 20 §12.3): present
+ *  means "resolve against that kelabo's links"; absent means "resolve against
+ *  this connection's own direct journey attachments". */
+/** @typedef {{type:"journey_info_request", requestId:string, kelaboId?:string,
  *             journeyId?:string}} FrameJourneyInfoRequest */
-/** @typedef {{type:"journey_timeline_request", requestId:string, kelaboId:string,
+/** @typedef {{type:"journey_context_request", requestId:string, kelaboId?:string,
+ *             journeyId?:string}} FrameJourneyContextRequest */
+/** @typedef {{type:"journey_kelabos_request", requestId:string, kelaboId?:string,
+ *             journeyId?:string}} FrameJourneyKelabosRequest */
+/** @typedef {{type:"journey_documents_request", requestId:string, kelaboId?:string,
+ *             journeyId?:string, docId?:string}} FrameJourneyDocumentsRequest */
+/** @typedef {{type:"journey_reports_request", requestId:string, kelaboId?:string,
+ *             journeyId?:string, reportId?:string}} FrameJourneyReportsRequest */
+/** @typedef {{type:"journey_timeline_request", requestId:string, kelaboId?:string,
  *             journeyId?:string, entryType?:string, before?:number,
  *             limit?:number}} FrameJourneyTimelineRequest */
-/** @typedef {{type:"journey_board_request", requestId:string, kelaboId:string,
+/** @typedef {{type:"journey_board_request", requestId:string, kelaboId?:string,
  *             journeyId?:string}} FrameJourneyBoardRequest */
-/** @typedef {{type:"journey_report_submit", requestId:string, kelaboId:string,
+/** @typedef {{type:"journey_report_submit", requestId:string, kelaboId?:string,
  *             journeyId?:string, question:string, answer:string}} FrameJourneyReportSubmit */
-/** @typedef {{type:"journey_post", requestId:string, kelaboId:string,
+/** @typedef {{type:"journey_post", requestId:string, kelaboId?:string,
  *             journeyId?:string, content:string, msgId?:string}} FrameJourneyPost */
 /** @typedef {{type:"detach", kelaboId?:string}} FrameDetach */
 ```
@@ -159,7 +172,8 @@ bridge rather than a protocol change.
  *             title:string, host:string, scheduledAt?:number, durationMinutes?:number,
  *             startedAt?:number, note:string,
  *             invitees:{displayName:string,email?:string,response:string,isHost:boolean}[],
- *             participants:{identity:string,displayName:string,isGuest:boolean}[]}} FrameBriefing */
+ *             participants:{identity:string,displayName:string,isGuest:boolean}[],
+ *             journeys:{journeyId:string,title:string}[]}} FrameBriefing */
 /** @typedef {{type:"transcript", kelaboId:string, messageId:string, seq:number,
  *             speaker:string, text:string, at:number, final:boolean,
  *             human:boolean}} FrameTranscript */
@@ -191,27 +205,70 @@ bridge rather than a protocol change.
  *             resolved:JourneyResolved|"ai_posting_disabled"|"message_not_found"
  *             |"already_archived", journeys:{journeyId,title}[],
  *             msgId?:string, version?:number}} FrameJourneyPosted */
+/** kelaboId on every journey response defaults "" — a request made from a
+ *  direct journey attachment (docs 20 §12.3) names no kelabo. */
+/** @typedef {{type:"journey_briefing", requestId:string,
+ *             resolved:"ok"|"journey_not_found"|"not_journey_member",
+ *             journeyId?:string, title:string, visibility?:"public"|"private",
+ *             status?:"active"|"completed", description:string,
+ *             health?:"green"|"yellow"|"red"|null, progress?:number|null,
+ *             aiCanPost:boolean, counts?:Object,
+ *             kelabos:{kelaboId,title,linkedAt?}[]}} FrameJourneyBriefing */
+/** @typedef {{kelaboId:string, title:string, linkedAt?:number, hasMinutes:boolean,
+ *             summary:string, decisions:string[], actionItems:string[]}} JourneyKelaboEntry */
+/** @typedef {{type:"journey_context", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved, journeys:{journeyId,title}[],
+ *             journeyId?:string, title:string, status?:string, description:string,
+ *             health?:string|null, progress?:number|null, aiCanPost:boolean,
+ *             board:{content}[], documents:{docId,title,excerpt,sizeBytes?}[],
+ *             kelabos:JourneyKelaboEntry[],
+ *             reports:{reportId,question,answer}[]}} FrameJourneyContext */
+/** @typedef {{type:"journey_kelabos", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved, journeys:{journeyId,title}[],
+ *             entries:JourneyKelaboEntry[]}} FrameJourneyKelabos */
+/** @typedef {{type:"journey_documents", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved|"document_not_found",
+ *             journeys:{journeyId,title}[],
+ *             documents:{docId,title,addedBy?,addedAt?,sizeBytes?,content?}[]}} FrameJourneyDocuments */
+/** @typedef {{type:"journey_reports", requestId:string, kelaboId:string,
+ *             resolved:JourneyResolved|"report_not_found",
+ *             journeys:{journeyId,title}[],
+ *             reports:{reportId,question,requestedAt?,generatedBy?,answer?}[]}} FrameJourneyReports */
 /** @typedef {{type:"ping"}} FramePing */
 ```
 
-### 3.2a Journey tool frames (docs 20 §12.2)
+### 3.2a Journey tool frames (docs 20 §12.2, §12.3)
 
-Five request/response pairs serving the dev-mode journey tools
-(`kelabo_journey_info/timeline/board/report_submit/post`). All ten carry a
-`requestId`; even the two *writes* are request/response, not fire-and-forget
-like `contribution` — a bad journey or an `aiCanPost` refusal is a real
-outcome the calling model needs back ("off is an answer, not an error", the
-same shape as `history`'s `enabled:false`).
+Nine request/response pairs plus a fire-and-forget detach, serving the
+dev-mode journey tools (`kelabo_journey_info/context/kelabos/documents/
+reports/timeline/board/report_submit/post` and `kelabo_journey_join/leave`).
+All the correlated ones carry a `requestId`; even the two *writes* are
+request/response, not fire-and-forget like `contribution` — a bad journey or
+an `aiCanPost` refusal is a real outcome the calling model needs back ("off
+is an answer, not an error", the same shape as `history`'s `enabled:false`).
 
 `resolved` reports how the target journey was found before anything else
-happened: `ok`, `no_journey` (this kelabo is linked to none), `ambiguous`
-(linked to more than one and no `journeyId` given — `journeys` lists the
-candidates, the same "enumerate rather than guess" idiom as `kelabo_join`),
-or `journey_not_found` (an explicit `journeyId` that is not one of this
-kelabo's links — an id is **never** honoured as a bare lookup key).
-`journey_posted` alone adds `ai_posting_disabled`, `message_not_found` and
-`already_archived`. There is deliberately no archive/unarchive frame — that
-stays a human action via SPA/REST (docs 20 §7, §12.2).
+happened: `ok`, `no_journey` (nothing in scope), `ambiguous` (more than one
+and no `journeyId` given — `journeys` lists the candidates, the same
+"enumerate rather than guess" idiom as `kelabo_join`), or
+`journey_not_found` (an explicit `journeyId` that is neither one of the
+kelabo's links nor one of the connection's direct attachments — an id is
+**never** honoured as a bare lookup key). `journey_posted` alone adds
+`ai_posting_disabled`, `message_not_found` and `already_archived`;
+`journey_documents`/`journey_reports` add `document_not_found`/
+`report_not_found` for an explicit id that names nothing active. There is
+deliberately no archive/unarchive frame — that stays a human action via
+SPA/REST (docs 20 §7, §12.2).
+
+**Two attachment scopes** (docs 20 §12.3): `kelaboId` present on a request
+means "resolve against that kelabo's links, which I must be attached to or
+preparing for"; absent means "resolve against the journeys this connection
+attached to with `journey_attach`". `journey_attach` itself is authorized
+like rest-api's `resolveAccess` — owner, public-at-tenant, or private
+`ACCESSOR#` roster — and answered with `journey_briefing` (resolved
+`ok`/`journey_not_found`/`not_journey_member`); a foreign-tenant journey
+reads as `journey_not_found`, so ids cannot be probed. No transcript ever
+flows from a journey attachment.
 
 ### 3.3 Two things that are deliberately absent
 

@@ -67,10 +67,10 @@ export async function activeDocuments(c, journeyId, limit = 5) {
 // kelabos — decisions and action items are what a report gets asked about
 // by name; topics are dropped because the summary already narrates them.
 const LINKED_KELABO_LIMIT = 8;
-export async function linkedKelaboSummaries(c, journeyId) {
+export async function linkedKelaboSummaries(c, journeyId, limit = LINKED_KELABO_LIMIT) {
   const links = (await queryJourneyItems(c, journeyId, "LINK#"))
     .sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0))
-    .slice(0, LINKED_KELABO_LIMIT);
+    .slice(0, limit);
   return Promise.all(
     links.map(async (l) => {
       const minutes = await getMinutes(c, l.kelaboId).catch(() => null);
@@ -80,6 +80,10 @@ export async function linkedKelaboSummaries(c, journeyId) {
         // can exclude it from its own "other kelabos in this journey" list.
         kelaboId: l.kelaboId,
         title: l.titleSnapshot || "Untitled kelabo",
+        ...(l.linkedAt ? { linkedAt: l.linkedAt } : {}),
+        // Distinguishes "no minutes yet" from "minutes with nothing in them"
+        // for the pull tools (docs 20 §12.3); the push context ignores it.
+        hasMinutes: !!minutes,
         summary: minutes?.summary || "",
         decisions: (minutes?.decisions ?? []).map((d) => (typeof d === "string" ? d : d.text)).filter(Boolean),
         actionItems: (minutes?.actionItems ?? [])
@@ -90,15 +94,56 @@ export async function linkedKelaboSummaries(c, journeyId) {
   );
 }
 
-async function recentReadyReports(c, journeyId, limit = 3) {
+// Exported for tunnel.js's `journey_reports_request` (docs 20 §12.3), which
+// wants a longer list than buildContext's 3-report digest below.
+export async function listReadyReports(c, journeyId, limit = 3) {
   const reports = (await queryJourneyItems(c, journeyId, "REPORT#")).filter((r) => r.status === "ready");
   return reports.sort((a, b) => (b.requestedAt || 0) - (a.requestedAt || 0)).slice(0, limit);
 }
 
+// --- single-item readers for the pull tools (docs 20 §12.3) -----------------
+//
+// The push context clips a document to an excerpt because it rides every
+// agent turn; the pull tools exist so an agent that actually needs the full
+// text can fetch exactly one, on demand.
+
+export async function getJourneyDocument(c, journeyId, docId) {
+  const out = await c.db.send(
+    new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: `DOC#${docId}` } })
+  );
+  return out.Item ?? null;
+}
+
+export async function getJourneyReport(c, journeyId, reportId) {
+  const out = await c.db.send(
+    new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: `REPORT#${reportId}` } })
+  );
+  return out.Item ?? null;
+}
+
+/** The journey's `LINK#` rows — membership only, for the journey briefing's
+ *  kelabo list (docs 20 §12.3). Minutes stay in `linkedKelaboSummaries`. */
+export async function queryJourneyLinks(c, journeyId) {
+  const links = await queryJourneyItems(c, journeyId, "LINK#");
+  return links.sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0));
+}
+
+/** The `ACCESSOR#` roster row for one identity, or null — the Gateway-side
+ *  twin of rest-api's `getAccessor`, for `journey_attach` authorization
+ *  (docs 20 §12.3). Re-implemented rather than shared, same cross-package
+ *  reason as everything else in this file. */
+export async function getJourneyAccessor(c, journeyId, identity) {
+  const out = await c.db.send(
+    new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: `ACCESSOR#${identity}` } })
+  );
+  return out.Item ?? null;
+}
+
 // The pipeline enforces no size ceiling of its own (docs 20 §6.2) — every
 // field assembled here brings its own explicit budget rather than adding to
-// that uncapped pile.
-const clip = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "…" : s || "");
+// that uncapped pile. Exported for tunnel.js's `journey_context_request`
+// handler, which applies the same discipline to what it puts on the wire.
+export const clip = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "…" : s || "");
 
 async function buildContext(c, journeyId, meta) {
   const [description, board, documents, kelabos, reports] = await Promise.all([
@@ -106,7 +151,7 @@ async function buildContext(c, journeyId, meta) {
     activeBoardMessages(c, journeyId),
     activeDocuments(c, journeyId),
     linkedKelaboSummaries(c, journeyId),
-    recentReadyReports(c, journeyId),
+    listReadyReports(c, journeyId),
   ]);
 
   const parts = [`JOURNEY: ${meta.title}`];

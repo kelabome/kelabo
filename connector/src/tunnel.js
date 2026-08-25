@@ -28,6 +28,10 @@ export function createTunnel({
   // restart either, so re-announcing is the only thing that makes a dropped
   // socket a non-event.
   let attachment = null;
+  // Journeys this session attached to directly (docs 20 §12.3),
+  // journeyId -> title. Replayed after a reconnect for the same reason as
+  // `attachment`; independent of it — either, both or neither may be set.
+  const journeyAttachments = new Map();
   // requestId -> resolve, for board reads.
   const pending = new Map();
 
@@ -89,6 +93,12 @@ export function createTunnel({
         heartbeat.unref?.();
         bus.emit("registered", frame);
         if (attachment) send({ type: "attach", ...attachment });
+        // Replayed fire-and-forget: the re-attach either lands (the Gateway
+        // re-authorizes it) or the next journey tool call surfaces the loss.
+        // The briefing each replay produces resolves no waiter and is dropped.
+        for (const journeyId of journeyAttachments.keys()) {
+          send({ type: "journey_attach", requestId: randomUUID(), journeyId });
+        }
         return;
       case "rejected":
         // A rejected registration is terminal — a revoked or malformed token
@@ -106,6 +116,11 @@ export function createTunnel({
       }
       case "history":
       case "journey_info":
+      case "journey_briefing":
+      case "journey_context":
+      case "journey_kelabos":
+      case "journey_documents":
+      case "journey_reports":
       case "journey_timeline":
       case "journey_board":
       case "journey_report_submitted":
@@ -191,7 +206,10 @@ export function createTunnel({
   /** Shared request/response shape for every `journey_*` tool (docs 20
    *  §12.2) — mint a requestId, track it in `pending` exactly like
    *  `requestBoard`/`requestHistory` above, resolve with the whole frame
-   *  (never a sub-field) on arrival, `null` on timeout or a dead socket. */
+   *  (never a sub-field) on arrival, `null` on timeout or a dead socket.
+   *  A falsy `kelaboId` is omitted from the wire (docs 20 §12.3): the
+   *  Gateway then resolves against this connection's direct journey
+   *  attachments instead of a kelabo's links. */
   function requestJourney(upType, kelaboId, extra = {}, timeoutMs = 10000) {
     const requestId = randomUUID();
     return new Promise((resolve) => {
@@ -204,12 +222,30 @@ export function createTunnel({
         clearTimeout(timer);
         resolve(v);
       });
-      if (!send({ type: upType, requestId, kelaboId, ...extra })) {
+      if (!send({ type: upType, requestId, ...(kelaboId ? { kelaboId } : {}), ...extra })) {
         pending.delete(requestId);
         clearTimeout(timer);
         resolve(null);
       }
     });
+  }
+
+  /** Attach to a journey directly (docs 20 §12.3). Resolves with the
+   *  `journey_briefing` frame, `null` on timeout — the attachment is only
+   *  remembered for reconnect replay when the Gateway said "ok". */
+  async function attachJourney(journeyId, timeoutMs = 10000) {
+    const frame = await requestJourney("journey_attach", "", { journeyId }, timeoutMs);
+    if (frame?.resolved === "ok") journeyAttachments.set(journeyId, frame.title || "");
+    return frame;
+  }
+
+  /** Detach from one journey, or every journey when none is named. Returns
+   *  the journeyIds detached from. */
+  function detachJourney(journeyId) {
+    const ids = journeyId ? (journeyAttachments.has(journeyId) ? [journeyId] : []) : [...journeyAttachments.keys()];
+    for (const id of ids) journeyAttachments.delete(id);
+    if (ids.length) send({ type: "journey_detach", ...(journeyId ? { journeyId } : {}) });
+    return ids;
   }
 
   const requestJourneyInfo = (kelaboId, journeyId) =>
@@ -225,6 +261,24 @@ export function createTunnel({
 
   const requestJourneyBoard = (kelaboId, journeyId) =>
     requestJourney("journey_board_request", kelaboId, journeyId ? { journeyId } : {});
+
+  const requestJourneyContext = (kelaboId, journeyId) =>
+    requestJourney("journey_context_request", kelaboId, journeyId ? { journeyId } : {});
+
+  const requestJourneyKelabos = (kelaboId, journeyId) =>
+    requestJourney("journey_kelabos_request", kelaboId, journeyId ? { journeyId } : {});
+
+  const requestJourneyDocuments = (kelaboId, { journeyId, docId } = {}) =>
+    requestJourney("journey_documents_request", kelaboId, {
+      ...(journeyId ? { journeyId } : {}),
+      ...(docId ? { docId } : {}),
+    });
+
+  const requestJourneyReports = (kelaboId, { journeyId, reportId } = {}) =>
+    requestJourney("journey_reports_request", kelaboId, {
+      ...(journeyId ? { journeyId } : {}),
+      ...(reportId ? { reportId } : {}),
+    });
 
   const submitJourneyReport = (kelaboId, { journeyId, question, answer } = {}) =>
     requestJourney("journey_report_submit", kelaboId, { ...(journeyId ? { journeyId } : {}), question, answer });
@@ -245,15 +299,22 @@ export function createTunnel({
     send,
     attach,
     detach,
+    attachJourney,
+    detachJourney,
     requestBoard,
     requestHistory,
     requestJourneyInfo,
     requestJourneyTimeline,
     requestJourneyBoard,
+    requestJourneyContext,
+    requestJourneyKelabos,
+    requestJourneyDocuments,
+    requestJourneyReports,
     submitJourneyReport,
     postJourneyMessage,
     stop,
     attachedKelabo: () => attachment?.kelaboId || "",
+    attachedJourneys: () => [...journeyAttachments].map(([journeyId, title]) => ({ journeyId, title })),
     isConnected: () => ws?.readyState === 1,
   });
 }

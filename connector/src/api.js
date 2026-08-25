@@ -39,6 +39,13 @@ export function createApi({ apiBaseUrl, getToken, fetchImpl = fetch }) {
     return out?.kelabos ?? [];
   }
 
+  /** Journeys this developer may attach to directly (docs 20 §12.3) — same
+   *  discovery/authorize split as `joinableKelabos`. */
+  async function joinableJourneys() {
+    const out = await call("/agent/journeys");
+    return out?.journeys ?? [];
+  }
+
   /** Start pairing. Returns the code to show the developer plus the device code
    *  to poll with. */
   async function requestDeviceCode({ runtime, label }) {
@@ -64,7 +71,7 @@ export function createApi({ apiBaseUrl, getToken, fetchImpl = fetch }) {
     throw new Error("device_code_expired");
   }
 
-  return { joinableKelabos, requestDeviceCode, awaitApproval };
+  return { joinableKelabos, joinableJourneys, requestDeviceCode, awaitApproval };
 }
 
 function safeJson(text) {

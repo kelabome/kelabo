@@ -486,6 +486,21 @@ export function createApp(deps) {
       },
     },
     {
+      method: "GET",
+      pattern: "/agent/journeys",
+      handle: async (req) => {
+        // Same bearer contract as /agent/kelabos: journey discovery for
+        // `kelabo_journey_join` (docs 20 §12.3). The Gateway re-authorizes
+        // the actual attach.
+        const payload = await agent.verifyAgentToken(bearerToken(req));
+        if (!payload) throw err(401, "unauthenticated");
+        return {
+          status: 200,
+          body: await agent.joinableJourneys({ identity: payload.sub }),
+        };
+      },
+    },
+    {
       method: "POST",
       pattern: "/kelabos",
       handle: async (req) => {

@@ -138,12 +138,86 @@ export const frameDetachSchema = z.object({
 // reason: an omitted one resolves against the kelabo's own links, the same
 // "enumerate rather than guess" idiom `kelabo_join`'s omitted kelaboId
 // already uses — see `resolved`/`journeys` on each response below.
+//
+// `kelaboId` is optional on every one of these (docs 20 §12.3): a session may
+// be attached to a journey *directly* (`journey_attach`, below) with no kelabo
+// at all — the offline "work between kelabos" mode. Present, it means "resolve
+// against that kelabo's links, which I must be attached to"; absent, "resolve
+// against this connection's own journey attachments".
+
+/**
+ * Bind this agent session to a journey directly — no kelabo required, no
+ * transcript ever flows. This is the offline mode (docs 20 §12.3): read the
+ * journey's accumulated context, work in the developer's own session, and
+ * post the outcome to the journey's board. requestId-correlated (answered by
+ * `journey_briefing`) rather than answered with `rejected`, because unlike a
+ * kelabo attach it can be one of several and a bare `rejected` cannot say
+ * which request it refuses.
+ */
+export const frameJourneyAttachSchema = z.object({
+  type: z.literal("journey_attach"),
+  requestId: z.string().min(1),
+  journeyId: z.string().min(1),
+});
+
+export const frameJourneyDetachSchema = z.object({
+  type: z.literal("journey_detach"),
+  // Omitted: detach from every journey this connection is attached to.
+  journeyId: z.string().min(1).optional(),
+});
 
 export const frameJourneyInfoRequestSchema = z.object({
   type: z.literal("journey_info_request"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
+});
+
+/**
+ * The one-call context load (docs 20 §12.3): the same bundle the in-ECS
+ * agent's system prompt gets pushed per turn (agent/journeyContext.js) —
+ * description, status, pinned board, document excerpts, linked kelabos
+ * reduced to their minutes, recent reports — served on demand to a dev
+ * agent. Clipped Gateway-side; the full text of one document or report is
+ * `journey_documents_request`/`journey_reports_request` below.
+ */
+export const frameJourneyContextRequestSchema = z.object({
+  type: z.literal("journey_context_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+});
+
+/** The journey's linked kelabos, each reduced to its stored minutes — the
+ *  same minutes-not-transcripts reduction `history_request` already applies
+ *  to a host's past kelabos, so this never widens what a kelabo's own
+ *  participants granted (docs 20 §12.3). */
+export const frameJourneyKelabosRequestSchema = z.object({
+  type: z.literal("journey_kelabos_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+});
+
+/** Without `docId`: the list (titles and sizes, no content). With one: that
+ *  document's full text — pull-on-demand, where the push context clips to an
+ *  excerpt (docs 20 §12.3). */
+export const frameJourneyDocumentsRequestSchema = z.object({
+  type: z.literal("journey_documents_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  docId: z.string().min(1).optional(),
+});
+
+/** Without `reportId`: the list of ready reports (questions, no answers).
+ *  With one: that report's full question and answer. */
+export const frameJourneyReportsRequestSchema = z.object({
+  type: z.literal("journey_reports_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  reportId: z.string().min(1).optional(),
 });
 
 /** `entryType`, not `type` — the frame's own discriminator already owns
@@ -152,7 +226,7 @@ export const frameJourneyInfoRequestSchema = z.object({
 export const frameJourneyTimelineRequestSchema = z.object({
   type: z.literal("journey_timeline_request"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
   entryType: z.string().max(40).optional(),
   before: z.number().optional(),
@@ -162,7 +236,7 @@ export const frameJourneyTimelineRequestSchema = z.object({
 export const frameJourneyBoardRequestSchema = z.object({
   type: z.literal("journey_board_request"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
 });
 
@@ -175,7 +249,7 @@ export const frameJourneyBoardRequestSchema = z.object({
 export const frameJourneyReportSubmitSchema = z.object({
   type: z.literal("journey_report_submit"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
   question: z.string().min(1).max(2000),
   answer: z.string().min(1).max(8000),
@@ -189,7 +263,7 @@ export const frameJourneyReportSubmitSchema = z.object({
 export const frameJourneyPostSchema = z.object({
   type: z.literal("journey_post"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
   content: z.string().min(1).max(4000),
   msgId: z.string().min(1).optional(),
@@ -207,7 +281,13 @@ export const upFrameSchema = z.discriminatedUnion("type", [
   frameBoardRequestSchema,
   frameHistoryRequestSchema,
   frameDetachSchema,
+  frameJourneyAttachSchema,
+  frameJourneyDetachSchema,
   frameJourneyInfoRequestSchema,
+  frameJourneyContextRequestSchema,
+  frameJourneyKelabosRequestSchema,
+  frameJourneyDocumentsRequestSchema,
+  frameJourneyReportsRequestSchema,
   frameJourneyTimelineRequestSchema,
   frameJourneyBoardRequestSchema,
   frameJourneyReportSubmitSchema,
@@ -253,6 +333,10 @@ export const frameBriefingSchema = z.object({
   note: z.string().default(""),
   invitees: z.array(briefingInviteeSchema).default([]),
   participants: z.array(kelaboParticipantSchema).default([]),
+  // The journeys this kelabo is linked to (docs 20 §12.3) — membership only,
+  // so the agent knows there is journey context worth pulling with the
+  // kelabo_journey_* tools rather than having to probe for it.
+  journeys: z.array(z.object({ journeyId: z.string(), title: z.string() })).default([]),
 });
 
 /** One sealed speaker message. `messageId`/`seq` carry the speaker's own message
@@ -335,12 +419,16 @@ export const framePingSchema = z.object({
 // `aiCanPost` gate, and an edit naming a message that does not exist or is
 // archived — the agent bridge can create or edit a message, never archive
 // or unarchive one; that stays a human action via the SPA/REST.
+//
+// `kelaboId` on every response below is `.default("")` rather than required:
+// a request made from a direct journey attachment (docs 20 §12.3) names no
+// kelabo, and the response echoes that absence.
 const journeyRef = z.object({ journeyId: z.string(), title: z.string() });
 
 export const frameJourneyInfoSchema = z.object({
   type: z.literal("journey_info"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().default(""),
   resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
   journeys: z.array(journeyRef).default([]),
   journeyId: z.string().optional(),
@@ -364,7 +452,7 @@ export const frameJourneyInfoSchema = z.object({
 export const frameJourneyTimelineSchema = z.object({
   type: z.literal("journey_timeline"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().default(""),
   resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
   journeys: z.array(journeyRef).default([]),
   entries: z
@@ -383,7 +471,7 @@ export const frameJourneyTimelineSchema = z.object({
 export const frameJourneyBoardSchema = z.object({
   type: z.literal("journey_board"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().default(""),
   resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
   journeys: z.array(journeyRef).default([]),
   messages: z
@@ -401,7 +489,7 @@ export const frameJourneyBoardSchema = z.object({
 export const frameJourneyReportSubmittedSchema = z.object({
   type: z.literal("journey_report_submitted"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().default(""),
   resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
   journeys: z.array(journeyRef).default([]),
   reportId: z.string().optional(),
@@ -410,7 +498,7 @@ export const frameJourneyReportSubmittedSchema = z.object({
 export const frameJourneyPostedSchema = z.object({
   type: z.literal("journey_posted"),
   requestId: z.string().min(1),
-  kelaboId: z.string().min(1),
+  kelaboId: z.string().default(""),
   resolved: z.enum([
     "ok",
     "no_journey",
@@ -423,6 +511,135 @@ export const frameJourneyPostedSchema = z.object({
   journeys: z.array(journeyRef).default([]),
   msgId: z.string().optional(),
   version: z.number().optional(),
+});
+
+// --- direct journey attachment + one-call context (docs 20 §12.3) -----------
+
+const journeyCountsSchema = z.object({
+  kelaboCount: z.number().default(0),
+  documentCount: z.number().default(0),
+  reportCount: z.number().default(0),
+  boardMessageCount: z.number().default(0),
+  accessorCount: z.number().default(0),
+});
+
+/**
+ * The answer to `journey_attach`. `resolved` carries the outcome the way the
+ * journey pull responses already do: "ok" (attached, the rest is populated),
+ * "journey_not_found" (no such journey — also what a journey in another
+ * tenant looks like, deliberately), or "not_journey_member" (it exists, the
+ * caller is neither owner nor accessor). For a direct attachment this is the
+ * whole of the agent's starting context, the same role `briefing` plays for
+ * a kelabo attach.
+ */
+export const frameJourneyBriefingSchema = z.object({
+  type: z.literal("journey_briefing"),
+  requestId: z.string().min(1),
+  resolved: z.enum(["ok", "journey_not_found", "not_journey_member"]),
+  journeyId: z.string().optional(),
+  title: z.string().default(""),
+  visibility: z.enum(["public", "private"]).optional(),
+  status: z.enum(["active", "completed"]).optional(),
+  description: z.string().default(""),
+  health: z.enum(["green", "yellow", "red"]).nullable().optional(),
+  progress: z.number().nullable().optional(),
+  // Whether the journey's owner lets an agent write to its board — carried
+  // here so the agent knows before it drafts a post, not after.
+  aiCanPost: z.boolean().default(false),
+  counts: journeyCountsSchema.optional(),
+  // The linked kelabos, membership only — their minutes come from
+  // `journey_kelabos_request` when actually needed.
+  kelabos: z
+    .array(z.object({ kelaboId: z.string(), title: z.string(), linkedAt: z.number().optional() }))
+    .default([]),
+});
+
+/** One linked kelabo reduced to its minutes — the same shape `history`'s
+ *  entries carry, minus `endedAt` (a journey link stores `linkedAt`). */
+const journeyKelaboEntrySchema = z.object({
+  kelaboId: z.string(),
+  title: z.string(),
+  linkedAt: z.number().optional(),
+  hasMinutes: z.boolean().default(false),
+  summary: z.string().default(""),
+  decisions: z.array(z.string()).default([]),
+  actionItems: z.array(z.string()).default([]),
+});
+
+export const frameJourneyContextSchema = z.object({
+  type: z.literal("journey_context"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  journeyId: z.string().optional(),
+  title: z.string().default(""),
+  status: z.enum(["active", "completed"]).optional(),
+  description: z.string().default(""),
+  health: z.enum(["green", "yellow", "red"]).nullable().optional(),
+  progress: z.number().nullable().optional(),
+  aiCanPost: z.boolean().default(false),
+  board: z.array(z.object({ content: z.string() })).default([]),
+  // Excerpts, not full text — `journey_documents` below is the full read.
+  documents: z
+    .array(z.object({ docId: z.string(), title: z.string(), excerpt: z.string().default(""), sizeBytes: z.number().optional() }))
+    .default([]),
+  kelabos: z.array(journeyKelaboEntrySchema).default([]),
+  reports: z
+    .array(z.object({ reportId: z.string(), question: z.string(), answer: z.string().default("") }))
+    .default([]),
+});
+
+export const frameJourneyKelabosSchema = z.object({
+  type: z.literal("journey_kelabos"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  entries: z.array(journeyKelaboEntrySchema).default([]),
+});
+
+/** `document_not_found` is a real answer (an explicit docId that names no
+ *  active document), same shape `journey_posted`'s edit failures use. */
+export const frameJourneyDocumentsSchema = z.object({
+  type: z.literal("journey_documents"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "document_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  documents: z
+    .array(
+      z.object({
+        docId: z.string(),
+        title: z.string(),
+        addedBy: z.string().optional(),
+        addedAt: z.number().optional(),
+        sizeBytes: z.number().optional(),
+        // Present only on a single-document read (docId given).
+        content: z.string().optional(),
+      })
+    )
+    .default([]),
+});
+
+export const frameJourneyReportsSchema = z.object({
+  type: z.literal("journey_reports"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "report_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  reports: z
+    .array(
+      z.object({
+        reportId: z.string(),
+        question: z.string(),
+        requestedAt: z.number().optional(),
+        generatedBy: z.string().optional(),
+        // Present only on a single-report read (reportId given).
+        answer: z.string().optional(),
+      })
+    )
+    .default([]),
 });
 
 /** Discriminated union of all Gateway -> bridge frames. */
@@ -441,6 +658,11 @@ export const downFrameSchema = z.discriminatedUnion("type", [
   frameJourneyBoardSchema,
   frameJourneyReportSubmittedSchema,
   frameJourneyPostedSchema,
+  frameJourneyBriefingSchema,
+  frameJourneyContextSchema,
+  frameJourneyKelabosSchema,
+  frameJourneyDocumentsSchema,
+  frameJourneyReportsSchema,
 ]);
 
 /** @param {string|Buffer} raw @returns {{ok:true, frame:object}|{ok:false, error:string}} */

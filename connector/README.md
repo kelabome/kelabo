@@ -11,8 +11,13 @@ for how it is packaged and installed.
 When the kelabo is part of a journey — the container that carries decisions and
 documents across related kelabos ([`docs/20-journey.md`](../docs/20-journey.md)) —
 the agent can read it and write back through the `kelabo_journey_*` tools:
-info, timeline and pinned board, submitting its own synthesis as a report, and
-posting a board message when the journey's owner has allowed AI posts.
+info, timeline and pinned board, the one-call context bundle, past kelabos'
+minutes, full document text and past reports, submitting its own synthesis as
+a report, and posting a board message when the journey's owner has allowed AI
+posts. A journey is also joinable **directly** (`kelabo_journey_join`, no
+kelabo, no transcript) for work between meetings: read the journey's context,
+do the work in the developer's own session, post the outcome to the journey
+board — which the journey's next kelabo then sees.
 
 **This directory's `package.json` is `private` and is never published.** It
 carries `"@kelabo/contracts": "file:../contracts"`, which npm cannot resolve

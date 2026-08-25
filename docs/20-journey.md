@@ -1,14 +1,15 @@
 # 20 — Journey
 
 Status: **implemented, short of what §17 marks permanently out of scope**
-— 2026-08-22. Built: the data model (§4), lifecycle/permissions (§3),
-health/progress (§5), reports (§6), the message board (§7), documents
-(§8), the timeline (§9), contributor stats (§10, both settling paths),
-the full REST API (§11), both halves of agent/MCP integration (§12.1
-push, §12.2 pull), and the SPA (§13, including the "Part of: …"
-breadcrumb). Not built, and not planned in this document — see §17:
-real file upload, an agent-triggered server-side report (§12.3, by
-design), any wallet/billing scope, and the AI-suggested-status/
+— 2026-08-22, extended 2026-08-26 with §12.3. Built: the data model (§4),
+lifecycle/permissions (§3), health/progress (§5), reports (§6), the
+message board (§7), documents (§8), the timeline (§9), contributor stats
+(§10, both settling paths), the full REST API (§11), all three parts of
+agent/MCP integration (§12.1 push, §12.2 pull, §12.3 direct journey
+attachment + deep context pulls), and the SPA (§13, including the
+"Part of: …" breadcrumb). Not built, and not planned in this document —
+see §17: real file upload, an agent-triggered server-side report (§12.4,
+by design), any wallet/billing scope, and the AI-suggested-status/
 apply-status flow (§5/§6). Also designed below but **not yet built**:
 `GET /journeys/search` and the global-search dialog's journeys tab
 (§11/§13) — the rows are kept in the tables, marked. Component docs
@@ -412,7 +413,12 @@ attached agent may write to the board on its own initiative
 (`kelabo_journey_post`, §12.2) — independent of human write rights. This
 mirrors `historyEnabled`'s own justification for defaulting off: a
 human-curated, always-visible surface being edited unsupervised by an
-agent is a decision an owner has to actually make, not a default.
+agent is a decision an owner has to actually make, not a default. Set via
+`PATCH /journeys/:id`, surfaced in the SPA as an owner-only "Assistant can
+post to the board" switch on the detail page's Overview tab (added
+2026-08-26 — the flag shipped API-only at first, which made it a setting
+nobody could find) — read-only but visible to every member, the same
+disclosure rule `historyEnabled` follows.
 
 ## 8. Documents
 
@@ -714,14 +720,91 @@ recorded here rather than silently:
 whole apply-status flow is not built.)
 
 Tested at three layers: `contracts/test/frames.mjs` (schema round-trips
-for all ten new frame types, plus the completeness test's now-15-wide
-allowlists), `gateway/test/journeys.mjs` (the new `journeys.js` exports,
+for all ten new frame types, plus the completeness test's allowlists —
+15-wide when this shipped, widened again by §12.3),
+`gateway/test/journeys.mjs` (the new `journeys.js` exports,
 direct calls, offline) and `gateway/test/smoke.mjs` (the real WS dispatch
 in `tunnel.js`, including the `aiCanPost` gate and the ambiguous-journey
 path), and `connector/test/smoke.mjs` (the five MCP tools' rendered
 prose, against a fake Gateway).
 
-### 12.3 Deliberately not built here
+### 12.3 Direct journey attachment + deep context pulls — **built**
+
+Added 2026-08-26, closing the gap between what the in-ECS agent is
+*pushed* (§12.1) and what a developer's own agent could *pull* (§12.2):
+until this pass a dev agent could read a journey's info, timeline and
+board, but not the three things that actually carry context between
+kelabos — the other linked kelabos' minutes, document text, and past
+reports — and it could not touch a journey at all without a live or
+scheduled kelabo to attach to. Both halves are fixed together because
+they are one workflow: attach to the journey between meetings, read its
+accumulated context, do the work in the developer's own session, post
+the outcome to the journey board (`kelabo_journey_post`, §12.2), which
+the next kelabo's agent — server- or dev-mode — then sees.
+
+**Six new tools** alongside §12.2's five, same KAP request/response
+shape, same `resolved` vocabulary:
+
+| Tool | Purpose |
+|---|---|
+| `kelabo_journey_join({journeyId?})` | Attach this session to a journey directly — no kelabo, no transcript. No argument lists joinable journeys (`GET /agent/journeys`). Returns the journey briefing. |
+| `kelabo_journey_leave({journeyId?})` | Detach from one or every directly-joined journey |
+| `kelabo_journey_context({journeyId?})` | The one-call bundle — §12.1's push digest served on demand: description (4,000), pinned board (10 @500), document excerpts (5 @800), linked kelabos as minutes, recent reports (3) |
+| `kelabo_journey_kelabos({journeyId?})` | Every linked kelabo reduced to its stored minutes — the same minutes-not-transcripts reduction `kelabo_history` applies, granted by journey membership the way §12.1 already grants it to the in-ECS agent. Never a transcript, never another kelabo's board. |
+| `kelabo_journey_documents({journeyId?, docId?})` | List (no content), or one document's full text by `docId` — pull-on-demand where the push clips to an excerpt |
+| `kelabo_journey_reports({journeyId?, reportId?})` | List of ready reports (questions only), or one full Q&A by `reportId` |
+
+**Direct attachment** (`journey_attach`/`journey_briefing`/
+`journey_detach` frames): requestId-correlated rather than answered with
+`rejected`, because a connection may hold several journey attachments and
+a bare `rejected` cannot say which request it refuses. Authorization
+re-derives rest-api's `resolveAccess` (§3.2) — owner, or same-tenant on a
+public journey, or on a private journey's `ACCESSOR#` roster
+(`getJourneyAccessor`, the Gateway-side twin of rest-api's
+`getAccessor`). Being host or invitee of a *linked kelabo* is
+deliberately not enough: that grant is kelabo-scoped and already served
+by attaching to the kelabo. A journey in another tenant answers
+`journey_not_found`, not `not_journey_member`, so an id cannot be probed
+for existence. The attachment lives on the connection
+(`conn.journeys`, journeyId → title) and nowhere global — nothing routes
+*to* a journey attachment the way transcript routes to `tunnelByKelabo`,
+so a closed socket cleans itself up, and the bridge replays its journey
+attachments after a reconnect exactly as it replays the kelabo one.
+Discovery is `GET /agent/journeys` (rest-api `agent.joinableJourneys`,
+same bearer contract and same discovery/authorize split as
+`/agent/kelabos`): owned + accessor + public-at-tenant, **active only** —
+a completed journey is frozen and the list exists to choose somewhere to
+work.
+
+**One resolution for both modes** (`resolveJourneyRequest` in
+`gateway/src/tunnel.js`): every `journey_*` request's `kelaboId` became
+optional. Present, it means the §12.2 path — attached-or-preparing check,
+then the kelabo's own links, with two narrow fallbacks to the direct
+attachments (an explicit `journeyId` that is a direct attachment rather
+than a link; a kelabo with no links on a connection that also holds
+direct attachments). Absent, the direct path: the one attachment if there
+is exactly one, `ambiguous` naming the candidates if more, `no_journey`
+if none. Response frames' `kelaboId` correspondingly defaults `""`.
+
+**Discovery rides the kelabo briefing too**: `briefing.journeys`
+(journeyId + title, from the same §4.3 mirror §12.1 reads) tells an agent
+attached to a kelabo that journey context exists and is worth pulling —
+before this, nothing did, and the tools sat unused unless the agent
+probed speculatively. The bridge renders it as a "Part of journey: …"
+line with the tool names; the persona's new JOURNEYS section carries the
+same instruction plus the offline-mode brief.
+
+Tested at the same three layers as §12.2: `contracts/test/frames.mjs`
+(the new frame pairs, optional `kelaboId`, briefing `journeys`, the
+list-vs-full-read split on documents/reports),
+`gateway/test/smoke.mjs` (attach authz including the private-off-roster
+and unknown-id refusals, direct-mode resolution, detach, self-exclusion
+in `journey_context` via the kelabo path), `rest-api/test/smoke.mjs`
+(`GET /agent/journeys` buckets and exclusions), and
+`connector/test/smoke.mjs` (the six tools' rendered prose, the
+kelaboId-less wire shape, reconnect replay of journey attachments).
+
+### 12.4 Deliberately not built here
 
 A tool that asks the *server* to generate a report (rather than
 submitting the agent's own answer) remains unbuilt, for the same reason
@@ -911,9 +994,9 @@ Also explicitly not built, and not superseded by anything shipped since
 this section was first written:
 
 - Real file upload (§8) — documents remain pasted/typed text only.
-- An agent-triggered server-side report (§12.3) — deliberate, permanent:
-  the pull tools built for §12.2 already give an attached agent everything
-  `kelabo_journey_report_submit` needs to satisfy this itself.
+- An agent-triggered server-side report (§12.4) — deliberate, permanent:
+  the pull tools built for §12.2/§12.3 already give an attached agent
+  everything `kelabo_journey_report_submit` needs to satisfy this itself.
 - Any journey-level wallet/billing scope.
 - A report proposing `suggestedHealth`/`suggestedProgress` and the
   `apply-status` endpoint a member would use to accept one (§5, §6).
@@ -936,6 +1019,9 @@ MCP tool surface — is now built; see §10, §12.1's own note, and §12.2.
    the full existing agent test suite plus the end-to-end pipeline
    harness. Pull (§12.2) is built: five new KAP frame pairs, five new MCP
    tools, and the "Part of: …" breadcrumb closing the disclosure gap
-   §12.1 itself flagged. §12.3 remains deliberately unbuilt.
+   §12.1 itself flagged. Direct journey attachment + deep context pulls
+   (§12.3) are built: `journey_attach` and four read pairs, six more MCP
+   tools, `GET /agent/journeys`, and journey membership on the kelabo
+   briefing. §12.4 remains deliberately unbuilt.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.

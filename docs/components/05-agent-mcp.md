@@ -180,8 +180,11 @@ and both carry an explicit "never dispatch a sub-agent to look up something
 already answered here" rule. Like `historyEnabled`, journey context is
 disclosed to the room: a "Part of: N journeys" chip (docs 20 §12.1).
 
-In **dev mode** the same journey is reachable by pull instead: the five
-`kelabo_journey_*` MCP tools (docs 16 §2.B, docs 20 §12.2).
+In **dev mode** the same journey is reachable by pull instead: the
+`kelabo_journey_*` MCP tools (docs 16 §2.B; docs 20 §12.2, §12.3) — including
+`kelabo_journey_context`, which serves this exact digest on demand, and
+`kelabo_journey_join`, which attaches a developer's agent to a journey
+directly, with no kelabo at all, for work between meetings.
 
 ---
 

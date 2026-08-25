@@ -250,6 +250,49 @@ export function createAgent({ config, db, secrets }) {
     };
   }
 
+  /**
+   * Journeys this identity may attach an agent to directly (docs 20 §12.3) —
+   * the same three buckets the portal's own journey list draws from
+   * (journeys.js `listJourneys`): owned, explicit accessor, and public at the
+   * identity's own tenant. Active only: a completed journey is frozen and the
+   * list exists to choose somewhere to *work*. The Gateway re-authorizes the
+   * actual attach; this is discovery, exactly the split `joinableKelabos`
+   * already makes.
+   */
+  async function joinableJourneys({ identity }) {
+    const tenantId = identity.split("@")[1].toLowerCase();
+    const [tenantActive, accessorLinks] = await Promise.all([
+      db.listJourneysByTenantStatus(tenantId, "active"),
+      db.listAccessorJourneys(identity),
+    ]);
+    const byId = new Map();
+    for (const meta of tenantActive) {
+      if (meta.ownerIdentity === identity || meta.visibility === "public") byId.set(meta.journeyId, meta);
+    }
+    const accessorMetas = await Promise.all(
+      accessorLinks.map((l) => db.getJourneyMeta(String(l.PK).slice("JOURNEY#".length)))
+    );
+    for (const meta of accessorMetas) {
+      if (meta && meta.status === "active" && !byId.has(meta.journeyId)) byId.set(meta.journeyId, meta);
+    }
+    return {
+      journeys: [...byId.values()]
+        .map((meta) => ({
+          journeyId: meta.journeyId,
+          title: meta.title || "",
+          visibility: meta.visibility,
+          status: meta.status,
+          isOwner: meta.ownerIdentity === identity,
+          aiCanPost: !!meta.aiCanPost,
+          kelaboCount: meta.kelaboCount || 0,
+          updatedAt: meta.updatedAt || 0,
+        }))
+        // Most recently touched first — the journey being worked on now is
+        // almost certainly the one that changed last.
+        .sort((a, b) => b.updatedAt - a.updatedAt),
+    };
+  }
+
   return {
     requestDeviceCode,
     describeUserCode,
@@ -259,5 +302,6 @@ export function createAgent({ config, db, secrets }) {
     listTokens,
     revokeToken,
     joinableKelabos,
+    joinableJourneys,
   };
 }

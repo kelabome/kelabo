@@ -74,6 +74,26 @@ const journeyMetaItem2 = {
 let kelaboJourneyLinks = [
   { PK: `KELABO#${KELABO}`, SK: `JOURNEY#${JOURNEY}`, journeyId: JOURNEY, journeyTitleSnapshot: "Smoke Journey" },
 ];
+// The journey's own partition rows, for the pull tools (docs 20 §12.3): a
+// description, one document, one ready report, and the forward half of the
+// link back to the live kelabo.
+const journeyDocItem = {
+  docId: "d1",
+  title: "Spec",
+  content: "The full spec text, well beyond any excerpt.",
+  sizeBytes: 44,
+  addedAt: NOW - 4000,
+  addedBy: "alice@example.com",
+};
+const journeyReportItem = {
+  reportId: "rp1",
+  question: "Where are we?",
+  answer: "On track.",
+  status: "ready",
+  requestedAt: NOW - 3000,
+  generatedBy: "agent",
+};
+const journeyLinkRows = [{ kelaboId: KELABO, titleSnapshot: "Smoke Kelabo", linkedAt: NOW - 5000 }];
 
 const calls = { puts: [], updates: [], deletes: [], s3Puts: [] };
 const db = {
@@ -90,6 +110,8 @@ const db = {
       if (input.Key.PK === `AGT#${AGENT_JTI}`) return { Item: agentTokenRow };
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "META") return { Item: journeyMetaItem };
       if (input.Key.PK === `JOURNEY#${JOURNEY2}` && input.Key.SK === "META") return { Item: journeyMetaItem2 };
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "DOC#d1") return { Item: journeyDocItem };
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "REPORT#rp1") return { Item: journeyReportItem };
       return {};
     }
     if (name === "QueryCommand") {
@@ -101,6 +123,12 @@ const db = {
       if (sk === "JOURNEY#" && pk === `KELABO#${KELABO}`) return { Items: kelaboJourneyLinks };
       if ((sk === "TL#" || sk === "BOARDMSG#") && typeof pk === "string" && pk.startsWith("JOURNEY#")) {
         return { Items: [] };
+      }
+      if (pk === `JOURNEY#${JOURNEY}`) {
+        if (sk === "DESC#") return { Items: [{ version: 1, markdown: "Ship the redesign." }] };
+        if (sk === "LINK#") return { Items: journeyLinkRows.map((l) => ({ PK: pk, SK: `LINK#${l.kelaboId}`, ...l })) };
+        if (sk === "DOC#") return { Items: [{ PK: pk, SK: "DOC#d1", ...journeyDocItem }] };
+        if (sk === "REPORT#") return { Items: [{ PK: pk, SK: "REPORT#rp1", ...journeyReportItem }] };
       }
       // Serve transcript queries from what the test actually persisted, so the
       // history endpoint reads exactly the rows the caption handler wrote —
@@ -591,7 +619,10 @@ async function main() {
   {
     const base = frames.length;
     ws.send(JSON.stringify({ type: "attach", kelaboId: KELABO, runtime: "opencode", sessionRef: "ocs-1", workspace: "/home/dev/repo" }));
-    await nextFrame((f) => f.type === "briefing" && f.kelaboId === KELABO, 5000, base);
+    const briefing = await nextFrame((f) => f.type === "briefing" && f.kelaboId === KELABO, 5000, base);
+    // Journey membership rides the briefing (docs 20 §12.3) — names only, so
+    // the agent knows there is journey context worth pulling.
+    assert.deepEqual(briefing.journeys, [{ journeyId: JOURNEY, title: "Smoke Journey" }]);
     await waitFor(() => calls.puts.find((p) => p.Item.SK === "PROMOTION"));
     await waitFor(() => calls.updates.find((u) => u.ExpressionAttributeNames && Object.values(u.ExpressionAttributeNames).includes("mode")));
     const promotion = calls.puts.find((p) => p.Item.SK === "PROMOTION").Item;
@@ -804,6 +835,125 @@ async function main() {
     assert.equal(resolved.resolved, "ok");
     console.log("ok: two linked journeys → ambiguous without a journeyId, resolved with one");
     kelaboJourneyLinks = kelaboJourneyLinks.slice(0, 1); // back to one link for the tests below
+  }
+
+  {
+    // journey_context: the one-call bundle (docs 20 §12.3), here through the
+    // kelabo path. The kelabo's own minutes are excluded from "kelabos in
+    // this journey" — the same exclusion the push context applies.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_context_request", requestId: "jc1", kelaboId: KELABO }));
+    const ctx = await nextFrame((f) => f.type === "journey_context" && f.requestId === "jc1", 5000, base);
+    assert.equal(ctx.resolved, "ok");
+    assert.equal(ctx.journeyId, JOURNEY);
+    assert.equal(ctx.title, "Smoke Journey");
+    assert.equal(ctx.description, "Ship the redesign.");
+    assert.equal(ctx.documents.length, 1);
+    assert.equal(ctx.documents[0].docId, "d1");
+    assert.ok(!("content" in ctx.documents[0]), "context carries an excerpt, never the full document");
+    assert.ok(ctx.documents[0].excerpt.startsWith("The full spec text"));
+    assert.deepEqual(ctx.kelabos, [], "the requesting kelabo is not one of the journey's other kelabos");
+    assert.equal(ctx.reports.length, 1);
+    assert.equal(ctx.reports[0].reportId, "rp1");
+    console.log("ok: journey_context_request → description + document excerpts + reports, self excluded");
+  }
+
+  {
+    // journey_kelabos: every linked kelabo reduced to its minutes. The linked
+    // kelabo here has no MINUTES row, and that is a stated fact, not a gap.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_kelabos_request", requestId: "jk1", kelaboId: KELABO }));
+    const jk = await nextFrame((f) => f.type === "journey_kelabos" && f.requestId === "jk1", 5000, base);
+    assert.equal(jk.resolved, "ok");
+    assert.equal(jk.entries.length, 1);
+    assert.equal(jk.entries[0].kelaboId, KELABO);
+    assert.equal(jk.entries[0].title, "Smoke Kelabo");
+    assert.equal(jk.entries[0].hasMinutes, false);
+    console.log("ok: journey_kelabos_request → linked kelabos as minutes, no-minutes-yet expressible");
+  }
+
+  {
+    // journey_documents: the list carries no content; naming a docId reads
+    // the full text; a bogus docId is a real answer.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_documents_request", requestId: "jd1", kelaboId: KELABO }));
+    const list = await nextFrame((f) => f.type === "journey_documents" && f.requestId === "jd1", 5000, base);
+    assert.equal(list.resolved, "ok");
+    assert.equal(list.documents.length, 1);
+    assert.ok(!("content" in list.documents[0]), "the list never carries content");
+
+    ws.send(JSON.stringify({ type: "journey_documents_request", requestId: "jd2", kelaboId: KELABO, docId: "d1" }));
+    const one = await nextFrame((f) => f.type === "journey_documents" && f.requestId === "jd2", 5000, base);
+    assert.equal(one.documents[0].content, "The full spec text, well beyond any excerpt.");
+
+    ws.send(JSON.stringify({ type: "journey_documents_request", requestId: "jd3", kelaboId: KELABO, docId: "nope" }));
+    const missing = await nextFrame((f) => f.type === "journey_documents" && f.requestId === "jd3", 5000, base);
+    assert.equal(missing.resolved, "document_not_found");
+    console.log("ok: journey_documents_request → list without content, full text by docId, real not-found");
+  }
+
+  {
+    // journey_reports: same list/read split as documents.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_reports_request", requestId: "jr1", kelaboId: KELABO }));
+    const list = await nextFrame((f) => f.type === "journey_reports" && f.requestId === "jr1", 5000, base);
+    assert.equal(list.resolved, "ok");
+    assert.equal(list.reports.length, 1);
+    assert.ok(!("answer" in list.reports[0]), "the list never carries answers");
+
+    ws.send(JSON.stringify({ type: "journey_reports_request", requestId: "jr2", kelaboId: KELABO, reportId: "rp1" }));
+    const one = await nextFrame((f) => f.type === "journey_reports" && f.requestId === "jr2", 5000, base);
+    assert.equal(one.reports[0].answer, "On track.");
+    console.log("ok: journey_reports_request → list without answers, full Q&A by reportId");
+  }
+
+  {
+    // Direct journey attachment (docs 20 §12.3): no kelabo named anywhere.
+    // A public journey at the caller's tenant attaches; a private one the
+    // caller is not on the roster of does not; an unknown id reads exactly
+    // like a foreign-tenant one.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_attach", requestId: "ja1", journeyId: JOURNEY }));
+    const jb = await nextFrame((f) => f.type === "journey_briefing" && f.requestId === "ja1", 5000, base);
+    assert.equal(jb.resolved, "ok");
+    assert.equal(jb.journeyId, JOURNEY);
+    assert.equal(jb.title, "Smoke Journey");
+    assert.equal(jb.description, "Ship the redesign.");
+    assert.equal(jb.aiCanPost, false);
+    assert.equal(jb.kelabos.length, 1);
+    assert.equal(jb.kelabos[0].kelaboId, KELABO);
+    console.log("ok: journey_attach (public, same tenant) → journey_briefing with description and linked kelabos");
+
+    ws.send(JSON.stringify({ type: "journey_attach", requestId: "ja2", journeyId: JOURNEY2 }));
+    const denied = await nextFrame((f) => f.type === "journey_briefing" && f.requestId === "ja2", 5000, base);
+    assert.equal(denied.resolved, "not_journey_member");
+
+    ws.send(JSON.stringify({ type: "journey_attach", requestId: "ja3", journeyId: "j-nope" }));
+    const unknown = await nextFrame((f) => f.type === "journey_briefing" && f.requestId === "ja3", 5000, base);
+    assert.equal(unknown.resolved, "journey_not_found");
+    console.log("ok: journey_attach refuses a private journey off-roster and an unknown id, distinguishably");
+  }
+
+  {
+    // With the direct attachment in place, a journey request naming no kelabo
+    // resolves against it — the offline mode's whole point. Detaching ends it.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_context_request", requestId: "jc2" }));
+    const ctx = await nextFrame((f) => f.type === "journey_context" && f.requestId === "jc2", 5000, base);
+    assert.equal(ctx.resolved, "ok");
+    assert.equal(ctx.journeyId, JOURNEY);
+    // No kelabo in the request means no self to exclude: the linked kelabo's
+    // minutes are part of the context here.
+    assert.equal(ctx.kelabos.length, 1);
+    assert.equal(ctx.kelabos[0].kelaboId, KELABO);
+    console.log("ok: journey_context_request with no kelaboId → resolves against the direct attachment");
+
+    ws.send(JSON.stringify({ type: "journey_detach", journeyId: JOURNEY }));
+    // Detach is fire-and-forget; the next request proves it landed.
+    ws.send(JSON.stringify({ type: "journey_context_request", requestId: "jc3" }));
+    const gone = await nextFrame((f) => f.type === "journey_context" && f.requestId === "jc3", 5000, base);
+    assert.equal(gone.resolved, "no_journey");
+    console.log("ok: journey_detach → subsequent kelabo-less requests resolve to no_journey");
   }
 
   {

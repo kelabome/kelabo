@@ -1860,6 +1860,48 @@ await test("GET /agent/kelabos lists active and scheduled, host or invitee", asy
   assert.equal(eveRes.json.kelabos.some((m) => m.kelaboId === scheduled.json.kelaboId), false);
 });
 
+await test("GET /agent/journeys — owned, accessor and public-at-tenant journeys, active only (docs 20 §12.3)", async () => {
+  const now = Date.now();
+  const mkJourney = (journeyId, over = {}) =>
+    db.createJourney({
+      journeyId,
+      title: journeyId,
+      status: "active",
+      visibility: "private",
+      ownerIdentity: "someoneelse@example.com",
+      tenantId: "example.com",
+      tenantStatus: "example.com#active",
+      kelaboCount: 0,
+      updatedAt: now,
+      createdAt: now,
+      ...over,
+    });
+  await mkJourney("j-agent-own", { ownerIdentity: "host@example.com", updatedAt: now + 3 });
+  await mkJourney("j-agent-public", { visibility: "public", updatedAt: now + 2 });
+  await mkJourney("j-agent-accessor", { updatedAt: now + 1 });
+  await db.putAccessor("j-agent-accessor", { identity: "host@example.com", addedAt: now });
+  await mkJourney("j-agent-outside"); // private, not ours, no roster row
+  await mkJourney("j-agent-done", {
+    ownerIdentity: "host@example.com",
+    status: "completed",
+    tenantStatus: "example.com#completed",
+  });
+
+  // Bearer, not a cookie — the caller is the bridge on a laptop.
+  const anon = await call("GET", "/agent/journeys");
+  assert.equal(anon.statusCode, 401);
+
+  const res = await call("GET", "/agent/journeys", { bearer: agentToken });
+  assert.equal(res.statusCode, 200);
+  const ids = res.json.journeys.map((j) => j.journeyId);
+  assert.deepEqual(ids, ["j-agent-own", "j-agent-public", "j-agent-accessor"], "most recently touched first");
+  assert.equal(ids.includes("j-agent-outside"), false, "a private journey off the roster is invisible");
+  assert.equal(ids.includes("j-agent-done"), false, "a completed journey is not somewhere to work");
+  const own = res.json.journeys.find((j) => j.journeyId === "j-agent-own");
+  assert.equal(own.isOwner, true);
+  assert.equal(own.aiCanPost, false);
+});
+
 await test("revoking an agent token takes effect immediately", async () => {
   const list = await call("GET", "/agent/tokens", { cookies: sessionCookies });
   assert.equal(list.statusCode, 200);

@@ -101,9 +101,10 @@ Runtime-agnostic — nothing here names a coding agent, and `sessionRef` /
 | `rename` | `{ kelaboId, title }` | rename the kelabo |
 | `board_request` | `{ requestId, kelaboId }` | read the board |
 | `history_request` | `{ requestId, kelaboId }` | read the minutes of the host's past kelabos (host opt-in, `historyEnabled`) |
-| `journey_info_request` / `journey_timeline_request` / `journey_board_request` | `{ requestId, kelaboId, journeyId?, … }` | the dev-mode journey read tools (docs 20 §12.2) — §6a |
-| `journey_report_submit` | `{ requestId, kelaboId, journeyId?, question, answer }` | store the agent's own synthesis as a report — no LLM round-trip |
-| `journey_post` | `{ requestId, kelaboId, journeyId?, content, msgId? }` | write/edit a journey board message, gated by `aiCanPost` |
+| `journey_attach` / `journey_detach` | `{ requestId, journeyId }` / `{ journeyId? }` | bind/unbind this connection to a journey directly — no kelabo, no transcript (docs 20 §12.3); authorized like rest-api's `resolveAccess` |
+| `journey_info_request` / `journey_context_request` / `journey_kelabos_request` / `journey_documents_request` / `journey_reports_request` / `journey_timeline_request` / `journey_board_request` | `{ requestId, kelaboId?, journeyId?, … }` | the dev-mode journey read tools (docs 20 §12.2, §12.3) — §6a. `kelaboId` present resolves against that kelabo's links; absent, against the connection's direct journey attachments |
+| `journey_report_submit` | `{ requestId, kelaboId?, journeyId?, question, answer }` | store the agent's own synthesis as a report — no LLM round-trip |
+| `journey_post` | `{ requestId, kelaboId?, journeyId?, content, msgId? }` | write/edit a journey board message, gated by `aiCanPost` |
 | `detach` | `{ kelaboId? }` | leave |
 
 **Down (Gateway → bridge):**
@@ -111,13 +112,14 @@ Runtime-agnostic — nothing here names a coding agent, and `sessionRef` /
 |------|---------|---------|
 | `registered` | `{ agentId, kelaboId }` | accepted; `kelaboId` is empty — the Gateway does not guess |
 | `rejected` | `{ reason }` | auth or authorization failure |
-| `briefing` | `{ kelaboId, status, title, host, scheduledAt?, note, invitees[], participants[] }` | everything the agent needs on attach |
+| `briefing` | `{ kelaboId, status, title, host, scheduledAt?, note, invitees[], participants[], journeys[] }` | everything the agent needs on attach; `journeys` names the kelabo's journey memberships (docs 20 §12.3) |
 | `transcript` | `{ kelaboId, messageId, seq, speaker, text, at, final, human }` | one sealed speaker message |
 | `kelabo` | `{ kelaboId, event, title? }` | started / ended / renamed |
 | `request` | `{ kind, requestId, kelaboId }` | summary or archive, correlated |
 | `board` | `{ requestId, kelaboId, contributions[] }` | answer to `board_request` |
 | `history` | `{ requestId, kelaboId, enabled, entries[] }` | answer to `history_request`; `enabled:false` = the host never opted in, served by the same loader as the in-ECS agent's memory (`agent/history.js`) |
-| `journey_info` / `journey_timeline` / `journey_board` / `journey_report_submitted` / `journey_posted` | `{ requestId, kelaboId, resolved, journeys[], … }` | answers to the five journey frames above; `resolved` says how the journey was found ([10-data-contracts.md](../10-data-contracts.md) §3.2a) |
+| `journey_briefing` | `{ requestId, resolved, journeyId?, title, description, aiCanPost, counts?, kelabos[] }` | answer to `journey_attach` — the direct attachment's whole starting context |
+| `journey_info` / `journey_context` / `journey_kelabos` / `journey_documents` / `journey_reports` / `journey_timeline` / `journey_board` / `journey_report_submitted` / `journey_posted` | `{ requestId, kelaboId, resolved, journeys[], … }` | answers to the journey frames above; `resolved` says how the journey was found ([10-data-contracts.md](../10-data-contracts.md) §3.2a) |
 | `ping` | `{}` | liveness |
 
 **Attach has two modes, decided by the kelabo's status and never by the client:**

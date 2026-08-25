@@ -400,3 +400,20 @@ Gateway(archive.js)                       DynamoDB(journeys)
 Independent of whether the archive write succeeded — a journey's roster
 reflects the kelabo having happened either way — and idempotent against
 `endKelabo`'s retry machinery via the marker (docs 20 §10).
+
+### 14d. Offline journey work — dev agent, no kelabo (docs 20 §12.3)
+
+```
+Dev agent (bridge)                Gateway(tunnel)            DynamoDB(journeys)
+ │ GET /agent/journeys ▶ REST     │                            │
+ │ journey_attach {journeyId} ───▶│ mayAttachJourney            │
+ │                                │  owner / public-tenant / ACCESSOR# ◀─│
+ │ ◀── journey_briefing (description, counts, linked kelabos)  │
+ │ journey_context_request ──────▶│ digest: board/docs/minutes ◀│
+ │ journey_documents_request {docId} ▶│ full document text ◀───│
+ │   … developer's agent codes and tests locally …             │
+ │ journey_post {content} ───────▶│ aiCanPost? ⇒ BOARDMSG# + TL# ▶│
+ │ journey_detach ───────────────▶│                             │
+```
+No transcript ever flows from a journey attachment; the posted outcome is
+what the journey's next kelabo — server- or dev-mode — sees in its context.

@@ -84,6 +84,17 @@ export function briefingEnvelope(b, now = Date.now()) {
   if (b.participants?.length) {
     lines.push(`In the room: ${b.participants.map((p) => p.displayName).join(", ")}`);
   }
+  if (b.journeys?.length) {
+    // Membership plus a pointer, not the context itself: the journey's
+    // accumulated material is pulled on demand with the kelabo_journey_*
+    // tools, so an agent that never needs it never pays for it.
+    lines.push(
+      `Part of journey: ${b.journeys.map((j) => `${j.title || "(untitled)"} (${j.journeyId})`).join(", ")}. ` +
+        "Earlier kelabos, documents and notes live there — pull them with kelabo_journey_context (the bundle), " +
+        "kelabo_journey_kelabos (past kelabos' minutes), kelabo_journey_documents and kelabo_journey_reports " +
+        "before answering questions that reach across meetings."
+    );
+  }
   lines.push("");
   lines.push(
     scheduled
@@ -91,6 +102,49 @@ export function briefingEnvelope(b, now = Date.now()) {
       : "This kelabo is live. Transcript will arrive as it is spoken."
   );
   return `<kelabo-briefing${attrs({ kelabo: b.kelaboId, status: b.status, untrusted: "true" })}>\n${lines.join("\n")}\n</kelabo-briefing>`;
+}
+
+/**
+ * The journey briefing, delivered by `kelabo_journey_join` (docs 20 §12.3).
+ * For a direct attachment this is the whole of the agent's starting context —
+ * there is no kelabo and no transcript, only the journey's accumulated
+ * material. Description, board content and kelabo titles are free text from
+ * potentially many contributors, so the whole thing carries the same
+ * untrusted marking as transcript.
+ */
+export function journeyBriefingEnvelope(j, now = Date.now()) {
+  const lines = [];
+  lines.push(`Journey: ${j.title || "(untitled)"} — ${j.visibility || "private"}, ${j.status || "active"}`);
+  if (j.description) lines.push(`Description: ${j.description}`);
+  if (j.health || typeof j.progress === "number") {
+    lines.push(
+      `Status: health=${j.health || "unset"} progress=${typeof j.progress === "number" ? j.progress + "%" : "unset"}`
+    );
+  }
+  if (j.counts) {
+    lines.push(
+      `Kelabos: ${j.counts.kelaboCount || 0}  Documents: ${j.counts.documentCount || 0}  Reports: ${j.counts.reportCount || 0}  Board messages: ${j.counts.boardMessageCount || 0}`
+    );
+  }
+  if (j.kelabos?.length) {
+    lines.push("Linked kelabos, most recently linked first:");
+    for (const k of j.kelabos) {
+      lines.push(`- ${k.title || "(untitled)"}${k.linkedAt ? ` — linked ${relative(k.linkedAt, now)}` : ""}`);
+    }
+  }
+  lines.push("");
+  lines.push(
+    "You are attached to this journey directly — no kelabo, no transcript. Pull deeper context on demand: " +
+      "kelabo_journey_context (the bundle), kelabo_journey_kelabos (each kelabo's minutes), " +
+      "kelabo_journey_documents (full document text), kelabo_journey_reports (past Q&A), " +
+      "kelabo_journey_timeline and kelabo_journey_board."
+  );
+  lines.push(
+    j.aiCanPost
+      ? "When a piece of work completes, record the outcome on the journey's board with kelabo_journey_post — that is what carries it to the next kelabo."
+      : "The journey's owner has not enabled assistant posting (aiCanPost is off): report outcomes to the developer at this terminal instead of the board."
+  );
+  return `<kelabo-journey-briefing${attrs({ journey: j.journeyId, status: j.status, untrusted: "true" })}>\n${lines.join("\n")}\n</kelabo-journey-briefing>`;
 }
 
 /** Lifecycle notices, and the summary/archive requests. Same wrapper so an agent

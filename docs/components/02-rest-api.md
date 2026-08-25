@@ -380,7 +380,7 @@ the client re-fetches the finished row via GET.
 | `huddle` | instant "ring" calls: `create` (dial into a new kelabo) + `ringInto` (ring into a live one) |
 | `contacts` | colleagues (derived from the users table) + one-way favourites; external contacts gated (501) |
 | `mcpOauth` | MCP OAuth 2.1 client: discovery (RFC 9728/8414), dynamic registration (RFC 7591), PKCE authorize + callback |
-| `agent` | agent-bridge device-code pairing; token list/revoke; attachable-kelabo discovery (docs 16 §6) |
+| `agent` | agent-bridge device-code pairing; token list/revoke; attachable-kelabo and attachable-journey discovery (`GET /agent/kelabos`, `GET /agent/journeys` — docs 16 §6, docs 20 §12.3) |
 | `records` | archive read + access control; S3 fetch for large transcripts |
 | `journeys` | the docs 20 surface: lifecycle, access checks, link/unlink, description/status versions, board, documents, reports (pending row + Gateway dispatch), timeline, contributor rollups |
 | `stt/` | STT credential minting: provider-neutral core (`index.js`) + one mint per provider (`deepgram.js`, `soniox.js`) — [06-stt.md](./06-stt.md) |

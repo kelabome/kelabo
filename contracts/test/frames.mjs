@@ -235,13 +235,127 @@ test("history is requestId-correlated and distinguishes off from empty", () => {
 
 // --- journey pull tools (docs 20 §12.2) --------------------------------------
 
-test("journey_*_request frames require a requestId and kelaboId but not a journeyId", () => {
+test("journey_*_request frames require a requestId but neither kelaboId nor journeyId", () => {
   assert.equal(up({ type: "journey_info_request", requestId: "r", kelaboId: "m" }).ok, true);
   assert.equal(up({ type: "journey_info_request", kelaboId: "m" }).ok, false);
-  assert.equal(up({ type: "journey_info_request", requestId: "r" }).ok, false);
+  // No kelaboId is legal since docs 20 §12.3: the request resolves against
+  // the connection's own direct journey attachments instead.
+  assert.equal(up({ type: "journey_info_request", requestId: "r" }).ok, true);
   const withId = up({ type: "journey_info_request", requestId: "r", kelaboId: "m", journeyId: "j1" });
   assert.equal(withId.ok, true);
   assert.equal(withId.frame.journeyId, "j1");
+});
+
+test("journey_attach requires a requestId and journeyId; journey_detach requires neither", () => {
+  assert.equal(up({ type: "journey_attach", requestId: "r", journeyId: "j1" }).ok, true);
+  assert.equal(up({ type: "journey_attach", requestId: "r" }).ok, false);
+  assert.equal(up({ type: "journey_attach", journeyId: "j1" }).ok, false);
+  assert.equal(up({ type: "journey_detach" }).ok, true, "bare detach means every journey");
+  assert.equal(up({ type: "journey_detach", journeyId: "j1" }).ok, true);
+});
+
+test("journey_briefing carries the attach outcome as resolved, not a rejection", () => {
+  assert.equal(down({ type: "journey_briefing", requestId: "r", resolved: "journey_not_found" }).ok, true);
+  assert.equal(down({ type: "journey_briefing", requestId: "r", resolved: "not_journey_member" }).ok, true);
+  const ok = down({
+    type: "journey_briefing",
+    requestId: "r",
+    resolved: "ok",
+    journeyId: "j1",
+    title: "Q3 Launch",
+    visibility: "private",
+    status: "active",
+    description: "d",
+    aiCanPost: true,
+    counts: { kelaboCount: 2 },
+    kelabos: [{ kelaboId: "k1", title: "Kickoff", linkedAt: 5 }],
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.frame.aiCanPost, true);
+  assert.equal(ok.frame.kelabos[0].kelaboId, "k1");
+  assert.equal(down({ type: "journey_briefing", requestId: "r", resolved: "ok" }).frame.aiCanPost, false, "aiCanPost defaults off");
+});
+
+test("journey_context bundles board, document excerpts, linked-kelabo minutes and reports", () => {
+  const ok = down({
+    type: "journey_context",
+    requestId: "r",
+    resolved: "ok",
+    journeyId: "j1",
+    title: "Q3 Launch",
+    board: [{ content: "pinned" }],
+    documents: [{ docId: "d1", title: "Spec", excerpt: "intro…", sizeBytes: 900 }],
+    kelabos: [{ kelaboId: "k1", title: "Kickoff", hasMinutes: true, summary: "s", decisions: ["d"], actionItems: ["a"] }],
+    reports: [{ reportId: "rp1", question: "q", answer: "a" }],
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.frame.kelaboId, "", "kelaboId defaults empty on a direct-attachment request");
+  assert.equal(ok.frame.kelabos[0].hasMinutes, true);
+  assert.equal(ok.frame.documents[0].excerpt, "intro…");
+});
+
+test("journey_kelabos entries are the minutes reduction, never a transcript", () => {
+  const ok = down({
+    type: "journey_kelabos",
+    requestId: "r",
+    kelaboId: "m",
+    resolved: "ok",
+    entries: [{ kelaboId: "k1", title: "Kickoff", linkedAt: 5 }],
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.frame.entries[0].hasMinutes, false, "no minutes yet is expressible");
+  assert.deepEqual(ok.frame.entries[0].decisions, []);
+});
+
+test("journey_documents: list has no content, a single read carries it, and a bad docId is a real answer", () => {
+  const list = down({
+    type: "journey_documents",
+    requestId: "r",
+    resolved: "ok",
+    documents: [{ docId: "d1", title: "Spec", sizeBytes: 12 }],
+  });
+  assert.equal(list.ok, true);
+  assert.equal(list.frame.documents[0].content, undefined);
+  const one = down({
+    type: "journey_documents",
+    requestId: "r",
+    resolved: "ok",
+    documents: [{ docId: "d1", title: "Spec", content: "full text" }],
+  });
+  assert.equal(one.frame.documents[0].content, "full text");
+  assert.equal(down({ type: "journey_documents", requestId: "r", resolved: "document_not_found" }).ok, true);
+});
+
+test("journey_reports: list carries questions, a single read carries the answer", () => {
+  const list = down({
+    type: "journey_reports",
+    requestId: "r",
+    resolved: "ok",
+    reports: [{ reportId: "rp1", question: "q", requestedAt: 7, generatedBy: "agent" }],
+  });
+  assert.equal(list.ok, true);
+  assert.equal(list.frame.reports[0].answer, undefined);
+  const one = down({
+    type: "journey_reports",
+    requestId: "r",
+    resolved: "ok",
+    reports: [{ reportId: "rp1", question: "q", answer: "a" }],
+  });
+  assert.equal(one.frame.reports[0].answer, "a");
+  assert.equal(down({ type: "journey_reports", requestId: "r", resolved: "report_not_found" }).ok, true);
+});
+
+test("the kelabo briefing names its journeys, defaulting to none", () => {
+  const bare = down({ type: "briefing", kelaboId: "m", status: "active" });
+  assert.equal(bare.ok, true);
+  assert.deepEqual(bare.frame.journeys, []);
+  const linked = down({
+    type: "briefing",
+    kelaboId: "m",
+    status: "scheduled",
+    journeys: [{ journeyId: "j1", title: "Q3 Launch" }],
+  });
+  assert.equal(linked.frame.journeys[0].journeyId, "j1");
 });
 
 test("journey_timeline_request's entryType is distinct from the frame's own type", () => {
@@ -312,13 +426,16 @@ test("every declared frame type parses", () => {
   const downTypes = new Set(downFrameSchema.options.map((o) => o.shape.type.value));
   assert.deepEqual([...upTypes].sort(), [
     "archive", "attach", "board_request", "contribution", "detach", "heartbeat", "history_request",
-    "journey_board_request", "journey_info_request", "journey_post", "journey_report_submit",
-    "journey_timeline_request", "register", "rename", "summary",
+    "journey_attach", "journey_board_request", "journey_context_request", "journey_detach",
+    "journey_documents_request", "journey_info_request", "journey_kelabos_request", "journey_post",
+    "journey_report_submit", "journey_reports_request", "journey_timeline_request",
+    "register", "rename", "summary",
   ]);
   assert.deepEqual([...downTypes].sort(), [
-    "board", "briefing", "history", "journey_board", "journey_info", "journey_posted",
-    "journey_report_submitted", "journey_timeline", "kelabo", "ping", "registered", "rejected", "request",
-    "transcript",
+    "board", "briefing", "history", "journey_board", "journey_briefing", "journey_context",
+    "journey_documents", "journey_info", "journey_kelabos", "journey_posted",
+    "journey_report_submitted", "journey_reports", "journey_timeline", "kelabo", "ping",
+    "registered", "rejected", "request", "transcript",
   ]);
   // No type may appear in both directions: the bridge and the Gateway each
   // parse exactly one union, so an overlap would be ambiguous at one end.
