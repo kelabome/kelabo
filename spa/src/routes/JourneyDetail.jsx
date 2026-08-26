@@ -17,6 +17,7 @@ import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
 import { JourneyHealthChip } from './Journeys'
+import { JourneyHelmExtra } from '../variant'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
 import { timeAgo } from '../timeAgo'
 
@@ -1150,6 +1151,11 @@ function HelmTab({ journey, isActive, accessors, onRename, onSaveAvatar, onCompl
           <Button variant="danger-ghost" onClick={onDelete}><Icon name="x" size={14} />Delete</Button>
         </div>
       </div>
+
+      {/* Null in this build (see variant.js): a deployment that bills for the
+          journey's AI puts what it costs here, beside the controls that spend
+          it, rather than forking this page to add a panel. */}
+      {JourneyHelmExtra ? <JourneyHelmExtra journey={journey} reload={reload} /> : null}
     </section>
   )
 }
