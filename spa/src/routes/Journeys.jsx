@@ -34,7 +34,7 @@ function JourneyRow({ j, delay }) {
         <div className="row-sub">
           {j.kelaboCount} kelabo{j.kelaboCount === 1 ? '' : 's'}
           {typeof j.progress === 'number' ? ` · ${j.progress}%` : ''}
-          {j.reportCount ? ` · ${j.reportCount} report${j.reportCount === 1 ? '' : 's'}` : ''}
+          {j.reportCount ? ` · ${j.reportCount} question${j.reportCount === 1 ? '' : 's'}` : ''}
         </div>
       </div>
       <span className="row-meta">{timeAgo(j.updatedAt || j.createdAt)}</span>

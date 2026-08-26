@@ -372,6 +372,59 @@ originate from the person asking the question. Journey content needs the
 identical wrapper; being written by a signed-in accessor is not a reason
 to skip it.
 
+### 6.4 Report visibility — public by default, private to the asker alone
+
+**Added 2026-08-26.** A report carries its own `visibility`
+(`"public" | "private"`, default `"public"`, `journeyReportBodySchema`),
+unrelated to the journey's. Public is the default because the point of a
+journey report is usually to be shared; asking privately is the
+deliberate act — the inverse of `aiCanPost`'s default-off, and for the
+same reason: the surprising outcome is the one that has to be chosen.
+
+**A private report is readable by the person who asked it and by nobody
+else — deliberately including the journey's lead.** Every other
+owner-only power in this document is about the *journey*; this is about
+one member's own question, and a lead-sees-everything carve-out would
+make "private" a promise the product does not keep. `mayReadReport` in
+`rest-api/src/journeys.js` is the single rule, applied by both
+`listReports` and `getReport`. Naming a private reportId directly answers
+**404, not 403**: a 403 would confirm that the id exists and that it
+belongs to someone.
+
+Three surfaces follow from it, and each is a place the rule could have
+leaked:
+
+- **The timeline** serves a private report's row only back to the person
+  who asked it (`mayReadTimelineEntry`, and the same filter on the
+  Gateway's `queryJourneyTimeline` for §12.3's
+  `kelabo_journey_timeline`). Redacting the summary to
+  `"Report requested (private)"` was the first attempt and is **kept as
+  well** — but redaction alone was wrong: "someone asked something
+  private, at 14:02" is itself the disclosure, and on a three-person
+  journey it names them. Two controls rather than one because the
+  timeline is the surface where a new reader is easiest to add later.
+  The paging cursor is taken from the **unfiltered** page: `nextBefore`
+  has to advance past rows this viewer cannot see, or a page that filters
+  down to nothing returns the same window forever.
+- **The agent pull tools** (§12.3's `kelabo_journey_reports`,
+  `kelabo_journey_context`) serve public reports plus the *attached
+  identity's own* private ones — `conn.identity` is already on the
+  connection, so the agent obeys exactly the rule REST does rather than a
+  second, looser one. A private report reaching the agent is rendered
+  with an explicit "visible to you alone, do not repeat it to a kelabo"
+  note: the model must not treat it as shared journey material.
+- **`buildContext`** (§6.2, the server-side synthesis) sees **public
+  only**, never "everything" — that answer is itself readable by whoever
+  asks next, so folding a private report into it would launder one
+  member's private question into a shared one. This is why
+  `listReadyReports` takes an explicit `viewer` that defaults to *null*
+  meaning public-only, rather than defaulting to unrestricted.
+
+An agent-submitted report (§12.2's `kelabo_journey_report_submit`) writes
+`visibility: "public"` explicitly rather than leaving it unset: a
+synthesis submitted to be shared should not be indistinguishable from one
+whose author meant it to be private.
+
 ## 7. Message board
 
 A small set of pinned, mutable messages — distinct from a kelabo's own
@@ -816,7 +869,23 @@ exists.
 ## 13. SPA / UI
 
 **Display-vocabulary note, read once, applies throughout this section:**
-two purely cosmetic SPA renames sit on top of an unchanged mechanism.
+three purely cosmetic SPA renames sit on top of an unchanged mechanism.
+**Reports are displayed as "Questions" (2026-08-26).** The stored word is
+unchanged everywhere it is an identifier: the `REPORT#` item, `reportId`,
+`reportCount`, `reportRequestCount`, `/journeys/:id/reports`, the
+timeline `type: "report"`, and §12's `kelabo_journey_reports` /
+`kelabo_journey_report_submit` tool names — the last of those especially,
+since the MCP surface is a published contract (docs 16 §2.B) and renaming
+a tool breaks every installed bridge. Only what a person reads changes:
+the tab, the empty state, the toasts, the counts on Overview and the
+journey list, the contributor line ("N questions asked"), and the delete
+confirmation. As with health below, this needed one non-SPA fix — the
+timeline sentences, written server-side and read in the SPA, now say
+"Question asked" (`rest-api/src/journeys.js`) and "Question answered by
+the assistant" (`gateway/src/journeys.js`) instead of "Report requested"/
+"Report submitted", for exactly the reason `writeStatusVersion` did.
+Agent-facing prose keeps saying *report*, matching the tool names the
+model actually calls.
 `ownerIdentity`/`isOwner`/`requireOwner`/`myRole:"owner"`/
 `not_journey_owner` (§3, §4.1, §11) are unchanged everywhere they are an
 identifier rather than a word a person reads — the SPA alone displays the
@@ -867,16 +936,37 @@ there than a metaphor the model would have to already know to parse.
   · **Kelabos** (linked list, add/remove, plus **New kelabo**/**Schedule
   kelabo** shortcuts — `?journeyId=` to `/new`/`/schedule`, pre-filling
   this journey in the picker below, removable before submitting; hidden
-  on a completed journey, same guard as "Add a kelabo") · **Reports**
-  (list + "Ask a question" modal — no suggested-status apply button; that
-  whole flow is out of scope, §5/§17, not merely unbuilt UI) · **Board**
+  on a completed journey, same guard as "Add a kelabo") · **Questions**
+  (§6's reports under their display name — see the note above:
+  list + "Ask a question" modal, which carries the §6.4 "Only me" switch;
+  a private report shows an "Only me" chip on its row and is simply absent
+  for everyone else — no suggested-status apply button; that whole flow is
+  out of scope, §5/§17, not merely unbuilt UI) · **Board**
   (§7, per-message history, a "Show archived (N)" reveal toggle,
   Unarchive) · **Documents** (§8, a "Show removed (N)" reveal toggle
   mirroring Board's, content rendered through the same `Markdown`
   component descriptions and reports already use, with `hardBreaks`:
   pasted text is not LLM-authored prose, so a single newline is kept as a
   visible line break instead of Markdown's normal soft-wrap-to-space) ·
-  **Accessors** (private only, lead-managed).
+  **Helm** (lead-only — see below).
+- **Helm — the lead's controls, one place (added 2026-08-26):** rename and
+  the avatar re-roll used to sit in the title row, complete/reopen and
+  delete in a floating action row under it, `aiCanPost` in Overview, and
+  the accessor roster in a tab that appeared only for private journeys —
+  five surfaces for one idea. They are now four sections of a single
+  owner-only tab, appended last so a member's tab strip is unchanged:
+  *Journey* (name, avatar), *Who can see it* (visibility switch + the
+  accessor roster, which folds the old conditional tab in), *Assistant*
+  (`aiCanPost`), *Lifecycle* (mark complete / reopen, delete). Every
+  control is disabled rather than hidden on a completed journey, since
+  completion is a freeze the lead can undo from the same tab. Named for
+  the vocabulary the journey already speaks (Full Steam / Shoal Waters /
+  Anchored; the **Lead** is the one at the helm) rather than a generic
+  "Settings"/"Manage". **Overview keeps a read-only On/Off chip for
+  `aiCanPost`**: the control is lead-only, but the *state* must stay
+  visible to every member — the same disclosure rule §12.1 records for
+  `historyEnabled`, and the reason a lead-only tab could not simply
+  absorb it.
 - **Breadcrumb on existing pages:** `Kelabo.jsx`, `RecordDetail.jsx`,
   `ScheduledKelabo.jsx` show "Part of: `<journey chips>`" when linked.
 - **Creation-time linking — built:** `NewKelabo.jsx` / `Schedule.jsx` gain

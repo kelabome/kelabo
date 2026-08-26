@@ -961,6 +961,11 @@ button.sidebar-item {
 }
 .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
+/* For a chip sitting inside a line that is already smaller than body text —
+   a contribution's meta row (--text-2xs), where a full-size chip is taller
+   than the line it annotates. */
+.chip-sm { font-size: var(--text-2xs); padding: 2px 6px; }
+
 .chip-live { background: var(--success-soft); color: var(--success); }
 .chip-live .dot { animation: pulse-dot 1.8s ease-in-out infinite; }
 .chip-ended { background: var(--surface-2); color: var(--text-3); }

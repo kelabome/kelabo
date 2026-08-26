@@ -38,10 +38,22 @@ const TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'kelabos', label: 'Kelabos' },
-  { id: 'reports', label: 'Reports' },
+  // "Questions" is display vocabulary over an unchanged `reports` mechanism
+  // (docs 20 §13's rename note): the tab id, the REST path, the REPORT# item
+  // and the kelabo_journey_reports tool all keep the stored word.
+  { id: 'reports', label: 'Questions' },
   { id: 'board', label: 'Board' },
   { id: 'documents', label: 'Documents' },
 ]
+
+// Where the journey is steered from — the lead's own controls, gathered in
+// one place instead of scattered across the title row (rename, avatar), a
+// floating action row (complete, delete), the Overview tab (assistant
+// posting) and a conditional tab of its own (accessors). Owner-only and
+// appended last, so the tab strip a member sees is unchanged. Named for the
+// vocabulary the rest of the journey already speaks — Full Steam / Shoal
+// Waters / Anchored, and the Lead who is at it.
+const HELM_TAB = { id: 'helm', label: 'Helm' }
 
 const TIMELINE_TYPES = [
   { id: '', label: 'All' },
@@ -272,15 +284,7 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
     toast('Status updated')
   }
 
-  const toggleAiCanPost = async v => {
-    try {
-      await api.patchJourney(journey.journeyId, { aiCanPost: v })
-      await reload()
-      toast(v ? 'Assistant posting turned on' : 'Assistant posting turned off')
-    } catch {
-      toast('Could not change assistant posting')
-    }
-  }
+
 
   return (
     <section className="anim-in vstack-lg">
@@ -325,9 +329,10 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
         </div>
       </div>
 
-      {/* aiCanPost (docs 20 §7, §12.2): owner-only to change, visible to every
-          member — the same "a capability nobody can see is one nobody can
-          object to" disclosure rule historyEnabled follows. */}
+      {/* aiCanPost (docs 20 §7, §12.2) is disclosed here to every member and
+          changed only at the Helm — the same "a capability nobody can see is
+          one nobody can object to" rule historyEnabled follows: the switch
+          being owner-only must not make the state owner-only too. */}
       <div className="section-block">
         <div className="section-title">Assistant</div>
         <div className="settings-row settings-row-plain">
@@ -335,12 +340,10 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
             <div className="sr-title">Assistant can post to the board</div>
             <div className="sr-sub">
               Lets an attached assistant pin its own board messages — the outcome of work it finished.
-              {isOwner ? '' : ' Only the journey lead can change this.'}
+              {isOwner ? ' Change it at the Helm.' : ' Only the journey lead can change this.'}
             </div>
           </div>
-          {isOwner && journey.status === 'active'
-            ? <Switch checked={!!journey.aiCanPost} onChange={toggleAiCanPost} ariaLabel="Assistant can post to the board" />
-            : <span className={`chip${journey.aiCanPost ? ' chip-accent' : ''}`}>{journey.aiCanPost ? 'On' : 'Off'}</span>}
+          <span className={`chip${journey.aiCanPost ? ' chip-accent' : ''}`}>{journey.aiCanPost ? 'On' : 'Off'}</span>
         </div>
       </div>
 
@@ -364,13 +367,13 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
             <div className="row-main">
               <div className="row-title">{c.contributorIdentity}</div>
               <div className="row-sub">
-                {c.kelaboJoinCount || 0} kelabo{(c.kelaboJoinCount || 0) === 1 ? '' : 's'} joined · {c.reportRequestCount || 0} report{(c.reportRequestCount || 0) === 1 ? '' : 's'} requested
+                {c.kelaboJoinCount || 0} kelabo{(c.kelaboJoinCount || 0) === 1 ? '' : 's'} joined · {c.reportRequestCount || 0} question{(c.reportRequestCount || 0) === 1 ? '' : 's'} asked
               </div>
             </div>
           </div>
         ))}
         <p className="text-meta">
-          {journey.kelaboCount} linked kelabo{journey.kelaboCount === 1 ? '' : 's'} · {journey.documentCount} document{journey.documentCount === 1 ? '' : 's'} · {journey.boardMessageCount} board message{journey.boardMessageCount === 1 ? '' : 's'} · {journey.reportCount} report{journey.reportCount === 1 ? '' : 's'}
+          {journey.kelaboCount} linked kelabo{journey.kelaboCount === 1 ? '' : 's'} · {journey.documentCount} document{journey.documentCount === 1 ? '' : 's'} · {journey.boardMessageCount} board message{journey.boardMessageCount === 1 ? '' : 's'} · {journey.reportCount} question{journey.reportCount === 1 ? '' : 's'}
           {journey.visibility === 'private' ? ` · ${journey.accessorCount} accessor${journey.accessorCount === 1 ? '' : 's'}` : ''}
         </p>
       </div>
@@ -852,13 +855,14 @@ function DocumentsTab({ journeyId, isMember, isActive, isOwner, initialOpenDocId
 
 function AskModal({ onClose, onAsk }) {
   const [question, setQuestion] = useState('')
+  const [isPrivate, setIsPrivate] = useState(false)
   const [asking, setAsking] = useState(false)
   const toast = useToast()
   const submit = async e => {
     e?.preventDefault()
     if (asking || !question.trim()) return
     setAsking(true)
-    try { await onAsk(question.trim()); onClose() } catch { setAsking(false); toast('Could not request that report') }
+    try { await onAsk(question.trim(), isPrivate ? 'private' : 'public'); onClose() } catch { setAsking(false); toast('Could not ask that question') }
   }
   return (
     <Modal
@@ -877,6 +881,16 @@ function AskModal({ onClose, onAsk }) {
         placeholder="What's the status of the redesign, and what's still blocking it?"
         value={question} onChange={e => setQuestion(e.target.value)}
       />
+      <div className="settings-row settings-row-plain">
+        <div className="sr-main">
+          <div className="sr-title">Only me</div>
+          <div className="sr-sub">
+            Keeps the question and its answer to you — not the other members, not the journey's lead. The
+            timeline records that you asked something, never what.
+          </div>
+        </div>
+        <Switch checked={isPrivate} onChange={setIsPrivate} ariaLabel="Only me" />
+      </div>
       <p className="text-meta">
         Answered from everything already in this journey — its description, pinned messages, documents, and the
         minutes of every linked kelabo.
@@ -888,9 +902,37 @@ function AskModal({ onClose, onAsk }) {
 function ReportRow({ r }) {
   const [open, setOpen] = useState(false)
   const pending = r.status === 'pending'
+
+  // The whole card toggles, not just its first line. `.con` has carried
+  // `cursor: pointer` since it was written, but the handler sat on `.con-head`
+  // alone — so the asker/date line, and the padding around everything,
+  // advertised a click that did nothing.
+  //
+  // Clicks originating inside the expanded body are left alone: selecting a
+  // sentence of the answer or following a link in it must not collapse the
+  // card out from under the pointer.
+  const toggle = e => {
+    if (pending) return
+    if (e.target.closest?.('.con-body')) return
+    setOpen(o => !o)
+  }
+
   return (
-    <div className={'con' + (open ? ' open' : '') + (r.status === 'failed' ? ' con-skipped' : '')} data-kind="answer">
-      <div className="con-head" onClick={() => !pending && setOpen(o => !o)} style={{ cursor: pending ? 'default' : 'pointer' }}>
+    <div
+      className={'con' + (open ? ' open' : '') + (r.status === 'failed' ? ' con-skipped' : '')}
+      data-kind="answer"
+      onClick={toggle}
+      style={pending ? { cursor: 'default' } : undefined}
+      role={pending ? undefined : 'button'}
+      tabIndex={pending ? undefined : 0}
+      aria-expanded={pending ? undefined : open}
+      onKeyDown={e => {
+        if (pending || (e.key !== 'Enter' && e.key !== ' ')) return
+        e.preventDefault()
+        setOpen(o => !o)
+      }}
+    >
+      <div className="con-head">
         {pending
           ? <span className="con-spinner" aria-hidden="true"></span>
           : <span className="con-mark"><Icon name={r.status === 'failed' ? 'x-circle' : 'sparkles'} size={14} /></span>}
@@ -899,9 +941,10 @@ function ReportRow({ r }) {
       </div>
       <div className="con-sub">
         <span title={fmtFullAt(r.requestedAt)}>{r.requestedBy} · {timeAgo(r.requestedAt)}</span>
+        {r.visibility === 'private' && <span className="chip chip-sm">Only me</span>}
       </div>
       {pending && <div className="con-progress">Generating…</div>}
-      {r.status === 'failed' && <div className="con-reason">Could not generate a report ({r.error || 'unknown error'}).</div>}
+      {r.status === 'failed' && <div className="con-reason">Could not answer this question ({r.error || 'unknown error'}).</div>}
       {open && r.status === 'ready' && (
         <div className="con-body"><Markdown text={r.answer} /></div>
       )}
@@ -925,10 +968,10 @@ function ReportsTab({ journeyId, isMember, isActive }) {
     return () => clearInterval(t)
   }, [reports, journeyId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const ask = async question => {
-    const res = await api.requestJourneyReport(journeyId, question)
-    setReports(list => [{ reportId: res.reportId, question, requestedBy: '…', requestedAt: Date.now(), status: 'pending' }, ...(list || [])])
-    toast('Report requested')
+  const ask = async (question, visibility) => {
+    const res = await api.requestJourneyReport(journeyId, question, visibility)
+    setReports(list => [{ reportId: res.reportId, question, requestedBy: '…', requestedAt: Date.now(), status: 'pending', visibility }, ...(list || [])])
+    toast(visibility === 'private' ? 'Question asked — only you will see it' : 'Question asked')
     load()
   }
 
@@ -940,7 +983,7 @@ function ReportsTab({ journeyId, isMember, isActive }) {
         </div>
       )}
       {reports === null && <SkeletonRows n={2} />}
-      {reports && reports.length === 0 && <div className="empty">No reports yet — ask a question about this journey and it will appear here.</div>}
+      {reports && reports.length === 0 && <div className="empty">No questions yet — ask one about this journey and the answer will appear here.</div>}
       {(reports || []).map(r => <ReportRow key={r.reportId} r={r} />)}
       {showAsk && <AskModal onClose={() => setShowAsk(false)} onAsk={ask} />}
     </section>
@@ -964,6 +1007,150 @@ function AvatarReroll({ journey, onSaved }) {
         <Icon name="sparkles" size={14} />
       </Button>
     </div>
+  )
+}
+
+// --- Helm ----------------------------------------------------------------------
+
+/**
+ * The lead's controls, in one place: identity (name, avatar), who can see it
+ * (visibility + the accessor roster, which used to be a tab of its own),
+ * what the assistant may do, and the two lifecycle actions.
+ *
+ * Rendered only for the owner — a member cannot act on any of it, and a tab
+ * of disabled controls teaches nobody anything. What a member does need to
+ * know (assistant posting is on) stays disclosed on Overview.
+ */
+function HelmTab({ journey, isActive, accessors, onRename, onSaveAvatar, onComplete, onReopen, onDelete, onAddAccessor, onRemoveAccessor, reload }) {
+  const toast = useToast()
+
+  const patch = async (body, ok, fail) => {
+    try {
+      await api.patchJourney(journey.journeyId, body)
+      await reload()
+      toast(ok)
+    } catch {
+      toast(fail)
+    }
+  }
+
+  return (
+    <section className="anim-in vstack-lg journey-tab">
+      <div className="section-block">
+        <div className="section-title">Journey</div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Name</div>
+            <div className="sr-sub">{journey.title}</div>
+          </div>
+          <Button size="sm" onClick={onRename} disabled={!isActive}>
+            <Icon name="pencil" size={14} />Rename
+          </Button>
+        </div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Avatar</div>
+            <div className="sr-sub">Generated from the journey's id — re-roll for a different one.</div>
+          </div>
+          {isActive
+            ? <AvatarReroll journey={journey} onSaved={onSaveAvatar} />
+            : <Avatar id={journey.journeyId} variant={journey.avatarVariant} size={48} />}
+        </div>
+      </div>
+
+      <div className="section-block">
+        <div className="section-title">Who can see it</div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Private journey</div>
+            <div className="sr-sub">
+              {journey.visibility === 'private'
+                ? 'Only you and the accessors below. Off, everyone at your organisation can see it.'
+                : 'Everyone at your organisation can see this journey. On, only you and the accessors you name.'}
+            </div>
+          </div>
+          <Switch
+            checked={journey.visibility === 'private'}
+            onChange={v => patch({ visibility: v ? 'private' : 'public' }, v ? 'Journey is now private' : 'Journey is now visible to your organisation', 'Could not change visibility')}
+            disabled={!isActive}
+            ariaLabel="Private journey"
+          />
+        </div>
+
+        {journey.visibility === 'private' && (
+          <>
+            <div className="action-row action-row-start">
+              <Button size="sm" onClick={onAddAccessor} disabled={!isActive}>
+                <Icon name="user-plus" size={14} />Add accessor
+              </Button>
+            </div>
+            {accessors === null && <SkeletonRows n={2} />}
+            {accessors && accessors.length === 0 && <div className="empty">No accessors yet — only you can see this journey.</div>}
+            {(accessors || []).map(a => (
+              <div className="row row-removable" key={a.identity}>
+                <Avatar id={a.identity} size={28} />
+                <div className="row-main">
+                  <div className="row-title">{a.identity}</div>
+                  <div className="row-sub">added by {a.addedBy}</div>
+                </div>
+                <span className="row-meta">{timeAgo(a.addedAt)}</span>
+                {isActive && (
+                  <button className="remove-btn" onClick={() => onRemoveAccessor(a)} title={`Remove ${a.identity}`} aria-label={`Remove ${a.identity}`}>
+                    <Icon name="x" size={15} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+
+      <div className="section-block">
+        <div className="section-title">Assistant</div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Assistant can post to the board</div>
+            <div className="sr-sub">
+              Lets an attached assistant pin its own board messages — the outcome of work it finished.
+              Everyone who can see this journey is shown whether it is on.
+            </div>
+          </div>
+          <Switch
+            checked={!!journey.aiCanPost}
+            onChange={v => patch({ aiCanPost: v }, v ? 'Assistant posting turned on' : 'Assistant posting turned off', 'Could not change assistant posting')}
+            disabled={!isActive}
+            ariaLabel="Assistant can post to the board"
+          />
+        </div>
+      </div>
+
+      <div className="section-block">
+        <div className="section-title">Lifecycle</div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">{isActive ? 'Mark complete' : 'Reopen'}</div>
+            <div className="sr-sub">
+              {isActive
+                ? 'Freezes the journey: no further edits, kelabo links, board messages or documents until it is reopened.'
+                : 'This journey is complete and frozen. Reopening allows edits again.'}
+            </div>
+          </div>
+          {isActive
+            ? <Button variant="outline" onClick={onComplete}><Icon name="check-circle" size={14} />Mark complete</Button>
+            : <Button variant="outline" onClick={onReopen}><Icon name="rotate-ccw" size={14} />Reopen</Button>}
+        </div>
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Delete journey</div>
+            <div className="sr-sub">
+              Permanently removes the description history, questions, board and documents. Linked kelabos are
+              untouched.
+            </div>
+          </div>
+          <Button variant="danger-ghost" onClick={onDelete}><Icon name="x" size={14} />Delete</Button>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1011,7 +1198,7 @@ export default function JourneyDetail() {
     try { await api.reopenJourney(id); reload(); toast('Journey reopened') } catch { toast('Could not reopen the journey') }
   }
   const remove = async () => {
-    const ok = await confirm({ title: `Delete “${journey.title}”?`, body: 'This permanently removes the journey — its description history, reports, board and documents. Linked kelabos are untouched.', confirmLabel: 'Delete permanently' })
+    const ok = await confirm({ title: `Delete “${journey.title}”?`, body: 'This permanently removes the journey — its description history, questions, board and documents. Linked kelabos are untouched.', confirmLabel: 'Delete permanently' })
     if (!ok) return
     try { await api.deleteJourney(id); toast('Journey deleted'); navigate('/journeys', { replace: true }) } catch { toast('Could not delete the journey') }
   }
@@ -1061,14 +1248,12 @@ export default function JourneyDetail() {
         <>
           <Crumbs className="crumbs-head" to="/journeys" backLabel="Journeys" here={journey.title} />
 
+          {/* Rename, the avatar re-roll, complete/delete and the accessor
+              roster all used to live out here or in a tab of their own. They
+              are at the Helm now; this is identity and state only. */}
           <div className="title-row">
-            {isOwner && isActive ? <AvatarReroll journey={journey} onSaved={saveAvatar} /> : <Avatar id={journey.journeyId} variant={journey.avatarVariant} size={48} />}
+            <Avatar id={journey.journeyId} variant={journey.avatarVariant} size={48} />
             <h1 className="page-title">{journey.title}</h1>
-            {isOwner && isActive && (
-              <Button size="sm" variant="ghost" iconOnly onClick={rename} title="Rename" aria-label="Rename journey">
-                <Icon name="pencil" size={14} />
-              </Button>
-            )}
             <span className={'chip' + (journey.status === 'completed' ? ' chip-ended' : ' chip-live')}>{journey.status}</span>
             <span className="chip">{journey.visibility}</span>
             <JourneyHealthChip health={journey.health} />
@@ -1078,20 +1263,12 @@ export default function JourneyDetail() {
             {typeof journey.progress === 'number' ? ` · ${journey.progress}% complete` : ''}
           </p>
 
-          {isOwner && (
-            <div className="action-row action-row-start">
-              {isActive
-                ? <Button variant="outline" onClick={complete}><Icon name="check-circle" size={14} />Mark complete</Button>
-                : <Button variant="outline" onClick={reopen}><Icon name="rotate-ccw" size={14} />Reopen</Button>}
-              <Button variant="danger-ghost" onClick={remove}><Icon name="x" size={14} />Delete journey</Button>
-            </div>
-          )}
           {!isMember && (
             <Banner kind="warn">You can view this journey but are not a member — some actions are unavailable.</Banner>
           )}
 
           <Tabs
-            tabs={journey.visibility === 'private' ? [...TABS, { id: 'accessors', label: 'Accessors' }] : TABS}
+            tabs={isOwner ? [...TABS, HELM_TAB] : TABS}
             active={tab}
             onChange={setTab}
           />
@@ -1102,31 +1279,20 @@ export default function JourneyDetail() {
           {tab === 'reports' && <ReportsTab journeyId={id} isMember={isMember} isActive={isActive} />}
           {tab === 'board' && <BoardTab journeyId={id} isMember={isMember} isActive={isActive} isOwner={isOwner} />}
           {tab === 'documents' && <DocumentsTab journeyId={id} isMember={isMember} isActive={isActive} isOwner={isOwner} initialOpenDocId={focusDocId} />}
-          {tab === 'accessors' && journey.visibility === 'private' && (
-            <section className="anim-in vstack-sm journey-tab">
-              {isOwner && isActive && (
-                <div className="action-row action-row-start">
-                  <Button onClick={addAccessor}><Icon name="user-plus" size={14} />Add accessor</Button>
-                </div>
-              )}
-              {accessors === null && <SkeletonRows n={2} />}
-              {accessors && accessors.length === 0 && <div className="empty">No accessors yet — only you can see this journey.</div>}
-              {(accessors || []).map(a => (
-                <div className="row row-removable" key={a.identity}>
-                  <Avatar id={a.identity} size={28} />
-                  <div className="row-main">
-                    <div className="row-title">{a.identity}</div>
-                    <div className="row-sub">added by {a.addedBy}</div>
-                  </div>
-                  <span className="row-meta">{timeAgo(a.addedAt)}</span>
-                  {isOwner && isActive && (
-                    <button className="remove-btn" onClick={() => removeAccessor(a)} title={`Remove ${a.identity}`} aria-label={`Remove ${a.identity}`}>
-                      <Icon name="x" size={15} />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </section>
+          {tab === 'helm' && isOwner && (
+            <HelmTab
+              journey={journey}
+              isActive={isActive}
+              accessors={accessors}
+              onRename={rename}
+              onSaveAvatar={saveAvatar}
+              onComplete={complete}
+              onReopen={reopen}
+              onDelete={remove}
+              onAddAccessor={addAccessor}
+              onRemoveAccessor={removeAccessor}
+              reload={reload}
+            />
           )}
         </>
       )}
