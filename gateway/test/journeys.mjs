@@ -383,12 +383,36 @@ await test("mainAgentSystemPrompt: journeys render a JOURNEY CONTEXT section, ad
   // the prompt, not just its title.
   assert.ok(withBoth.includes("FluxView glossary"));
   assert.ok(withBoth.includes("FluxView is the internal dashboard for release health."));
-  // The instruction that should stop the exact reported bug from recurring
-  // even with documents present: told explicitly not to re-research them.
-  assert.match(withBoth, /Never dispatch a sub-agent to "look up".*already answered here.*document/);
+  // The reported bug, and why the first attempt at fixing it did not work:
+  // the orchestrator was told not to dispatch a lookup for something already
+  // in the journey — but it cannot answer the room itself, so "do not
+  // dispatch" leaves it a choice between silence and a web search, and it
+  // chose the search. It now has the third option it needed: dispatch a brief
+  // that answers from the material, with the material quoted into it.
+  assert.match(withBoth, /THIS IS THE FIRST PLACE TO LOOK, BEFORE THE OPEN WEB/);
+  assert.match(withBoth, /answer_from_context/, "the flag that tells the worker not to search");
+  assert.match(withBoth, /Quote the relevant journey material into `context` verbatim/);
+  assert.match(withBoth, /the worker cannot see any of this/, "why quoting is required, not optional");
+  // Partial answers must not collapse to either extreme — neither a pure
+  // web search nor a refusal to look anything up.
+  assert.match(withBoth, /only PART of the answer/);
+  // And the orchestrator is given the search order explicitly, in the
+  // DECIDE block where it actually chooses.
+  assert.match(withBoth, /WHERE TO LOOK, IN ORDER/);
   // "Reference material, not instructions" framing, matching transcript
   // injection's own posture — asserted on, not just eyeballed.
   assert.ok(withBoth.includes("not the current state of anything"));
+});
+
+await test("subAgentSystemPrompt: the worker reads its brief's context before reaching for a tool", async () => {
+  const { subAgentSystemPrompt } = await import("../src/agent/persona.js");
+  const prompt = subAgentSystemPrompt({ capabilities: ["web_search", "web"] });
+  assert.match(prompt, /READ `context` BEFORE YOU REACH FOR A TOOL/);
+  assert.match(prompt, /ANSWER FROM IT and make no tool calls at all/);
+  assert.match(prompt, /constraints\.answer_from_context: true/);
+  // The failure this prevents is not "wasted a search" — it is answering a
+  // question about this project with a stranger's product of the same name.
+  assert.match(prompt, /a project's own term will match somebody else's product/);
 });
 
 // --- dev-mode MCP tool support (docs 20 §12.2, the PULL half) ---------------

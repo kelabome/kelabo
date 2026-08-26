@@ -25,7 +25,11 @@ const DISPATCH_TOOL = {
         description:
           "REQUIRED. The language of the request that triggered this, as an English language name (e.g. 'English', 'Chinese', 'Japanese'). The worker writes the board answer in this language, whatever language its sources are in.",
       },
-      constraints: { type: "object", description: "{freshness, mcp_server?, max_tool_calls?, deadline_ms?}" },
+      constraints: {
+        type: "object",
+        description:
+          "{freshness, mcp_server?, max_tool_calls?, deadline_ms?, answer_from_context?}. Set answer_from_context:true when `context` already contains the answer — typically from the journey or an earlier kelabo — and the worker should not search the web for it.",
+      },
     },
     required: ["task_id", "objective", "language"],
   },
