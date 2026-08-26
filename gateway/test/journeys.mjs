@@ -186,6 +186,31 @@ await test("success: assembles description + linked kelabo minutes + board into 
   assert.ok(typeof persisted.generatedAt === "number");
 });
 
+await test("a private report never becomes context for someone else's report (docs 20 §6.4)", async () => {
+  const journeyId = "j-priv";
+  const seed = baseSeed(journeyId);
+  seed[`${journeyPk(journeyId)}|REPORT#rpub`] = {
+    PK: journeyPk(journeyId), SK: "REPORT#rpub", reportId: "rpub", question: "Public question?",
+    answer: "PUBLIC PRIOR ANSWER", status: "ready", requestedBy: "alice@example.com", requestedAt: 2, visibility: "public",
+  };
+  seed[`${journeyPk(journeyId)}|REPORT#rpriv`] = {
+    PK: journeyPk(journeyId), SK: "REPORT#rpriv", reportId: "rpriv", question: "Is Bob behind?",
+    answer: "PRIVATE PRIOR ANSWER", status: "ready", requestedBy: "bob@example.com", requestedAt: 3, visibility: "private",
+  };
+  const store = makeStore(seed);
+  let promptSeen = null;
+  const llm = { complete: async (req) => { promptSeen = req.messages[0].content; return "ok"; } };
+  const c = makeContainer({ store, llm });
+
+  await generateJourneyReport(c, journeyId, { reportId: "r1", question: "How is it going?" });
+  assert.ok(promptSeen.includes("PUBLIC PRIOR ANSWER"), "a public prior report is context, as before");
+  // The whole point: this answer is readable by whoever asks next, so a
+  // private report reaching it would launder one member's private question
+  // into a shared answer.
+  assert.equal(promptSeen.includes("PRIVATE PRIOR ANSWER"), false, "a private prior report must not reach the prompt");
+  assert.equal(promptSeen.includes("Is Bob behind?"), false, "nor its question");
+});
+
 await test("llm failure: the report row is marked failed with a reason, not left pending", async () => {
   const journeyId = "j2";
   const store = makeStore(baseSeed(journeyId));

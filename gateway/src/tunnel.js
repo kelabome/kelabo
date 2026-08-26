@@ -854,7 +854,12 @@ export function createTunnel(c) {
     }
     let entries = [];
     try {
-      entries = await queryJourneyTimeline(c, resolution.journeyId, { type: entryType, before, limit: limit || 20 });
+      entries = await queryJourneyTimeline(c, resolution.journeyId, {
+        type: entryType,
+        before,
+        limit: limit || 20,
+        viewer: conn.identity,
+      });
     } catch (err) {
       c.logError("journey_timeline_query_failed", err, { kelaboId, journeyId: resolution.journeyId });
     }
@@ -932,7 +937,10 @@ export function createTunnel(c) {
       activeBoardMessages(c, journeyId, CONTEXT_BOARD_LIMIT).catch(() => []),
       activeDocuments(c, journeyId, CONTEXT_DOCUMENTS_LIMIT).catch(() => []),
       linkedKelaboSummaries(c, journeyId).catch(() => []),
-      listReadyReports(c, journeyId, CONTEXT_REPORTS_LIMIT).catch(() => []),
+      // Served for this connection's own identity, so a private report
+      // (docs 20 §6.4) is in the bundle only when the attached developer is
+      // the one who asked it.
+      listReadyReports(c, journeyId, CONTEXT_REPORTS_LIMIT, conn.identity).catch(() => []),
     ]);
     sendDown(conn.ws, {
       type: "journey_context",
@@ -1071,7 +1079,7 @@ export function createTunnel(c) {
     }
     const journeyId = resolution.journeyId;
     if (reportId) {
-      const report = await getJourneyReport(c, journeyId, reportId).catch((err) => {
+      const report = await getJourneyReport(c, journeyId, reportId, conn.identity).catch((err) => {
         c.logError("journey_report_read_failed", err, { kelaboId, journeyId, reportId });
         return null;
       });
@@ -1091,6 +1099,7 @@ export function createTunnel(c) {
             question: report.question || "",
             ...(report.requestedAt ? { requestedAt: report.requestedAt } : {}),
             ...(report.generatedBy ? { generatedBy: report.generatedBy } : {}),
+            visibility: report.visibility === "private" ? "private" : "public",
             answer: report.answer || "",
           },
         ],
@@ -1099,7 +1108,7 @@ export function createTunnel(c) {
     }
     let reports = [];
     try {
-      reports = await listReadyReports(c, journeyId, JOURNEY_REPORTS_LIMIT);
+      reports = await listReadyReports(c, journeyId, JOURNEY_REPORTS_LIMIT, conn.identity);
     } catch (err) {
       c.logError("journey_reports_query_failed", err, { kelaboId, journeyId });
     }
@@ -1114,6 +1123,7 @@ export function createTunnel(c) {
         question: r.question || "",
         ...(r.requestedAt ? { requestedAt: r.requestedAt } : {}),
         ...(r.generatedBy ? { generatedBy: r.generatedBy } : {}),
+        visibility: r.visibility === "private" ? "private" : "public",
       })),
     });
   }

@@ -94,10 +94,24 @@ export async function linkedKelaboSummaries(c, journeyId, limit = LINKED_KELABO_
   );
 }
 
-// Exported for tunnel.js's `journey_reports_request` (docs 20 §12.3), which
-// wants a longer list than buildContext's 3-report digest below.
-export async function listReadyReports(c, journeyId, limit = 3) {
-  const reports = (await queryJourneyItems(c, journeyId, "REPORT#")).filter((r) => r.status === "ready");
+/**
+ * Ready reports, newest first.
+ *
+ * `viewer` is the identity the request is being served for: a private report
+ * (docs 20 §6.4) reaches only the person who asked it, the same rule
+ * rest-api's own `listReports` applies. Omitted — the server-side report
+ * pipeline, `buildContext` below — means public only, and deliberately not
+ * "everything": that synthesis is itself readable by whoever asks next, so
+ * folding a private report into it would launder one member's private
+ * question into a shared answer.
+ *
+ * Exported for tunnel.js's `journey_reports_request` (docs 20 §12.3), which
+ * wants a longer list than buildContext's 3-report digest below.
+ */
+export async function listReadyReports(c, journeyId, limit = 3, viewer = null) {
+  const reports = (await queryJourneyItems(c, journeyId, "REPORT#")).filter(
+    (r) => r.status === "ready" && (r.visibility !== "private" || (viewer && r.requestedBy === viewer))
+  );
   return reports.sort((a, b) => (b.requestedAt || 0) - (a.requestedAt || 0)).slice(0, limit);
 }
 
@@ -114,11 +128,17 @@ export async function getJourneyDocument(c, journeyId, docId) {
   return out.Item ?? null;
 }
 
-export async function getJourneyReport(c, journeyId, reportId) {
+/** One report by id, or null — null also when it is private and `viewer` is
+ *  not the person who asked it, so "not yours" and "not there" are the same
+ *  answer to an agent as they are over REST (docs 20 §6.4). */
+export async function getJourneyReport(c, journeyId, reportId, viewer = null) {
   const out = await c.db.send(
     new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: `REPORT#${reportId}` } })
   );
-  return out.Item ?? null;
+  const item = out.Item ?? null;
+  if (!item) return null;
+  if (item.visibility === "private" && item.requestedBy !== viewer) return null;
+  return item;
 }
 
 /** The journey's `LINK#` rows — membership only, for the journey briefing's
@@ -325,7 +345,7 @@ export async function resolveJourneyForKelabo(c, kelaboId, journeyId) {
  * locally for the same reason). Same backward-cursor shape: `before` excludes
  * everything at or after that timestamp.
  */
-export async function queryJourneyTimeline(c, journeyId, { type, before, limit = 20 } = {}) {
+export async function queryJourneyTimeline(c, journeyId, { type, before, limit = 20, viewer = null } = {}) {
   const keyCond = before ? "PK = :pk AND SK < :before" : "PK = :pk AND begins_with(SK, :sk)";
   const values = before
     ? { ":pk": journeyPk(journeyId), ":before": `TL#${pad(before, 13)}` }
@@ -341,7 +361,10 @@ export async function queryJourneyTimeline(c, journeyId, { type, before, limit =
       Limit: limit,
     })
   );
-  return out.Items ?? [];
+  // A private report's row is the asker's alone (docs 20 §6.4) — the same
+  // rule rest-api's `mayReadTimelineEntry` applies, so the agent's view of
+  // the timeline is never wider than the person it is attached as.
+  return (out.Items ?? []).filter((e) => e.visibility !== "private" || (viewer && e.actor === viewer));
 }
 
 async function putJourneyTimelineRow(c, journeyId, entry) {
@@ -399,6 +422,11 @@ export async function submitJourneyReport(c, journeyId, { reportId, question, an
         answer,
         generatedAt: now,
         generatedBy: "agent",
+        // Explicit rather than relying on absence reading as public: an
+        // agent's synthesis is submitted to be shared, and a report whose
+        // visibility is unset would be indistinguishable from one whose
+        // author meant it to be private (docs 20 §6.4).
+        visibility: "public",
       },
     })
   );
@@ -412,7 +440,9 @@ export async function submitJourneyReport(c, journeyId, { reportId, question, an
   );
   await putJourneyTimelineRow(c, journeyId, {
     type: "report",
-    summary: `Report submitted: ${clip(question, 80)}`,
+    // Same display vocabulary as rest-api's own timeline sentence (docs 20
+    // §13): the SPA calls these Questions, so the timeline must too.
+    summary: `Question answered by the assistant: ${clip(question, 80)}`,
     ...(identity ? { actor: identity } : {}),
     at: now,
     detail: { reportId },

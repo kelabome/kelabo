@@ -635,6 +635,10 @@ export const frameJourneyReportsSchema = z.object({
         question: z.string(),
         requestedAt: z.number().optional(),
         generatedBy: z.string().optional(),
+        // A private report reaches the agent only when the attached identity
+        // is the one who asked it (docs 20 §6.4) — carried so the agent can
+        // say so rather than quoting it to the room as shared material.
+        visibility: z.enum(["public", "private"]).default("public"),
         // Present only on a single-report read (reportId given).
         answer: z.string().optional(),
       })

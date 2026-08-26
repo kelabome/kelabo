@@ -719,8 +719,15 @@ export const journeyLinkKelaboBodySchema = z.object({
 // POST /journeys/:id/reports — a free-text question, answered by synthesis
 // over the journey's own content (docs 20 §6). Generation happens in the
 // Gateway (the LLM credential is gateway-owned); this only validates the ask.
+//
+// `visibility` is the *report's* own, unrelated to the journey's: a private
+// report is readable by the person who asked and by nobody else — not the
+// other members, not the journey's lead (docs 20 §6.4). Default public,
+// because the point of a journey report is usually to be shared; asking
+// privately is the deliberate act, the inverse of `aiCanPost`'s default.
 export const journeyReportBodySchema = z.object({
   question: z.string().min(1).max(2000),
+  visibility: z.enum(JOURNEY_VISIBILITIES).default("public"),
 });
 
 // POST /journeys/:id/board, PATCH .../board/:msgId — a pinned message,

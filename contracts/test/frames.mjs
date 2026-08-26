@@ -335,6 +335,16 @@ test("journey_reports: list carries questions, a single read carries the answer"
   });
   assert.equal(list.ok, true);
   assert.equal(list.frame.reports[0].answer, undefined);
+  // A report only reaches the agent when it may: unset means public, so an
+  // older Gateway's frame cannot make a private report look shared.
+  assert.equal(list.frame.reports[0].visibility, "public");
+  const priv = down({
+    type: "journey_reports",
+    requestId: "r",
+    resolved: "ok",
+    reports: [{ reportId: "rp2", question: "q", visibility: "private" }],
+  });
+  assert.equal(priv.frame.reports[0].visibility, "private");
   const one = down({
     type: "journey_reports",
     requestId: "r",

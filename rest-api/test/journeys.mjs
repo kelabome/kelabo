@@ -45,11 +45,18 @@ const internal = {
     if (internal.gatewayUnreachable) throw new Error("fetch failed");
     // Stands in for the Gateway's own generateJourneyReport writing the
     // finished row directly — see gateway/test/journeys.mjs for that half.
+    // It updates three attributes (`UpdateCommand`, SET status/answer/
+    // generatedAt) rather than replacing the item, so this merges: replacing
+    // it here would silently drop `visibility` and hide the very bug this
+    // stub exists to let the tests find.
+    const existing = (await db.getJourneyReport(journeyId, reportId)) || {};
+    const { PK, SK, ...rest } = existing;
     await db.putJourneyReport(journeyId, {
       reportId,
       question,
       requestedBy: identity,
       requestedAt: Date.now(),
+      ...rest,
       status: "ready",
       answer: `Fake answer to: ${question}`,
       generatedAt: Date.now(),
@@ -764,6 +771,73 @@ await test("requestReport: an unreachable Gateway leaves the report failed, not 
   } finally {
     internal.gatewayUnreachable = false;
   }
+});
+
+await test("reports: a private one is the asker's alone — not the lead's, and not in the timeline", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const mine = await journeys.requestReport({
+    journeyId: j.journeyId,
+    identity: COLLEAGUE,
+    body: { question: "Am I behind on this?", visibility: "private" },
+  });
+  const shared = await journeys.requestReport({
+    journeyId: j.journeyId,
+    identity: COLLEAGUE,
+    body: { question: "Where are we?", visibility: "public" },
+  });
+
+  // The asker sees both.
+  const asker = await journeys.listReports({ journeyId: j.journeyId, identity: COLLEAGUE });
+  assert.deepEqual(asker.reports.map((r) => r.reportId).sort(), [mine.reportId, shared.reportId].sort());
+  assert.equal((await journeys.getReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: mine.reportId })).question, "Am I behind on this?");
+
+  // The journey's own lead does not — deliberately (docs 20 §6.4).
+  const lead = await journeys.listReports({ journeyId: j.journeyId, identity: OWNER });
+  assert.deepEqual(lead.reports.map((r) => r.reportId), [shared.reportId]);
+  await assert.rejects(
+    journeys.getReport({ journeyId: j.journeyId, identity: OWNER, reportId: mine.reportId }),
+    // 404, not 403: a 403 would confirm the id exists and that it is someone's.
+    (e) => e.status === 404 && e.code === "report_not_found",
+  );
+
+  // The shared timeline does not carry the private ask at all — not the
+  // question, and not the row: "someone asked something private, at 14:02"
+  // is itself a disclosure on a small journey.
+  const leadTl = await journeys.getTimeline({ journeyId: j.journeyId, identity: OWNER });
+  const leadSummaries = leadTl.entries.filter((e) => e.type === "report").map((e) => e.summary);
+  assert.deepEqual(leadSummaries, ["Question asked: Where are we?"], "no private row for anyone but the asker");
+  assert.equal(leadSummaries.some((s) => s.includes("Am I behind")), false);
+
+  // The asker keeps their own row — redacted even so, since the question
+  // itself is one filter away from a surface everyone reads.
+  const askerTl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
+  const askerSummaries = askerTl.entries.filter((e) => e.type === "report").map((e) => e.summary);
+  assert.ok(askerSummaries.includes("Question asked (private)"), `got ${JSON.stringify(askerSummaries)}`);
+  assert.ok(askerSummaries.includes("Question asked: Where are we?"));
+});
+
+await test("timeline: a filtered-out private row still advances the cursor, so paging cannot loop", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  // Oldest first: one public ask, then a private one by someone else.
+  await journeys.requestReport({ journeyId: j.journeyId, identity: OWNER, body: { question: "public one" } });
+  await new Promise((r) => setTimeout(r, 5));
+  await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "secret", visibility: "private" } });
+
+  // Newest first, so the private row is the whole of page one for the lead:
+  // an empty page, but the cursor must still move past it.
+  const page1 = await journeys.getTimeline({ journeyId: j.journeyId, identity: OWNER, limit: 1 });
+  assert.deepEqual(page1.entries, [], "the lead sees nothing on this page");
+  assert.ok(page1.nextBefore, "and yet the cursor advanced");
+  const page2 = await journeys.getTimeline({ journeyId: j.journeyId, identity: OWNER, limit: 1, before: page1.nextBefore });
+  assert.equal(page2.entries.length, 1);
+  assert.equal(page2.entries[0].summary, "Question asked: public one");
+});
+
+await test("reports: default to public when the caller says nothing", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const req = await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "q" } });
+  const got = await journeys.getReport({ journeyId: j.journeyId, identity: OWNER, reportId: req.reportId });
+  assert.equal(got.visibility, "public");
 });
 
 await test("reports: a stranger cannot request or read one; unknown id is 404", async () => {

@@ -92,6 +92,18 @@ const journeyReportItem = {
   status: "ready",
   requestedAt: NOW - 3000,
   generatedBy: "agent",
+  visibility: "public",
+};
+// Someone else's private report (docs 20 §6.4): the attached agent is
+// alice@example.com, so this must not reach it by either route.
+const journeyPrivateReportItem = {
+  reportId: "rp2",
+  question: "Is Bob behind?",
+  answer: "Yes.",
+  status: "ready",
+  requestedAt: NOW - 2000,
+  requestedBy: "bob@example.com",
+  visibility: "private",
 };
 const journeyLinkRows = [{ kelaboId: KELABO, titleSnapshot: "Smoke Kelabo", linkedAt: NOW - 5000 }];
 
@@ -112,6 +124,7 @@ const db = {
       if (input.Key.PK === `JOURNEY#${JOURNEY2}` && input.Key.SK === "META") return { Item: journeyMetaItem2 };
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "DOC#d1") return { Item: journeyDocItem };
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "REPORT#rp1") return { Item: journeyReportItem };
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "REPORT#rp2") return { Item: journeyPrivateReportItem };
       return {};
     }
     if (name === "QueryCommand") {
@@ -121,6 +134,16 @@ const db = {
         return { Items: invites[pk.slice("KELABO#".length)] ?? [] };
       }
       if (sk === "JOURNEY#" && pk === `KELABO#${KELABO}`) return { Items: kelaboJourneyLinks };
+      if (sk === "TL#" && pk === `JOURNEY#${JOURNEY}`) {
+        // One shared row, and one belonging to another member's private
+        // report (docs 20 §6.4) — the attached agent is alice@example.com.
+        return {
+          Items: [
+            { PK: pk, SK: "TL#0000000000002", type: "report", summary: "Question asked: Where are we?", actor: "alice@example.com", at: 2 },
+            { PK: pk, SK: "TL#0000000000003", type: "report", summary: "Question asked (private)", actor: "bob@example.com", at: 3, visibility: "private" },
+          ],
+        };
+      }
       if ((sk === "TL#" || sk === "BOARDMSG#") && typeof pk === "string" && pk.startsWith("JOURNEY#")) {
         return { Items: [] };
       }
@@ -128,7 +151,14 @@ const db = {
         if (sk === "DESC#") return { Items: [{ version: 1, markdown: "Ship the redesign." }] };
         if (sk === "LINK#") return { Items: journeyLinkRows.map((l) => ({ PK: pk, SK: `LINK#${l.kelaboId}`, ...l })) };
         if (sk === "DOC#") return { Items: [{ PK: pk, SK: "DOC#d1", ...journeyDocItem }] };
-        if (sk === "REPORT#") return { Items: [{ PK: pk, SK: "REPORT#rp1", ...journeyReportItem }] };
+        if (sk === "REPORT#") {
+          return {
+            Items: [
+              { PK: pk, SK: "REPORT#rp1", ...journeyReportItem },
+              { PK: pk, SK: "REPORT#rp2", ...journeyPrivateReportItem },
+            ],
+          };
+        }
       }
       // Serve transcript queries from what the test actually persisted, so the
       // history endpoint reads exactly the rows the caption handler wrote —
@@ -853,8 +883,7 @@ async function main() {
     assert.ok(!("content" in ctx.documents[0]), "context carries an excerpt, never the full document");
     assert.ok(ctx.documents[0].excerpt.startsWith("The full spec text"));
     assert.deepEqual(ctx.kelabos, [], "the requesting kelabo is not one of the journey's other kelabos");
-    assert.equal(ctx.reports.length, 1);
-    assert.equal(ctx.reports[0].reportId, "rp1");
+    assert.deepEqual(ctx.reports.map((r) => r.reportId), ["rp1"], "another member's private report stays out of the bundle");
     console.log("ok: journey_context_request → description + document excerpts + reports, self excluded");
   }
 
@@ -893,18 +922,38 @@ async function main() {
   }
 
   {
-    // journey_reports: same list/read split as documents.
+    // journey_reports: same list/read split as documents, and someone else's
+    // private report (docs 20 §6.4) is absent from both — the attached agent
+    // is alice@example.com; rp2 belongs to bob@example.com.
     const base = frames.length;
     ws.send(JSON.stringify({ type: "journey_reports_request", requestId: "jr1", kelaboId: KELABO }));
     const list = await nextFrame((f) => f.type === "journey_reports" && f.requestId === "jr1", 5000, base);
     assert.equal(list.resolved, "ok");
-    assert.equal(list.reports.length, 1);
+    assert.deepEqual(list.reports.map((r) => r.reportId), ["rp1"], "another member's private report is not listed");
     assert.ok(!("answer" in list.reports[0]), "the list never carries answers");
 
     ws.send(JSON.stringify({ type: "journey_reports_request", requestId: "jr2", kelaboId: KELABO, reportId: "rp1" }));
     const one = await nextFrame((f) => f.type === "journey_reports" && f.requestId === "jr2", 5000, base);
     assert.equal(one.reports[0].answer, "On track.");
-    console.log("ok: journey_reports_request → list without answers, full Q&A by reportId");
+
+    // Named directly, it is "not there" rather than "not yours" — the same
+    // answer REST gives, so an id cannot be probed for ownership.
+    ws.send(JSON.stringify({ type: "journey_reports_request", requestId: "jr3", kelaboId: KELABO, reportId: "rp2" }));
+    const denied = await nextFrame((f) => f.type === "journey_reports" && f.requestId === "jr3", 5000, base);
+    assert.equal(denied.resolved, "report_not_found");
+    console.log("ok: journey_reports_request → list without answers, full Q&A by reportId, another member's private one invisible");
+  }
+
+  {
+    // The timeline is the other surface a private ask could leak from: the
+    // row itself, not just its text, is the asker's alone (docs 20 §6.4).
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "journey_timeline_request", requestId: "jt1", kelaboId: KELABO }));
+    const tl = await nextFrame((f) => f.type === "journey_timeline" && f.requestId === "jt1", 5000, base);
+    assert.equal(tl.resolved, "ok");
+    assert.deepEqual(tl.entries.map((e) => e.summary), ["Question asked: Where are we?"]);
+    assert.equal(tl.entries.some((e) => e.actor === "bob@example.com"), false, "another member's private row is not served");
+    console.log("ok: journey_timeline_request → another member's private report row is filtered out");
   }
 
   {

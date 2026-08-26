@@ -486,12 +486,27 @@ export function createJourneys({ config, db, internal }) {
 
   // --- timeline (docs 20 §9) ---------------------------------------------------
 
+  /**
+   * A private report's own timeline row is visible to the person who asked
+   * it and to nobody else (docs 20 §6.4) — the row, not merely its text.
+   * Redacting the summary was the first attempt and is kept as the second
+   * line of defence, but "someone asked something private, at 14:02" is
+   * itself the disclosure: on a three-person journey it names them.
+   *
+   * The cursor is taken from the *unfiltered* page, so paging cannot loop:
+   * `nextBefore` has to advance past rows this viewer cannot see, or the
+   * next request returns the same window forever.
+   */
+  const mayReadTimelineEntry = (entry, identity) =>
+    entry.visibility !== "private" || entry.actor === identity;
+
   async function getTimeline({ journeyId, identity, type, before, limit }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
     const items = await db.listJourneyTimeline(journeyId, { type, before, limit: limit || 50 });
-    const entries = items.map(({ PK, SK, ...e }) => e);
-    const nextBefore = entries.length ? entries[entries.length - 1].at : undefined;
+    const all = items.map(({ PK, SK, ...e }) => e);
+    const entries = all.filter((e) => mayReadTimelineEntry(e, identity));
+    const nextBefore = all.length ? all[all.length - 1].at : undefined;
     return { entries, ...(nextBefore !== undefined ? { nextBefore } : {}) };
   }
 
@@ -765,20 +780,33 @@ export function createJourneys({ config, db, internal }) {
     const reportId = randomUUID();
     const now = Date.now();
     const question = body.question.trim();
+    const isPrivate = body.visibility === "private";
     await db.putJourneyReport(journeyId, {
       reportId,
       question,
       requestedBy: identity,
       requestedAt: now,
       status: "pending",
+      visibility: isPrivate ? "private" : "public",
     });
     await db.updateJourneyMeta(journeyId, { reportCount: (meta.reportCount || 0) + 1, updatedAt: now });
+    // The timeline is a shared surface, so a private report's row is stamped
+    // private and served only back to the person who asked it (docs 20 §6.4,
+    // `mayReadTimelineEntry`). The summary is redacted as well as filtered:
+    // one control between a private question and everyone who can read the
+    // journey is not enough for a surface this easy to add a new reader to.
+    // Reads "Question asked", not "Report requested": the SPA displays this
+    // whole feature as **Questions** (docs 20 §13's rename note), and a
+    // timeline sentence using the stored word would read as a bug sitting
+    // next to a tab that says something else — the same fix `writeStatusVersion`
+    // already needed for health's own display words. `type` stays "report".
     await db.putJourneyTimelineEntry(journeyId, {
       type: "report",
-      summary: `Report requested: ${question.slice(0, 80)}`,
+      summary: isPrivate ? "Question asked (private)" : `Question asked: ${question.slice(0, 80)}`,
       actor: identity,
       at: now,
       detail: { reportId },
+      ...(isPrivate ? { visibility: "private" } : {}),
     });
     // Counts the act of asking, including a request that later fails.
     await db.bumpContributor(journeyId, identity, "reportRequestCount").catch(() => {});
@@ -794,12 +822,23 @@ export function createJourneys({ config, db, internal }) {
     return { journeyId, reportId, status: "pending" };
   }
 
+  /**
+   * A private report is readable by the person who asked it and by nobody
+   * else — deliberately including the journey's lead (docs 20 §6.4). Every
+   * other owner-only power in this document is about the journey; this is
+   * about one member's own question, and a lead-sees-everything carve-out
+   * would make "private" a promise the product does not keep.
+   */
+  const mayReadReport = (report, identity) =>
+    report.visibility !== "private" || report.requestedBy === identity;
+
   async function listReports({ journeyId, identity }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
     const reports = await db.listJourneyReports(journeyId);
     return {
       reports: reports
+        .filter((r) => mayReadReport(r, identity))
         .sort((a, b) => b.requestedAt - a.requestedAt)
         .map(({ PK, SK, ...r }) => r),
     };
@@ -810,6 +849,9 @@ export function createJourneys({ config, db, internal }) {
     await requireMember(meta, identity);
     const report = await db.getJourneyReport(journeyId, reportId);
     if (!report) throw err(404, "report_not_found");
+    // Not-yours and not-there read the same: a 403 here would confirm that a
+    // particular reportId exists and who it belongs to.
+    if (!mayReadReport(report, identity)) throw err(404, "report_not_found");
     const { PK, SK, ...rest } = report;
     return rest;
   }

@@ -187,7 +187,10 @@ export const api = {
   // call returns `{reportId, status:"pending"}` immediately-ish and the
   // finished row is read back separately, the same "mutating call returns a
   // summary" shape every other create endpoint here follows.
-  requestJourneyReport: (id, question) => apiRequest(`/journeys/${id}/reports`, { method: 'POST', body: { question } }),
+  // `visibility` is the report's own, not the journey's: 'private' is
+  // readable by the asker alone (docs 20 §6.4). Defaults public server-side.
+  requestJourneyReport: (id, question, visibility = 'public') =>
+    apiRequest(`/journeys/${id}/reports`, { method: 'POST', body: { question, visibility } }),
   listJourneyReports: id => apiRequest(`/journeys/${id}/reports`),
   getJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`),
   listJourneyContributors: id => apiRequest(`/journeys/${id}/contributors`),
