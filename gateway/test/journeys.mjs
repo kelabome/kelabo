@@ -148,7 +148,7 @@ async function test(name, fn) {
 await test("journey not found: fails without ever consulting the LLM", async () => {
   const store = makeStore({});
   let called = false;
-  const c = makeContainer({ store, llm: { complete: async () => { called = true; return "x"; } } });
+  const c = makeContainer({ store, llm: { completeRaw: async () => { called = true; return { text: "x" }; } } });
   const result = await generateJourneyReport(c, "nope", { reportId: "r1", question: "q" });
   assert.equal(result.body.status, "failed");
   assert.equal(result.body.error, "journey_not_found");
@@ -167,7 +167,7 @@ await test("success: assembles description + linked kelabo minutes + board into 
   const store = makeStore(seed);
 
   let promptSeen = null;
-  const llm = { complete: async (req) => { promptSeen = req.messages[0].content; return "The project ships in Q3, using React per the kickoff decision."; } };
+  const llm = { completeRaw: async (req) => { promptSeen = req.messages[0].content; return { text: "The project ships in Q3, using React per the kickoff decision.", usage: { inputTokens: 900, outputTokens: 120 } }; } };
   const c = makeContainer({ store, llm });
 
   const result = await generateJourneyReport(c, journeyId, { reportId: "r1", question: "What did we decide about the framework?" });
@@ -199,7 +199,7 @@ await test("a private report never becomes context for someone else's report (do
   };
   const store = makeStore(seed);
   let promptSeen = null;
-  const llm = { complete: async (req) => { promptSeen = req.messages[0].content; return "ok"; } };
+  const llm = { completeRaw: async (req) => { promptSeen = req.messages[0].content; return { text: "ok" }; } };
   const c = makeContainer({ store, llm });
 
   await generateJourneyReport(c, journeyId, { reportId: "r1", question: "How is it going?" });
@@ -211,10 +211,60 @@ await test("a private report never becomes context for someone else's report (do
   assert.equal(promptSeen.includes("Is Bob behind?"), false, "nor its question");
 });
 
+await test("the metering seam: refused before the spend, reported after it, and absent by default (docs 20 §6.5)", async () => {
+  const journeyId = "j-meter";
+  // Absent by default — the self-hosting case, where there is no `c.usage`
+  // at all. This is the assertion that keeps the seam optional.
+  {
+    const store = makeStore(baseSeed(journeyId));
+    const c = makeContainer({ store, llm: { completeRaw: async () => ({ text: "ok", usage: { inputTokens: 5 } }) } });
+    const out = await generateJourneyReport(c, journeyId, { reportId: "r1", question: "q" });
+    assert.equal(out.body.status, "ready");
+  }
+
+  // Reported after the spend, with the provider's own usage record and the
+  // identity that asked — never a locally counted approximation.
+  {
+    const store = makeStore(baseSeed(journeyId));
+    const notes = [];
+    const c = makeContainer({ store, llm: { completeRaw: async () => ({ text: "ok", usage: { inputTokens: 900, outputTokens: 120 } }) } });
+    c.usage = { noteJourneyReport: async (jid, info) => notes.push({ jid, ...info }) };
+    await generateJourneyReport(c, journeyId, { reportId: "r1", question: "q", identity: "asker@example.com" });
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].jid, journeyId);
+    assert.equal(notes[0].identity, "asker@example.com");
+    assert.deepEqual(notes[0].usage, { inputTokens: 900, outputTokens: 120 });
+  }
+
+  // A meter that throws must not turn a generated answer into a failed
+  // report: the spend already happened, and the reader is owed the answer.
+  {
+    const store = makeStore(baseSeed(journeyId));
+    const c = makeContainer({ store, llm: { completeRaw: async () => ({ text: "ok" }) } });
+    c.usage = { noteJourneyReport: async () => { throw new Error("meter down"); } };
+    const out = await generateJourneyReport(c, journeyId, { reportId: "r1", question: "q" });
+    assert.equal(out.body.status, "ready");
+  }
+
+  // Refused before the spend: no provider call at all, and the report is
+  // marked failed with the refusal's own reason.
+  {
+    const store = makeStore(baseSeed(journeyId));
+    let called = false;
+    const c = makeContainer({ store, llm: { completeRaw: async () => { called = true; return { text: "ok" }; } } });
+    c.usage = { allowJourneyReport: async () => ({ ok: false, reason: "journey_suspended" }) };
+    const out = await generateJourneyReport(c, journeyId, { reportId: "r1", question: "q" });
+    assert.equal(called, false, "a refusal must come before the spend, not after");
+    assert.equal(out.body.status, "failed");
+    assert.equal(out.body.error, "journey_suspended");
+    assert.equal(store.items.get(`${journeyPk(journeyId)}|REPORT#r1`).status, "failed");
+  }
+});
+
 await test("llm failure: the report row is marked failed with a reason, not left pending", async () => {
   const journeyId = "j2";
   const store = makeStore(baseSeed(journeyId));
-  const llm = { complete: async () => { throw new Error("provider unreachable"); } };
+  const llm = { completeRaw: async () => { throw new Error("provider unreachable"); } };
   const c = makeContainer({ store, llm });
   const result = await generateJourneyReport(c, journeyId, { reportId: "r1", question: "q" });
   assert.equal(result.body.status, "failed");

@@ -425,6 +425,39 @@ An agent-submitted report (§12.2's `kelabo_journey_report_submit`) writes
 synthesis submitted to be shared should not be indistinguishable from one
 whose author meant it to be private.
 
+### 6.5 The metering seam — two optional calls, no billing on master
+
+A journey question is the one LLM call in this system that belongs to no
+kelabo, so none of the existing per-call accounting reaches it. Master
+carries no billing and never will (doc 19 §4), but it must not make
+billing *impossible* downstream either — a hosted deployment that cannot
+account for this spend has to fork the whole report pipeline to add two
+lines.
+
+So `generateJourneyReport` calls two optional hooks on the container:
+
+- `c.usage?.allowJourneyReport?.(journeyId, { identity, meta })` — before
+  the spend. A `{ ok: false, reason }` marks the report failed with that
+  reason and **never calls the provider**; anything else proceeds. Refusing
+  after the money is spent would be theatre.
+- `c.usage?.noteJourneyReport?.(journeyId, { reportId, identity, usage, meta })`
+  — after it, wrapped so a meter that throws cannot turn a generated
+  answer into a failed report. The spend already happened and the reader
+  is owed the answer.
+
+`c.usage` does not exist in this repository's container, so both are
+no-ops here and the self-hosted behaviour is exactly what it was.
+
+Two supporting changes make the hooks worth having. The internal route
+passes `identity` (`payload.sub` from the internal JWT — the person who
+asked, already verified, previously discarded at the route). And the call
+uses **`llm.completeRaw`** rather than `llm.complete`: they are the same
+request, but `complete` returns only the text and drops the provider's own
+usage record, which is the only trustworthy token count in the system —
+the agent pipeline already reports that same normalized shape
+(`agent/llm.js`). There is no local tokenizer here and there should not
+be one.
+
 ## 7. Message board
 
 A small set of pinned, mutable messages — distinct from a kelabo's own

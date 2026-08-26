@@ -226,7 +226,7 @@ Answer plainly and specifically, citing which kelabo or document a fact came fro
  * route) always gets something to relay back, even when the report row
  * itself could not be updated.
  */
-export async function generateJourneyReport(c, journeyId, { reportId, question }) {
+export async function generateJourneyReport(c, journeyId, { reportId, question, identity }) {
   const markFailed = async (error) => {
     await c.db
       .send(
@@ -245,6 +245,16 @@ export async function generateJourneyReport(c, journeyId, { reportId, question }
 
   const meta = await getJourneyMeta(c, journeyId);
   if (!meta) return markFailed("journey_not_found");
+
+  // Optional metering seam (docs 20 §6.5). Self-hosting deployments run
+  // their own LLM key and have no `c.usage` at all, so both calls are
+  // no-ops here and this file stays the same one in both worlds — the
+  // alternative, forking it downstream, would fork the whole report
+  // pipeline to add two lines. `allow` refuses *before* the spend; the
+  // note below reports the spend after it, the same order every other
+  // metered thing in this system uses.
+  const gate = await c.usage?.allowJourneyReport?.(journeyId, { identity, meta }).catch?.(() => null);
+  if (gate && gate.ok === false) return markFailed(gate.reason || "not_allowed");
 
   let context;
   try {
@@ -265,15 +275,32 @@ export async function generateJourneyReport(c, journeyId, { reportId, question }
   }
 
   let answer;
+  let usage = null;
   try {
-    answer = await llm.complete({
+    // `completeRaw`, not `complete`: the two are the same call, but
+    // `complete` returns only the text and drops the provider's own usage
+    // record on the floor. Keeping it costs nothing here and is the
+    // difference between a deployment being able to account for this spend
+    // and not — the agent pipeline already reports the identical shape
+    // (`agent/llm.js` `normalizeUsage`).
+    const out = await llm.completeRaw({
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: `${context}\n\nQUESTION: ${clip(question, 2000)}` }],
       maxTokens: 2048,
     });
+    answer = out.text;
+    usage = out.usage ?? null;
   } catch (err) {
     c.logError("journey_report_llm_failed", err, { journeyId, reportId });
     return markFailed("llm_failed");
+  }
+
+  // Reported after the spend, never in its path: a meter that throws must
+  // not turn a generated answer into a failed report.
+  try {
+    await c.usage?.noteJourneyReport?.(journeyId, { reportId, identity, usage, meta });
+  } catch (err) {
+    c.logError("journey_report_meter_failed", err, { journeyId, reportId });
   }
 
   const generatedAt = Date.now();

@@ -171,7 +171,14 @@ async function route(c, req, res) {
     if (!payload) return send(res, 401, { error: "unauthenticated" });
     const body = await readJson(req).catch(() => ({}));
     c.log("internal_request", { journeyId, action: "report", sub: payload.sub, reportId: body?.reportId });
-    const result = await generateJourneyReport(c, journeyId, { reportId: body?.reportId, question: body?.question });
+    // `payload.sub` is the identity that asked — carried through so a
+    // deployment that meters this call knows who to attribute it to. On
+    // master nothing reads it; see `generateJourneyReport`'s own note.
+    const result = await generateJourneyReport(c, journeyId, {
+      reportId: body?.reportId,
+      question: body?.question,
+      identity: payload.sub,
+    });
     return send(res, result.status, result.body);
   }
 
