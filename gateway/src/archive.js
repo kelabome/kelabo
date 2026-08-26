@@ -14,7 +14,7 @@ import {
   stampKelaboTtl,
 } from "./db.js";
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
-import { settleKelaboJoin } from "./journeys.js";
+import { settleKelaboJoin, markLinkEnded } from "./journeys.js";
 
 export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   const meta = await getMeta(c, kelaboId);
@@ -173,6 +173,11 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
     for (const link of links) {
       await settleKelaboJoin(c, link.journeyId, kelaboId, participantIdentities).catch((err) =>
         c.logError("journey_join_settle_failed", err, { kelaboId, journeyId: link.journeyId })
+      );
+      // The journey's Kelabos tab routes on this snapshot; without the stamp
+      // an ended kelabo keeps pointing at the join page (docs 20 §10).
+      await markLinkEnded(c, link.journeyId, kelaboId, endedAt).catch((err) =>
+        c.logError("journey_link_end_stamp_failed", err, { kelaboId, journeyId: link.journeyId })
       );
     }
   } catch (err) {

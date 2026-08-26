@@ -21,14 +21,14 @@ import { JourneyHelmExtra } from '../variant'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
 import { timeAgo } from '../timeAgo'
 
-// A journey link (docs 20 §9.3) persists a kelabo's status only as a
-// point-in-time snapshot, not live, so this can be stale once that kelabo's
-// real status has moved on. It only needs to distinguish "already
-// archived" (the one shape `/kelabos/:id` actually resolves) from
-// everything else: `/scheduled/:id` does its own live fetch and renders
-// whatever the current status actually is (live, cancelled, or still
-// scheduled), so staleness there self-corrects on load rather than 404ing
-// the way a hard-coded `/kelabos/:id` did for anything not yet archived.
+// A journey link (docs 20 §9.3) persists a kelabo's status as a snapshot:
+// taken at link time and re-stamped "ended" by the gateway's end path
+// (`markLinkEnded`), so an ended kelabo routes to its record rather than a
+// join page nobody can use. Staleness in the other shapes self-corrects on
+// load: `/scheduled/:id` does its own live fetch and renders whatever the
+// current status actually is, and `/join/:id` redirects an ended kelabo to
+// `/kelabos/:id` itself (which also rescues rows linked before the end
+// stamp existed).
 function kelaboHref(kelaboId, status) {
   if (status === 'active') return `/join/${kelaboId}`
   if (status === 'ended') return `/kelabos/${kelaboId}`

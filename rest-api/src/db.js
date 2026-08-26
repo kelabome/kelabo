@@ -494,15 +494,29 @@ export function createDb({ config, client } = {}) {
     const expr = [sets.length ? `SET ${sets.join(", ")}` : "", removes.length ? `REMOVE ${removes.join(", ")}` : ""]
       .filter(Boolean)
       .join(" ");
-    await doc.send(
-      new UpdateCommand({
-        TableName: T.journeys,
-        Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
-        UpdateExpression: expr,
-        ExpressionAttributeNames: names,
-        ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
-      })
-    );
+    try {
+      await doc.send(
+        new UpdateCommand({
+          TableName: T.journeys,
+          Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+          UpdateExpression: expr,
+          // Update-if-exists, which is what every caller assumes. DynamoDB's
+          // UpdateItem CREATES the item when it is absent, so a caller racing
+          // deleteJourney would otherwise resurrect a phantom META — one that
+          // has counters but no ownerIdentity/status, which nobody can ever
+          // delete again (requireOwner has nothing to match) and which makes
+          // the purge guard in records.js block the kelabo's deletion forever.
+          ConditionExpression: "attribute_exists(PK)",
+          ExpressionAttributeNames: names,
+          ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
+        })
+      );
+    } catch (e) {
+      // The journey was deleted between the caller's requireJourney and this
+      // write. The update has nothing to land on and nothing to protect —
+      // dropping it IS the correct outcome, not an error.
+      if (e?.name !== "ConditionalCheckFailedException") throw e;
+    }
   }
 
   // Owner-only structural transitions, conditional on the status they expect —
@@ -825,22 +839,44 @@ export function createDb({ config, client } = {}) {
   }
 
   async function unlinkKelaboFromJourney({ journeyId, kelaboId, now }) {
-    await doc.send(
-      new TransactWriteCommand({
-        TransactItems: [
-          { Delete: { TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}` } } },
-          {
-            Update: {
-              TableName: T.journeys,
-              Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
-              UpdateExpression: "SET kelaboCount = if_not_exists(kelaboCount, :one) - :one, updatedAt = :now",
-              ExpressionAttributeValues: { ":one": 1, ":now": now },
+    try {
+      await doc.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            { Delete: { TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}` } } },
+            {
+              Update: {
+                TableName: T.journeys,
+                Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+                UpdateExpression: "SET kelaboCount = if_not_exists(kelaboCount, :one) - :one, updatedAt = :now",
+                // Without this, unlinking a link whose journey is already
+                // deleted (closeAccount does exactly that, and any unlink can
+                // race deleteJourney) makes UpdateItem CREATE a phantom META —
+                // owner-less, status-less, undeletable — which resurrects the
+                // journey in the eyes of the purge guard and blocks the
+                // kelabo's own deletion forever.
+                ConditionExpression: "attribute_exists(SK)",
+                ExpressionAttributeValues: { ":one": 1, ":now": now },
+              },
             },
-          },
-          { Delete: { TableName: T.kelabos, Key: { PK: `KELABO#${kelaboId}`, SK: `JOURNEY#${journeyId}` } } },
-        ],
-      })
-    );
+            { Delete: { TableName: T.kelabos, Key: { PK: `KELABO#${kelaboId}`, SK: `JOURNEY#${journeyId}` } } },
+          ],
+        })
+      );
+    } catch (e) {
+      const metaGone =
+        e?.name === "TransactionCanceledException" &&
+        (e.CancellationReasons || [])[1]?.Code === "ConditionalCheckFailed";
+      if (!metaGone) throw e;
+      // Journey META no longer exists: there is no counter to decrement, only
+      // the two link rows to tidy. Plain deletes — idempotent, no conditions.
+      await doc.send(
+        new DeleteCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}` } })
+      );
+      await doc.send(
+        new DeleteCommand({ TableName: T.kelabos, Key: { PK: `KELABO#${kelaboId}`, SK: `JOURNEY#${journeyId}` } })
+      );
+    }
   }
 
   async function getJourneyLink(journeyId, kelaboId) {
@@ -1037,9 +1073,14 @@ export function createDb({ config, client } = {}) {
    * query, not after — cheap because entries are already few per journey.
    */
   async function listJourneyTimeline(journeyId, { type, before, limit }) {
-    const keyCond = before ? "PK = :pk AND SK < :sk" : "PK = :pk AND begins_with(SK, :sk)";
+    // BETWEEN, not a bare `<`: many non-TL# rows share this partition and
+    // sort below "TL#" (BOARDMSG#, DOC#, LINK#, META, REPORT#, …). A
+    // descending `SK <` query walked into them once TL# rows ran out and
+    // returned them as blank timeline entries. The gateway's twin
+    // (queryJourneyTimeline) carries the same bound.
+    const keyCond = before ? "PK = :pk AND SK BETWEEN :floor AND :sk" : "PK = :pk AND begins_with(SK, :sk)";
     const values = before
-      ? { ":pk": `JOURNEY#${journeyId}`, ":sk": `TL#${pad(before)}` }
+      ? { ":pk": `JOURNEY#${journeyId}`, ":floor": "TL#", ":sk": `TL#${pad(before)}` }
       : { ":pk": `JOURNEY#${journeyId}`, ":sk": "TL#" };
     const res = await doc.send(
       new QueryCommand({

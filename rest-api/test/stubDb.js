@@ -450,6 +450,12 @@ export function createDb() {
     async getJourneyMeta(journeyId) {
       return journeys.get(mkey(`JOURNEY#${journeyId}`, "META")) || null;
     },
+    // Update-if-exists — this now matches src/db.js, whose UpdateItem carries
+    // ConditionExpression attribute_exists(PK) and swallows the failure. It
+    // did NOT always: raw DynamoDB UpdateItem upserts, and this stub's
+    // if-exists guard was precisely the fidelity gap that hid the phantom-META
+    // resurrection bug (a deleted journey brought back, owner-less, by a
+    // racing counter update, blocking its kelabos' purge forever).
     async updateJourneyMeta(journeyId, updates) {
       const item = journeys.get(mkey(`JOURNEY#${journeyId}`, "META"));
       if (!item) return;
@@ -619,6 +625,9 @@ export function createDb() {
         ...mirror,
       });
     },
+    // Matches src/db.js's fixed shape: the META decrement is conditional on
+    // META existing, and when it is gone the two link rows are still deleted
+    // (the real code falls back to plain deletes on that condition failure).
     async unlinkKelaboFromJourney({ journeyId, kelaboId, now }) {
       journeys.delete(mkey(`JOURNEY#${journeyId}`, `LINK#${kelaboId}`));
       const meta = journeys.get(mkey(`JOURNEY#${journeyId}`, "META"));

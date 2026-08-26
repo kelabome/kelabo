@@ -52,6 +52,16 @@ const BOARD_LIMIT = 50;
 // than the terse digest agent/journeyContext.js pins into the system prompt
 // per turn (5) — generous without being the unbounded whole collection.
 const JOURNEY_BOARD_LIMIT = 20;
+// Per-message clip for that dedicated read. Roomier than the bundle's 500
+// (a deliberate board read wants the note, not a teaser) but bounded: the
+// write cap is 4,000 per message, and 20 × 4,000 unclipped was the one
+// tool response that could dwarf every other budget on this surface.
+const JOURNEY_BOARD_CLIP = 2000;
+// kelabo_journey_info returns the description in full spirit but not in
+// full 20,000-char write-cap glory — the same 4,000 the context bundle
+// allows. The description is prose about the journey, not a document; the
+// documents tool is the unbounded read, deliberately, one item at a time.
+const JOURNEY_INFO_DESCRIPTION_CLIP = 4000;
 // The pull-tool list budgets (docs 20 §12.3). Same posture as
 // JOURNEY_BOARD_LIMIT: generous for a deliberate read, never unbounded.
 const JOURNEY_KELABOS_LIMIT = 20;
@@ -827,7 +837,7 @@ export function createTunnel(c) {
       title: meta.title || "",
       visibility: meta.visibility,
       status: meta.status,
-      description,
+      description: clip(description, JOURNEY_INFO_DESCRIPTION_CLIP),
       health: meta.health ?? null,
       progress: typeof meta.progress === "number" ? meta.progress : null,
       counts: {
@@ -902,7 +912,7 @@ export function createTunnel(c) {
       journeys: [],
       messages: heads.map((m) => ({
         msgId: m.msgId,
-        content: m.content || "",
+        content: clip(m.content || "", JOURNEY_BOARD_CLIP),
         ...(m.createdBy ? { createdBy: m.createdBy } : {}),
         ...(m.createdAt ? { createdAt: m.createdAt } : {}),
       })),

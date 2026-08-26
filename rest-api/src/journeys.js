@@ -69,7 +69,12 @@ export function createJourneys({ config, db, internal }) {
 
   async function requireJourney(journeyId) {
     const meta = await db.getJourneyMeta(journeyId);
-    if (!meta) throw err(404, "journey_not_found");
+    // A META missing ownerIdentity/status is a phantom left by an unguarded
+    // UpdateItem racing deleteJourney (createJourney always writes both).
+    // Every access rule downstream assumes those fields exist — a phantom
+    // passed 404 here only to 403 on requireOwner with no owner at all, which
+    // made a deleted journey undeletable and its kelabos unpurgeable.
+    if (!meta || !meta.ownerIdentity || !meta.status) throw err(404, "journey_not_found");
     return meta;
   }
 

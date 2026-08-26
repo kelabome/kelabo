@@ -352,9 +352,11 @@ the client re-fetches the finished row via GET.
   `journeys: [{id, title, visibility}]` — the link-time snapshot from the
   kelabo's own `JOURNEY#` mirror rows, feeding the "Part of: …" chips.
 - `DELETE /records/:archiveId`, **host-purge outcome only**: 409
-  `kelabo_in_journey` while any `JOURNEY#` mirror row exists on the kelabo —
-  unlink from every journey first (docs 20 §14.3). The participant-only
-  "drop from my list" outcome is untouched.
+  `kelabo_in_journey` while a `JOURNEY#` mirror row on the kelabo points at a
+  journey that still exists and is live — unlink from every journey first
+  (docs 20 §14.3). A mirror whose journey is deleted (or reduced to a
+  phantom META) is treated as no link and tidied in passing. The
+  participant-only "drop from my list" outcome is untouched.
 
 ### 3.6 Health
 

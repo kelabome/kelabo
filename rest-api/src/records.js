@@ -221,8 +221,19 @@ export function createRecords({ config, db, s3 }) {
       // No catch on the read: a transient failure must abort the purge (it
       // retries), not read as "journey gone" and delete a live mirror.
       const journey = await db.getJourneyMeta(link.journeyId);
-      if (journey) liveLinks++;
-      else await db.deleteKelaboJourneyMirror(kelaboId, link.journeyId).catch(() => {});
+      // A META without ownerIdentity/status is not a journey — it is a
+      // phantom resurrected by an unguarded UpdateItem racing deleteJourney
+      // (createJourney always writes both fields). Nobody can ever delete a
+      // phantom through the API (requireOwner has no owner to match), so
+      // counting it live would block this purge forever. Treat it as dead and
+      // tidy both it and the mirror in passing.
+      const live = journey && journey.ownerIdentity && journey.status;
+      if (live) {
+        liveLinks++;
+        continue;
+      }
+      if (journey) await db.deleteJourneyMeta(link.journeyId).catch(() => {});
+      await db.deleteKelaboJourneyMirror(kelaboId, link.journeyId).catch(() => {});
     }
     if (liveLinks) throw err(409, "kelabo_in_journey");
 

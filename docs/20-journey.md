@@ -660,9 +660,13 @@ Touch-ups to existing endpoints:
 - `GET /kelabos/:id` (and `/scheduled`) responses gain
   `journeys: [{id, title, visibility}]`.
 - `DELETE /records/:archiveId`, **host-purge outcome only**: 409
-  `kelabo_in_journey` while the kelabo's `JOURNEY#` mirror partition is
-  non-empty (§14.3). The participant-only "drop from my list" outcome is
-  untouched, because it never destroys anything a journey depends on.
+  `kelabo_in_journey` while the kelabo carries a `JOURNEY#` mirror whose
+  journey still **exists and is live** (§14.3). A mirror whose journey is
+  gone — or whose META is a phantom (no `ownerIdentity`/`status`, the trace
+  of an unguarded UpdateItem racing `deleteJourney`) — is treated as no link
+  and tidied in passing, so a stale mirror can never block a purge forever.
+  The participant-only "drop from my list" outcome is untouched, because it
+  never destroys anything a journey depends on.
 
 ## 12. Agent / MCP integration
 

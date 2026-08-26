@@ -67,6 +67,14 @@ export async function activeDocuments(c, journeyId, limit = 5) {
 // kelabos — decisions and action items are what a report gets asked about
 // by name; topics are dropped because the summary already narrates them.
 const LINKED_KELABO_LIMIT = 8;
+// Minutes are LLM-written and usually short, but "usually" is not a budget:
+// nothing upstream caps them, and these summaries ride into system prompts
+// (push) and tool results (pull) for up to 20 kelabos at a time. The caps
+// are deliberately roomy — they exist to bound the pathological case, not
+// to trim ordinary minutes.
+const MINUTES_SUMMARY_CLIP = 1500;
+const MINUTES_ITEM_CLIP = 300;
+const MINUTES_ITEMS_LIMIT = 12;
 export async function linkedKelaboSummaries(c, journeyId, limit = LINKED_KELABO_LIMIT) {
   const links = (await queryJourneyItems(c, journeyId, "LINK#"))
     .sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0))
@@ -84,11 +92,17 @@ export async function linkedKelaboSummaries(c, journeyId, limit = LINKED_KELABO_
         // Distinguishes "no minutes yet" from "minutes with nothing in them"
         // for the pull tools (docs 20 §12.3); the push context ignores it.
         hasMinutes: !!minutes,
-        summary: minutes?.summary || "",
-        decisions: (minutes?.decisions ?? []).map((d) => (typeof d === "string" ? d : d.text)).filter(Boolean),
+        summary: clip(minutes?.summary || "", MINUTES_SUMMARY_CLIP),
+        decisions: (minutes?.decisions ?? [])
+          .map((d) => (typeof d === "string" ? d : d.text))
+          .filter(Boolean)
+          .slice(0, MINUTES_ITEMS_LIMIT)
+          .map((d) => clip(d, MINUTES_ITEM_CLIP)),
         actionItems: (minutes?.actionItems ?? [])
           .map((a) => (typeof a === "string" ? a : [a.text, a.owner && `(${a.owner})`].filter(Boolean).join(" ")))
-          .filter(Boolean),
+          .filter(Boolean)
+          .slice(0, MINUTES_ITEMS_LIMIT)
+          .map((a) => clip(a, MINUTES_ITEM_CLIP)),
       };
     })
   );
@@ -373,9 +387,15 @@ export async function resolveJourneyForKelabo(c, kelaboId, journeyId) {
  * everything at or after that timestamp.
  */
 export async function queryJourneyTimeline(c, journeyId, { type, before, limit = 20, viewer = null } = {}) {
-  const keyCond = before ? "PK = :pk AND SK < :before" : "PK = :pk AND begins_with(SK, :sk)";
+  // BETWEEN, not a bare `<`: the journey partition holds many non-TL# rows
+  // that sort below "TL#" (BOARDMSG#, DOC#, LINK#, META, REPORT#, …), and a
+  // descending `SK < :before` query walks straight into them once the TL#
+  // rows are exhausted — the agent then received blank entries built from
+  // rows that never had `type`/`summary`/`at`. "TL#" is the correct lower
+  // bound because every timeline key is strictly greater than the bare prefix.
+  const keyCond = before ? "PK = :pk AND SK BETWEEN :floor AND :before" : "PK = :pk AND begins_with(SK, :sk)";
   const values = before
-    ? { ":pk": journeyPk(journeyId), ":before": `TL#${pad(before, 13)}` }
+    ? { ":pk": journeyPk(journeyId), ":floor": "TL#", ":before": `TL#${pad(before, 13)}` }
     : { ":pk": journeyPk(journeyId), ":sk": "TL#" };
   const out = await c.db.send(
     new QueryCommand({
@@ -583,5 +603,34 @@ export async function settleKelaboJoin(c, journeyId, kelaboId, participantIdenti
   }
   for (const identity of participantIdentities || []) {
     await bumpJourneyContributor(c, journeyId, identity, "kelaboJoinCount").catch(() => {});
+  }
+}
+
+/**
+ * Stamp a journey's `LINK#` row `statusSnapshot: "ended"` when the kelabo
+ * ends. The snapshot is otherwise taken once at link time — and a kelabo
+ * created *under* a journey is linked while `active`, so without this its
+ * row in the journey's Kelabos tab said "active" forever and the SPA routed
+ * every click to the join page of a kelabo nobody can join any more
+ * (`kelaboHref` in JourneyDetail.jsx picks the route from this field).
+ *
+ * Conditional on the LINK row existing: an unlink racing the end must not
+ * make UpdateItem create a bare LINK row the journey never asked for. The
+ * failure is swallowed for the same reason — no link, nothing to stamp.
+ */
+export async function markLinkEnded(c, journeyId, kelaboId, endedAt) {
+  try {
+    await c.db.send(
+      new UpdateCommand({
+        TableName: journeysTable(c),
+        Key: { PK: journeyPk(journeyId), SK: `LINK#${kelaboId}` },
+        UpdateExpression: "SET statusSnapshot = :ended, endedAtSnapshot = :at",
+        ConditionExpression: "attribute_exists(SK)",
+        ExpressionAttributeValues: { ":ended": "ended", ":at": endedAt },
+      })
+    );
+  } catch (err) {
+    if (err.name === "ConditionalCheckFailedException") return; // unlinked meanwhile
+    throw err;
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useTypeAnywhere } from '../useTypeAnywhere'
 import { api } from '../api'
 import { pushSettings } from '../settings'
@@ -32,7 +32,14 @@ export default function Join() {
   useEffect(() => {
     api.getKelabo(id)
       .then(m => {
-        if (m.status && m.status !== 'active') {
+        if (m.status === 'ended') {
+          // An ended kelabo cannot be joined, but it can be read. Links to
+          // /join outlive the kelabo (a journey's Kelabos tab held one for as
+          // long as its status snapshot said "active") — send the visitor to
+          // the record instead of a dead-end banner; RecordDetail applies its
+          // own access rules.
+          navigate(`/kelabos/${id}`, { replace: true })
+        } else if (m.status && m.status !== 'active') {
           setState('invalid')
         } else {
           setKelabo(m)
@@ -40,7 +47,7 @@ export default function Join() {
         }
       })
       .catch(() => setState('invalid'))
-  }, [id])
+  }, [id, navigate])
 
   const join = async () => {
     const displayNameValue = name.trim()
@@ -79,6 +86,14 @@ export default function Join() {
               <h1 className="page-title">Can't join this kelabo</h1>
               <Banner kind="danger">This invite link is invalid or the kelabo has ended.</Banner>
               <p className="page-sub page-sub-tight">Ask the host for a fresh invite link.</p>
+              {/* An ended kelabo's live META eventually expires, so this page
+                  cannot tell "bad link" from "long over" — but the archived
+                  record outlives the META, so offer it to someone signed in. */}
+              {identity && (
+                <p className="page-sub page-sub-tight">
+                  If it already ended and you were part of it, <Link to={`/kelabos/${id}`}>its record may be available</Link>.
+                </p>
+              )}
             </>
           )}
 

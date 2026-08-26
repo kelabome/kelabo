@@ -448,6 +448,66 @@ await test("purge guard: a host-purge of a linked kelabo is refused with kelabo_
   assert.equal(result.outcome, "purged");
 });
 
+// --- phantom META (the resurrected-journey bug) ------------------------------
+//
+// DynamoDB's UpdateItem CREATES the item it was asked to update when it is
+// absent. Before the ConditionExpression guards in db.js, an unlink or a
+// counter update racing deleteJourney resurrected the journey's META as a
+// "phantom" — counters only, no ownerIdentity, no status. The purge guard
+// counted it live (kelabo undeletable forever), requireOwner had no owner to
+// match (journey un-re-deletable), and unlink 404'd (the LINK# was already
+// cascaded away). These tests pin both halves of the fix: phantoms are no
+// longer created, and pre-existing ones are treated as dead and tidied.
+
+await test("phantom META: purge treats an owner-less journey META as dead, tidies phantom and mirror, and the journey API 404s it", async () => {
+  await seedKelabo({ kelaboId: "k7", host: OWNER, status: "ended" });
+  db.__putHistory({
+    archiveId: "k7",
+    kelaboId: "k7",
+    host: OWNER,
+    endedAt: Date.now(),
+    participantIdentities: [OWNER],
+  });
+  // Arrange the poisoned state a pre-fix deployment could leave behind: a
+  // phantom META on the journey partition and a dangling mirror on the kelabo.
+  db.__putJourneyItem("phantom-j", "META", { journeyId: "phantom-j", kelaboCount: 0, updatedAt: Date.now() });
+  db.__putKelaboItem("k7", "JOURNEY#phantom-j", { journeyId: "phantom-j", linkedAt: Date.now() });
+
+  // The phantom is not a journey to the API — 404, not a 403 with no owner.
+  await assert.rejects(
+    journeys.getJourney({ journeyId: "phantom-j", identity: OWNER }),
+    (e) => e.status === 404 && e.code === "journey_not_found",
+  );
+
+  const result = await records.deleteRecord({ identity: OWNER, archiveId: "k7" });
+  assert.equal(result.outcome, "purged", "an owner-less META must not block the purge");
+  assert.equal(await db.getJourneyMeta("phantom-j"), null, "the phantom is tidied in passing");
+  assert.equal((await db.listKelaboJourneyLinks("k7")).length, 0, "the dangling mirror is tidied in passing");
+});
+
+await test("a deleted journey stays deleted: late unlink and META updates no-op instead of resurrecting a phantom", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  await seedKelabo({ kelaboId: "k8", host: OWNER, status: "ended" });
+  db.__putHistory({
+    archiveId: "k8",
+    kelaboId: "k8",
+    host: OWNER,
+    endedAt: Date.now(),
+    participantIdentities: [OWNER],
+  });
+  await journeys.linkKelabo({ journeyId: j.journeyId, identity: OWNER, kelaboId: "k8" });
+  await journeys.deleteJourney({ journeyId: j.journeyId, identity: OWNER });
+
+  // closeAccount's exact shape: unlink every mirror without checking whether
+  // the journey still exists — plus a raw counter update racing the delete.
+  await db.unlinkKelaboFromJourney({ journeyId: j.journeyId, kelaboId: "k8", now: Date.now() });
+  await db.updateJourneyMeta(j.journeyId, { kelaboCount: 1, updatedAt: Date.now() });
+
+  assert.equal(await db.getJourneyMeta(j.journeyId), null, "neither write may resurrect the META");
+  const result = await records.deleteRecord({ identity: OWNER, archiveId: "k8" });
+  assert.equal(result.outcome, "purged");
+});
+
 await test("purge guard: does not affect a participant merely dropping their own copy", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
   await seedKelabo({ kelaboId: "k6", host: OWNER, status: "ended" });
