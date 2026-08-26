@@ -334,10 +334,8 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
           <div className="sr-main">
             <div className="sr-title">Assistant can post to the board</div>
             <div className="sr-sub">
-              Lets an attached assistant write or edit pinned board messages on its own initiative — for
-              example recording “X has been added and tested” when a piece of work completes, so it carries
-              to the journey's next kelabo. Off, the board stays human-curated and the assistant is refused
-              with a clear answer.{isOwner ? '' : ' Only the journey lead can change this.'}
+              Lets an attached assistant pin its own board messages — the outcome of work it finished.
+              {isOwner ? '' : ' Only the journey lead can change this.'}
             </div>
           </div>
           {isOwner && journey.status === 'active'
