@@ -14,7 +14,7 @@
 // Reuses gateway/src/journeys.js's own reducers — the same rows a journey
 // report reads — rather than a second copy of the same reduction.
 import { queryKelaboItems } from "../db.js";
-import { getJourneyMeta, latestDescription, activeBoardMessages, activeDocuments, linkedKelaboSummaries } from "../journeys.js";
+import { getJourneyMeta, latestDescription, activeBoardMessages, activeDocuments, linkedKelaboSummaries, listReadyReports } from "../journeys.js";
 
 // Small on purpose, the same reasoning as HISTORY_LIMIT (history.js): this
 // is pinned into the system prompt for EVERY turn of the kelabo, so its
@@ -32,6 +32,16 @@ const OTHER_KELABOS_LIMIT = 5;
 // on request — three short reference documents, not the whole library.
 const DOCUMENT_LIMIT = 3;
 const DOCUMENT_CLIP = 800;
+// Ready reports were the one §12.3-promised piece this digest omitted: a
+// question the journey has already answered (asked from the Helm, or an
+// earlier kelabo's synthesis) was invisible to the live assistant, which
+// would cheerfully dispatch a fresh lookup for it. Public reports only —
+// this digest is read out to a whole room, and a private report belongs to
+// the one person who asked it (docs 20 §6.4). Clips match the pull bundle's
+// question clip and stay tighter on the answer: per-turn cost, as above.
+const REPORT_LIMIT = 3;
+const REPORT_QUESTION_CLIP = 200;
+const REPORT_ANSWER_CLIP = 600;
 const clip = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "…" : s || "");
 
 /**
@@ -46,12 +56,13 @@ export async function loadJourneyContext(c, kelaboId) {
   const journeys = await Promise.all(
     chosen.map(async (link) => {
       const journeyId = link.journeyId;
-      const [meta, description, board, kelabos, documents] = await Promise.all([
+      const [meta, description, board, kelabos, documents, reports] = await Promise.all([
         getJourneyMeta(c, journeyId).catch(() => null),
         latestDescription(c, journeyId).catch(() => ""),
         activeBoardMessages(c, journeyId, BOARD_LIMIT).catch(() => []),
         linkedKelaboSummaries(c, journeyId).catch(() => []),
         activeDocuments(c, journeyId, DOCUMENT_LIMIT).catch(() => []),
+        listReadyReports(c, journeyId, REPORT_LIMIT).catch(() => []),
       ]);
       if (!meta) return null;
       // A kelabo with nothing to say (no minutes yet, or the live kelabo
@@ -68,6 +79,10 @@ export async function loadJourneyContext(c, kelaboId) {
         board: board.map((m) => clip(m.content, 300)),
         documents: documents.map((d) => ({ title: d.title, content: clip(d.content, DOCUMENT_CLIP) })),
         kelabos: others,
+        reports: reports.map((r) => ({
+          question: clip(r.question, REPORT_QUESTION_CLIP),
+          answer: clip(r.answer, REPORT_ANSWER_CLIP),
+        })),
       };
     })
   );

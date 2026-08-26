@@ -97,6 +97,27 @@ function clipMessages(messages, limit = 4000) {
 }
 
 /**
+ * The `answer` field of a *partially generated* result JSON, or "".
+ *
+ * While the concluding turn streams, the only part worth showing a room is
+ * the answer text itself — everything around it is scaffolding. The field is
+ * recovered with a tolerant scan rather than JSON.parse (the object is by
+ * definition incomplete), and a trailing half-escape is dropped rather than
+ * rendered.
+ */
+export function partialAnswer(text) {
+  const m = /"answer"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(String(text ?? ""));
+  if (!m) return "";
+  let raw = m[1];
+  if (/(^|[^\\])(\\\\)*\\$/.test(raw)) raw = raw.slice(0, -1); // torn escape at the tail
+  try {
+    return JSON.parse(`"${raw}"`);
+  } catch {
+    return "";
+  }
+}
+
+/**
  * A single ephemeral research worker. Created for ONE brief, runs a multi-call
  * tool loop on the strong (pro) model, then returns a SubAgentResult. Its context
  * is never reused — the caller keeps only the returned result.
@@ -140,6 +161,24 @@ export class SubAgent {
     this.onProgress?.({ text, steps: [...this.steps] });
   }
 
+  /**
+   * Called with the accumulated text of a streaming turn. When that text has
+   * started to carry the result's `answer` field, forward it (throttled — the
+   * SSE fan-out serves every subscriber in the room) so the board card shows
+   * the answer growing instead of a spinner for the whole generation. A turn
+   * that becomes a tool call never grows an `answer`, so this stays silent
+   * through research and only speaks during the conclusion — exactly the
+   * turn the room is waiting on.
+   */
+  streamDelta(textSoFar) {
+    const partial = partialAnswer(textSoFar);
+    if (partial.length < 24) return; // too little to be worth a repaint
+    const now = Date.now();
+    if (now - (this.lastDeltaPushAt ?? 0) < 400) return;
+    this.lastDeltaPushAt = now;
+    this.onProgress?.({ text: "Writing the answer…", steps: [...this.steps], partial });
+  }
+
   availableTools() {
     return TOOLS.filter((t) => {
       if (t.name === "web_search") return this.capabilities.includes("web_search");
@@ -170,7 +209,14 @@ export class SubAgent {
         messages: clipMessages(messages),
         iteration: i + 1,
       });
-      const res = await this.llm.completeRaw({ model: this.model, system, messages, tools, maxTokens: 2048 });
+      const res = await this.llm.completeRaw({
+        model: this.model,
+        system,
+        messages,
+        tools,
+        maxTokens: 2048,
+        onDelta: (t) => this.streamDelta(t),
+      });
       text = res.text;
       this.usage = addUsage(this.usage, res.usage);
       this.debug?.(kelaboId, {
@@ -233,7 +279,17 @@ export class SubAgent {
     try {
       // completeRaw (not complete) so the force-conclude call's tokens are
       // counted too — it is a full extra round trip over the whole thread.
-      const res = await this.llm.completeRaw({ model: this.model, system, messages: convo, maxTokens: 1024 });
+      const res = await this.llm.completeRaw({
+        model: this.model,
+        system,
+        messages: convo,
+        maxTokens: 1024,
+        // The reply is one JSON object by instruction; JSON mode makes the
+        // provider enforce it, so this second round trip stops failing to
+        // parse — which is what used to turn one extra call into a lost turn.
+        responseFormat: "json",
+        onDelta: (t) => this.streamDelta(t),
+      });
       text = res.text;
       concludeUsage = res.usage;
       this.usage = addUsage(this.usage, concludeUsage);

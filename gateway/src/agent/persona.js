@@ -67,7 +67,7 @@ ${entries}`;
  * injection: this is reference material other people wrote — a
  * description, pinned notes, another kelabo's minutes — not instructions,
  * and not the current state of anything.
- * @param {Array<{title:string, description:string, health:?string, progress:?number, board:string[], documents:{title:string,content:string}[], kelabos:{title:string,summary:string,decisions:string[],actionItems:string[]}[]}>} journeys
+ * @param {Array<{title:string, description:string, health:?string, progress:?number, board:string[], documents:{title:string,content:string}[], kelabos:{title:string,summary:string,decisions:string[],actionItems:string[]}[], reports?:{question:string,answer:string}[]}>} journeys
  */
 function renderJourneyContext(journeys) {
   if (!journeys.length) return "";
@@ -92,6 +92,12 @@ function renderJourneyContext(journeys) {
             j.kelabos
               .map((k) => `- ${k.title}: ${[k.summary, ...k.decisions, ...k.actionItems].filter(Boolean).join("; ")}`)
               .join("\n")
+        );
+      }
+      if (j.reports?.length) {
+        parts.push(
+          "Questions this journey has already answered (do not research these again — answer from here, citing the journey):\n" +
+            j.reports.map((r) => `- Q: ${r.question}\n  A: ${r.answer}`).join("\n")
         );
       }
       return parts.join("\n");

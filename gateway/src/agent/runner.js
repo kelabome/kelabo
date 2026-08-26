@@ -7,6 +7,13 @@ import { WEB_SEARCH_ENABLED } from "./subagents.js";
 import { languageName } from "./language.js";
 
 const SUMMARIZE_TIMEOUT_MS = 90_000;
+// How stale the push journey digest may grow before a caption re-checks it.
+// The digest is baked into the worker's system prompt (deliberately, for
+// provider prompt caching), so this is a compromise between two costs: a
+// note pinned mid-kelabo that the assistant never sees, and a cache-busting
+// system-prompt rewrite on every turn. One minute keeps mid-kelabo edits
+// visible without touching the prompt when nothing changed.
+const JOURNEY_REFRESH_MS = 60_000;
 
 export function createAgentDispatcher(c) {
   let worker = null;
@@ -114,9 +121,41 @@ export function createAgentDispatcher(c) {
     }
   }
 
+  /**
+   * Re-read the journey digest for a kelabo whose context is already built,
+   * and tell the worker only when it actually changed. Fire-and-forget from
+   * the caption path — a refresh must never delay the caption it rode in on.
+   * This is what makes the "evaluated fresh" promise in the history comment
+   * below true in practice: without it the digest was loaded once per worker
+   * lifetime, and a board note posted or document added mid-kelabo never
+   * reached the assistant until the process restarted.
+   */
+  function maybeRefreshJourneys(kelaboId, handle) {
+    const now = Date.now();
+    if (now - (handle.journeysAt ?? 0) < JOURNEY_REFRESH_MS) return;
+    if (handle.journeysRefreshing) return;
+    handle.journeysRefreshing = true;
+    loadJourneyContext(c, kelaboId)
+      .then((journeys) => {
+        handle.journeysAt = Date.now();
+        const fingerprint = JSON.stringify(journeys);
+        if (fingerprint === handle.journeysFingerprint) return;
+        handle.journeysFingerprint = fingerprint;
+        worker?.postMessage({ type: "journeys_update", kelaboId, journeys });
+        c.log("agent_journeys_refreshed", { kelaboId, journeys: journeys.length });
+      })
+      .catch((err) => c.logError("agent_journey_context_refresh_failed", err, { kelaboId }))
+      .finally(() => {
+        handle.journeysRefreshing = false;
+      });
+  }
+
   async function ensureContext(kelaboId) {
     let handle = c.state.agentWorkers.get(kelaboId);
-    if (handle?.rehydrated) return handle;
+    if (handle?.rehydrated) {
+      maybeRefreshJourneys(kelaboId, handle);
+      return handle;
+    }
 
     const w = await ensureWorker();
     // Rehydrate the full kelabo transcript (no limit) so the agent has the
@@ -148,10 +187,9 @@ export function createAgentDispatcher(c) {
     // web_fetch needs no API key (plain fetch), so it's available whenever the
     // provider is real — this is what answers real-time weather/stock queries.
     if (realProvider || c.config.llm.provider === "fake") capabilities.push("web");
-    // web_search is disabled project-wide (WEB_SEARCH_ENABLED === false). It also
-    // requires the Brave key, which dev has never had — the result was sub-agents
-    // guessing URLs for web_fetch and failing with 403/404. Re-enable both to
-    // bring it back.
+    // web_search needs both the switch (WEB_SEARCH_ENABLED) and a Brave key in
+    // the llm secret. A deployment without the key degrades exactly as before:
+    // no capability, no tool offered, sub-agents lean on web_fetch alone.
     if (WEB_SEARCH_ENABLED && (initInfo.webSearchKey || c.config.llm.provider === "fake")) {
       capabilities.push("web_search");
     }
@@ -185,8 +223,10 @@ export function createAgentDispatcher(c) {
     // historyEnabled provides more diffusely, and giving the assistant both
     // at once serves nobody. This also means a kelabo linked to a journey
     // after historyEnabled was already turned on for it stops getting the
-    // broader record the moment the link exists — evaluated fresh every
-    // turn, not fixed at creation time.
+    // broader record once the link is seen — at context creation here, and
+    // afterwards on maybeRefreshJourneys' one-minute cadence (the worker
+    // drops the history section from the prompt when a journey digest
+    // arrives), not fixed for the worker's lifetime as it once was.
     const history = historyStillApplies(meta, journeys) ? await loadKelaboHistory(c, kelaboId, meta).catch((err) => {
       // Best-effort by design: a kelabo whose history lookup failed is a normal
       // kelabo, not a broken one.
@@ -195,7 +235,15 @@ export function createAgentDispatcher(c) {
     }) : [];
 
     w.postMessage({ type: "context", kelaboId, transcript, mcp, capabilities, hostLanguage, history, journeys });
-    handle = { kelaboId, createdAt: handle?.createdAt ?? Date.now(), rehydrated: true };
+    handle = {
+      kelaboId,
+      createdAt: handle?.createdAt ?? Date.now(),
+      rehydrated: true,
+      // Seed the refresh bookkeeping so maybeRefreshJourneys can tell "same
+      // digest, leave the prompt cache alone" from a real change.
+      journeysAt: Date.now(),
+      journeysFingerprint: JSON.stringify(journeys),
+    };
     c.state.agentWorkers.set(kelaboId, handle);
     c.log("agent_context_ready", {
       kelaboId,

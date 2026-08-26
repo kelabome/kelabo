@@ -76,11 +76,17 @@ export function ContributionCard({ con }) {
         {con.progress && (
           <div className="con-progress" aria-live="polite">{con.progress}</div>
         )}
-        {steps.length > 0 && (
-          <ul className="con-steps">
-            {steps.map((s, i) => <li key={i}>{s}</li>)}
-          </ul>
-        )}
+        {/* The concluding turn streams: `markdown` on a working card is the
+            answer so far, and showing it as it grows is what turns the tail
+            of the wait from a spinner into reading. The step trail is hidden
+            once text is flowing — the work it describes is over. */}
+        {con.markdown
+          ? <div className="con-body"><Markdown text={con.markdown} /></div>
+          : steps.length > 0 && (
+            <ul className="con-steps">
+              {steps.map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          )}
       </div>
     )
   }

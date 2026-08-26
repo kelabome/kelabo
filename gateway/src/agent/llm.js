@@ -246,20 +246,82 @@ function toOpenAiTools(tools) {
   }));
 }
 
+/** Parse one tool call's raw arguments string, logging (not hiding) failures. */
+function parseToolArgs(tc, log) {
+  let input = {};
+  const rawArgs = tc.function?.arguments || "{}";
+  try {
+    input = JSON.parse(rawArgs);
+  } catch (err) {
+    // Previously silent: a malformed/truncated arguments string (a
+    // reasoning model cut off mid-JSON by max_tokens is the known
+    // culprit, per the fallback comment below) fell back to `{}` with
+    // no trace anywhere — indistinguishable after the fact from the
+    // model genuinely emitting no arguments at all. Logged with the
+    // raw string so a truncation bug is diagnosable, not just visible
+    // as a downstream "empty brief" failure several calls later.
+    log?.("llm_tool_args_parse_failed", {
+      provider: "openai-compatible",
+      tool: tc.function?.name,
+      rawArgsLength: rawArgs.length,
+      rawArgs: rawArgs.slice(0, 500),
+      error: err.message,
+    });
+  }
+  return { id: tc.id, name: tc.function?.name, input };
+}
+
 function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
   const base = (baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
   const url = `${base}/chat/completions`;
   const wire = makeWireLogger("openai-compatible", log);
-  async function call(req) {
+
+  function buildBody(req) {
     const messages = [];
     if (req.system) messages.push({ role: "system", content: req.system });
     messages.push(...answerDanglingToolCalls(toOpenAiMessages(req.messages)));
-    const body = {
+    return {
       model: req.model ?? modelConfig.model,
       messages,
       ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
       ...(req.tools?.length ? { tools: toOpenAiTools(req.tools), tool_choice: "auto" } : {}),
+      // Was silently dropped on this path (only the Anthropic provider
+      // forwarded it), which made the gate's temperature:0 a no-op.
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+      // JSON mode, for callers whose whole reply is one JSON object (the
+      // trigger gate, force-conclude). Constrains the model to valid JSON —
+      // no fence blocks, no prose around it — and on reasoning models it
+      // also curbs free-form narration, which is where most of their
+      // latency lives. Callers opt in; the prompt must already say "JSON"
+      // (providers reject json_object mode otherwise).
+      ...(req.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
     };
+  }
+
+  function finishResponse(data, wireCtx, status) {
+    wire?.response(wireCtx, status, data);
+    const msg = data.choices?.[0]?.message ?? {};
+    const toolCalls = (msg.tool_calls ?? []).map((tc) => parseToolArgs(tc, log));
+    // Reasoning models (e.g. deepseek-v4-*) may put the answer in reasoning_content
+    // and leave content empty when max_tokens is exhausted mid-reasoning; fall back to it.
+    const answer = (msg.content && msg.content.length ? msg.content : msg.reasoning_content) ?? "";
+    const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
+    return { text: answer, toolCalls, raw: { content }, usage: normalizeUsage(data.usage) };
+  }
+
+  async function call(req) {
+    const body = buildBody(req);
+    // Streaming is used when the caller wants deltas as they generate
+    // (req.onDelta). Everything else — request shape, return shape, usage
+    // accounting — is identical to the blocking path; the stream is
+    // reassembled here into the same completed response.
+    const streaming = typeof req.onDelta === "function";
+    if (streaming) {
+      body.stream = true;
+      // The final chunk carries the usage record; without this the provider
+      // omits it and a streamed call would be invisible to metering.
+      body.stream_options = { include_usage: true };
+    }
     const wireCtx = wire?.request(url, body, req);
     let res;
     try {
@@ -281,38 +343,89 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
       wire?.response(wireCtx, res.status, errText);
       throw new Error(`openai-compatible ${res.status}: ${errText}`);
     }
-    const data = await res.json();
-    wire?.response(wireCtx, res.status, data);
-    const msg = data.choices?.[0]?.message ?? {};
-    const toolCalls = (msg.tool_calls ?? []).map((tc) => {
-      let input = {};
-      const rawArgs = tc.function?.arguments || "{}";
-      try {
-        input = JSON.parse(rawArgs);
-      } catch (err) {
-        // Previously silent: a malformed/truncated arguments string (a
-        // reasoning model cut off mid-JSON by max_tokens is the known
-        // culprit, per the fallback comment below) fell back to `{}` with
-        // no trace anywhere — indistinguishable after the fact from the
-        // model genuinely emitting no arguments at all. Logged with the
-        // raw string so a truncation bug is diagnosable, not just visible
-        // as a downstream "empty brief" failure several calls later.
-        log?.("llm_tool_args_parse_failed", {
-          provider: "openai-compatible",
-          tool: tc.function?.name,
-          rawArgsLength: rawArgs.length,
-          rawArgs: rawArgs.slice(0, 500),
-          error: err.message,
-        });
-      }
-      return { id: tc.id, name: tc.function?.name, input };
-    });
-    // Reasoning models (e.g. deepseek-v4-*) may put the answer in reasoning_content
-    // and leave content empty when max_tokens is exhausted mid-reasoning; fall back to it.
-    const answer = (msg.content && msg.content.length ? msg.content : msg.reasoning_content) ?? "";
-    const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
-    return { text: answer, toolCalls, raw: { content }, usage: normalizeUsage(data.usage) };
+    if (!streaming) {
+      const data = await res.json();
+      return finishResponse(data, wireCtx, res.status);
+    }
+    return consumeStream(req, res, wireCtx);
   }
+
+  /**
+   * Reassemble an SSE chat-completions stream into the blocking call's shape.
+   *
+   * `content` deltas are surfaced through `req.onDelta(textSoFar)` as they
+   * arrive — that callback is the whole point of streaming here (a board card
+   * can show the answer growing instead of a spinner for the entire
+   * generation). Tool-call deltas are accumulated by index (the wire sends
+   * name once, then argument fragments) and never surfaced partially:
+   * half-assembled arguments are not actionable. `reasoning_content` deltas
+   * are accumulated for the truncation fallback but deliberately NOT
+   * streamed to the caller — chain-of-thought is not the answer.
+   */
+  async function consumeStream(req, res, wireCtx) {
+    let text = "";
+    let reasoning = "";
+    let usage = null;
+    const toolAcc = new Map(); // index -> {id, name, arguments}
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const handleEvent = (payload) => {
+      if (!payload || payload === "[DONE]") return;
+      let chunk;
+      try {
+        chunk = JSON.parse(payload);
+      } catch {
+        return; // a torn frame; the split logic below should prevent this
+      }
+      if (chunk.usage) usage = chunk.usage;
+      const delta = chunk.choices?.[0]?.delta;
+      if (!delta) return;
+      if (delta.reasoning_content) reasoning += delta.reasoning_content;
+      if (delta.content) {
+        text += delta.content;
+        try {
+          req.onDelta(text);
+        } catch {
+          // A broken delta consumer must not kill the completion itself.
+        }
+      }
+      for (const tc of delta.tool_calls ?? []) {
+        const idx = tc.index ?? 0;
+        const acc = toolAcc.get(idx) ?? { id: "", name: "", arguments: "" };
+        if (tc.id) acc.id = tc.id;
+        if (tc.function?.name) acc.name = tc.function.name;
+        if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+        toolAcc.set(idx, acc);
+      }
+    };
+    try {
+      for await (const part of res.body) {
+        buffer += decoder.decode(part, { stream: true });
+        // SSE events are separated by a blank line; keep the (possibly
+        // incomplete) tail in the buffer until its terminator arrives.
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const event = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          for (const line of event.split("\n")) {
+            if (line.startsWith("data:")) handleEvent(line.slice(5).trim());
+          }
+        }
+      }
+    } catch (err) {
+      wire?.error(wireCtx, err);
+      throw err;
+    }
+    const toolCalls = [...toolAcc.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, acc]) => parseToolArgs({ id: acc.id, function: { name: acc.name, arguments: acc.arguments } }, log));
+    const answer = text.length ? text : reasoning;
+    const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
+    const out = { text: answer, toolCalls, raw: { content }, usage: normalizeUsage(usage) };
+    wire?.response(wireCtx, res.status, { streamed: true, text: answer, toolCalls: toolCalls.length, usage });
+    return out;
+  }
+
   return {
     async complete(req) {
       return (await call(req)).text;

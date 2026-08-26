@@ -151,20 +151,19 @@ export class MainAgent {
     // The orchestrator writes the brief, so it is the one that has to know which
     // tool servers exist — otherwise its brief never mentions them and the
     // worker has no reason to look.
-    // Earlier kelabos go in the SYSTEM prompt, not the thread: they are fixed
-    // for the whole kelabo, and the system prompt is the one part of the
-    // request that never changes — which is exactly what provider-side prompt
-    // caching keys on. In the thread they would be re-sent, uncached, on every
+    // Earlier kelabos go in the SYSTEM prompt, not the thread: they change
+    // rarely, and the system prompt is the part of the request that almost
+    // never changes — which is exactly what provider-side prompt caching
+    // keys on. In the thread they would be re-sent, uncached, on every
     // turn, and would drift out of position as the transcript grows.
-    this.system = mainAgentSystemPrompt({
-      mcpServers: subAgentDeps?.mcp?.servers ?? [],
-      history: history ?? [],
-      // Journey context (docs 20 §12.1) — independent of `history` above:
-      // that is the host's own past kelabos, this is a deliberately-linked
-      // shared container. Same "fixed for the kelabo, goes in the system
-      // prompt not the thread" reasoning as history.
-      journeys: journeys ?? [],
-    });
+    // Journey context (docs 20 §12.1) — independent of `history`: that is
+    // the host's own past kelabos, this is a deliberately-linked shared
+    // container. Kept as fields (not closed over) so updateJourneys can
+    // rebuild the prompt when the runner reports the digest changed.
+    this.mcpServersArg = subAgentDeps?.mcp?.servers ?? [];
+    this.historyArg = history ?? [];
+    this.journeysArg = journeys ?? [];
+    this.system = this.buildSystem();
     this.thread = []; // persistent message array (excludes system)
     this.transcriptLen = 0;
     // The arrangement log: one compact record per dispatched task, kept beside
@@ -172,6 +171,27 @@ export class MainAgent {
     // re-reading tool_result blobs. This is what lets the summary say what was
     // looked up and what came back (doc 14 §5.4/§7).
     this.taskLog = [];
+  }
+
+  buildSystem() {
+    return mainAgentSystemPrompt({
+      mcpServers: this.mcpServersArg,
+      // Journey context supersedes the host's broader history (runner.js
+      // decides this at load; re-applied here so a journey that appears
+      // mid-kelabo drops the history section the same way).
+      history: this.journeysArg.length ? [] : this.historyArg,
+      journeys: this.journeysArg,
+    });
+  }
+
+  /**
+   * Swap in a refreshed journey digest. The persistent thread is untouched —
+   * only the system prompt is rebuilt, so the kelabo's memory survives and
+   * the one-turn prompt-cache miss is the whole cost of staying current.
+   */
+  updateJourneys(journeys) {
+    this.journeysArg = journeys ?? [];
+    this.system = this.buildSystem();
   }
 
   /**
@@ -377,7 +397,7 @@ export class MainAgent {
             log: this.log,
             debug: this.debug,
             turnId, // ties this sub-agent's debug entries back to the parent turn
-            onProgress: ({ text, steps }) => stream.push({ type: "progress", cardId, title, text, steps }),
+            onProgress: ({ text, steps, partial }) => stream.push({ type: "progress", cardId, title, text, steps, partial }),
           });
           return await sub.run(brief, kelaboId);
         } catch (err) {
@@ -409,7 +429,7 @@ export class MainAgent {
     const settled = [];
     for await (const ev of stream) {
       if (ev.type === "progress") {
-        yield this.workingCard(kelaboId, ev.cardId, ev.title, at, ev.text, ev.steps);
+        yield this.workingCard(kelaboId, ev.cardId, ev.title, at, ev.text, ev.steps, ev.partial);
         continue;
       }
       const { result, cardId, title, brief } = ev;
@@ -500,8 +520,14 @@ export class MainAgent {
     });
   }
 
-  /** An in-progress card. `progress` is the live status line; `steps` the trail. */
-  workingCard(kelaboId, id, title, at, progress, steps) {
+  /**
+   * An in-progress card. `progress` is the live status line; `steps` the
+   * trail; `partial` the answer-so-far of a streaming conclusion, carried in
+   * `markdown` so the room reads the answer as it is written. Working cards
+   * are ephemeral (sseHub never persists them), so streaming through them
+   * costs fan-out only, never DynamoDB writes.
+   */
+  workingCard(kelaboId, id, title, at, progress, steps, partial) {
     return {
       id,
       kelaboId,
@@ -509,7 +535,7 @@ export class MainAgent {
       kind: "answer",
       title,
       to: "all",
-      markdown: "",
+      markdown: partial || "",
       author: "assistant",
       origin: "server",
       status: "working",

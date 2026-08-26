@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { MainAgent } from "../src/agent/mainAgent.js";
-import { SubAgent } from "../src/agent/subAgent.js";
+import { SubAgent, partialAnswer } from "../src/agent/subAgent.js";
 import { createMcpQuery } from "../src/agent/subagents.js";
 import { loadEffectiveMcp } from "../src/agent/mcp.js";
 import { subAgentSystemPrompt, mainAgentSystemPrompt, summarySystemPrompt } from "../src/agent/persona.js";
-import { TriggerGate } from "../src/agent/gate.js";
+import { TriggerGate, isBackchannel } from "../src/agent/gate.js";
 import { languageName } from "../src/agent/language.js";
 import { normalizeUsage, addUsage, createLlmProvider } from "../src/agent/llm.js";
 import { parseMinutesJson } from "../src/agent/serverAgentRunner.js";
@@ -1040,6 +1040,96 @@ await test("one kelabo's cooldown does not silence another kelabo", async () => 
   assert.equal(same.verdict, "NONE");
 });
 
+await test("the OpenAI adapter streams: deltas surface through onDelta, the reassembled result matches the blocking shape", async () => {
+  const realFetch = globalThis.fetch;
+  const sse = [
+    'data: {"choices":[{"delta":{"reasoning_content":"thinking…"}}]}',
+    'data: {"choices":[{"delta":{"content":"{\\"answer\\":\\"The "}}]}',
+    'data: {"choices":[{"delta":{"content":"cache holds 5\\"}"}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tu9","function":{"name":"web_fetch","arguments":"{\\"url\\":"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"https://x.test\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_cache_hit_tokens":60}}',
+    "data: [DONE]",
+    "",
+  ].join("\n\n");
+  let sentBody = null;
+  globalThis.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return new Response(sse, { status: 200 });
+  };
+  try {
+    const llm = createLlmProvider({ provider: "deepseek", model: "m" }, { apiKey: "k" });
+    const deltas = [];
+    const res = await llm.completeRaw({
+      model: "m",
+      messages: [{ role: "user", content: "q" }],
+      onDelta: (t) => deltas.push(t),
+    });
+    assert.equal(sentBody.stream, true, "onDelta switches the wire to streaming");
+    assert.deepEqual(sentBody.stream_options, { include_usage: true }, "usage still arrives on the final chunk");
+    assert.deepEqual(deltas, ['{"answer":"The ', '{"answer":"The cache holds 5"}'], "content deltas surface as they accumulate");
+    assert.equal(res.text, '{"answer":"The cache holds 5"}', "reasoning_content is not the answer when content exists");
+    assert.deepEqual(res.toolCalls, [{ id: "tu9", name: "web_fetch", input: { url: "https://x.test" } }], "tool-call fragments reassemble");
+    assert.deepEqual(res.usage, { cacheRead: 60, cacheWrite: 0, input: 40, output: 20, total: 120 });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await test("the OpenAI adapter forwards temperature and JSON mode", async () => {
+  // temperature was silently dropped on this path (only Anthropic forwarded
+  // it), which made the gate's temperature:0 a no-op for years.
+  const realFetch = globalThis.fetch;
+  let body = null;
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body);
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "{}" } }] }) };
+  };
+  try {
+    const llm = createLlmProvider({ provider: "deepseek", model: "m" }, { apiKey: "k" });
+    await llm.completeRaw({ model: "m", messages: [{ role: "user", content: "reply in JSON" }], temperature: 0, responseFormat: "json" });
+    assert.equal(body.temperature, 0);
+    assert.deepEqual(body.response_format, { type: "json_object" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await test("a pure backchannel caption never reaches the classifier", async () => {
+  let calls = 0;
+  const gate = new TriggerGate({
+    llm: {
+      async completeRaw() {
+        calls++;
+        return { text: JSON.stringify({ verdict: "NONE", confidence: 1, reason: "x" }), toolCalls: [], raw: { content: [] } };
+      },
+    },
+    smallModel: "flash",
+    knobs: { cooldownSeconds: 0, maxContributionsPerMinute: 9, sensitivity: "medium" },
+    log: () => {},
+  });
+  for (const text of ["Yeah.", "ok", "Mm-hmm", "sounds good", "Thank you!"]) {
+    const r = await gate.decide("m1", { speaker: "a", text, at: Date.now() }, transcript);
+    assert.equal(r.verdict, "NONE");
+    assert.equal(r.reason, "backchannel", `"${text}" is acknowledgement, not a question`);
+  }
+  assert.equal(calls, 0, "no model call was spent on any of them");
+  // The boundary: short questions are NOT backchannel. This one must classify.
+  await gate.decide("m1", { speaker: "a", text: "what is it?", at: Date.now() }, transcript);
+  assert.equal(calls, 1, "a real (if short) question still reaches the classifier");
+  assert.equal(isBackchannel("what is it?"), false);
+  assert.equal(isBackchannel("got it"), true);
+});
+
+await test("partialAnswer recovers the answer field from a half-generated result", () => {
+  assert.equal(partialAnswer('{"task_id":"t1","status":"ok","answer":"The cache holds 5'), "The cache holds 5");
+  assert.equal(partialAnswer('{"answer":"line one\\nline'), "line one\nline");
+  // A torn escape at the tail is dropped, not rendered as a stray backslash.
+  assert.equal(partialAnswer('{"answer":"quote \\'), "quote ");
+  assert.equal(partialAnswer('{"status":"ok","confi'), "", "no answer field yet, nothing to show");
+  assert.equal(partialAnswer(""), "");
+});
+
 // ---- language, and reading a noisy transcript -------------------------------
 
 await test("languageName maps the SPA's tags, and refuses to guess", async () => {
@@ -1129,6 +1219,27 @@ await test("minutes are written in the host's language, whatever the room spoke"
   assert.match(system, /write EVERY string value in Japanese/);
 });
 
+await test("a journey digest arriving mid-kelabo rebuilds the system prompt and supersedes history", () => {
+  const agent = new MainAgent({
+    llm: {},
+    smallModel: "flash",
+    subAgentModel: "pro",
+    subAgentDeps: { mcp: { servers: [] } },
+    history: [{ title: "Old standup", summary: "we agreed X" }],
+    journeys: [],
+    log: () => {},
+  });
+  assert.match(agent.system, /EARLIER KELABOS/, "history renders while no journey is linked");
+  const before = agent.system;
+  agent.updateJourneys([
+    { title: "Apollo", description: "d", board: ["note"], documents: [], kelabos: [], reports: [{ question: "what is Apollo?", answer: "our launcher" }] },
+  ]);
+  assert.notEqual(agent.system, before, "the prompt is rebuilt");
+  assert.match(agent.system, /JOURNEY CONTEXT/, "the digest is in");
+  assert.match(agent.system, /what is Apollo\?/, "answered journey questions ride the push digest now");
+  assert.doesNotMatch(agent.system, /EARLIER KELABOS/, "journey context supersedes the broader history");
+});
+
 await test("gate and orchestrator both know the transcript is misheard speech", async () => {
   let gateSystem = "";
   const gate = new TriggerGate({
@@ -1142,7 +1253,9 @@ await test("gate and orchestrator both know the transcript is misheard speech", 
     knobs: { cooldownSeconds: 0, maxContributionsPerMinute: 9 },
     log: () => {},
   });
-  await gate.decide("m1", { speaker: "alex", text: "hi", at: Date.now() }, transcript);
+  // Not a backchannel line — those short-circuit before any model call and
+  // this test needs the call to happen to capture the system prompt.
+  await gate.decide("m1", { speaker: "alex", text: "so how does the cache work", at: Date.now() }, transcript);
 
   for (const [what, prompt] of [["gate", gateSystem], ["orchestrator", mainAgentSystemPrompt({})]]) {
     assert.match(prompt, /MACHINE TRANSCRIPTION, NOT A VERBATIM RECORD/, `${what} is told the transcript is noisy`);

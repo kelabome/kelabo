@@ -1,10 +1,10 @@
-// KILL SWITCH: web_search is disabled project-wide. The Brave backend below is
-// kept intact (and the `web_search` tool still exists in subAgent.js) so the
-// feature can be re-enabled by flipping this one constant back to true — but
-// while it is false the capability is never granted, so the tool is never even
-// offered to the model. See runner.js / devAgent.mjs, the only two places that
-// build the capability list.
-export const WEB_SEARCH_ENABLED = false;
+// web_search is ON again, but only where a Brave key exists: runner.js (and
+// devAgent.mjs) still grant the capability per deployment — no `braveApiKey`
+// in the llm secret means no tool, exactly as before. It was disabled
+// project-wide while dev had no key, which left sub-agents guessing URLs for
+// web_fetch and burning whole LLM iterations on 403/404s; a keyed deployment
+// answers in one search instead. This constant remains the kill switch.
+export const WEB_SEARCH_ENABLED = true;
 
 const BRAVE_URL = "https://api.search.brave.com/res/v1/web/search";
 const SEARCH_BUDGET_MS = 15_000;

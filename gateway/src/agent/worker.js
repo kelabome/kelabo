@@ -57,6 +57,18 @@ async function handle(msg) {
       }
       return;
     }
+    case "journeys_update": {
+      // The runner re-read the journey digest and it changed (new board
+      // note, new document, fresh minutes, a new link). Rebinding the main
+      // agent's system prompt busts the provider prompt cache for one turn —
+      // the runner only sends this when the digest genuinely differs.
+      const ctx = contexts.get(msg.kelaboId);
+      if (ctx) {
+        ctx.journeys = msg.journeys ?? [];
+        ctx.mainAgent.updateJourneys(ctx.journeys);
+      }
+      return;
+    }
     case "drop":
       contexts.delete(msg.kelaboId);
       runtime?.gate.forget(msg.kelaboId);
@@ -131,7 +143,9 @@ function initContext(msg) {
     // that happens in this kelabo can change what happened in an earlier one.
     history: msg.history ?? [],
     // Journey(s) this kelabo is linked to (docs 20 §12.1) — independent of
-    // `history` above and, like it, fixed for the life of this context.
+    // `history` above. NOT fixed for the life of this context: the runner
+    // re-reads the digest on a cadence and sends `journeys_update` when it
+    // changed, so a note pinned mid-kelabo reaches the assistant.
     journeys: msg.journeys ?? [],
     mainAgent: null,
   };

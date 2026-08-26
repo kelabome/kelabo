@@ -252,15 +252,16 @@ effectiveMcp(kelabo) = kelabo.mcpEnabled === false ? ∅ : hostMcp(kelabo.hostId
 
 ## 7. Web search & fetch sub-agents
 
-- **`web_search` is currently DISABLED project-wide.** The single switch is
-  `WEB_SEARCH_ENABLED` in `gateway/src/agent/subagents.js`; while it is `false`
-  the capability is never granted, so the tool is not offered to the model and
-  the line describing it is dropped from the sub-agent prompt. The Brave client
-  and the tool definition remain in place for re-enabling.
-  - Why: dev never had a `braveApiKey`, so sub-agents were left with `web_fetch`
-    alone, guessed URLs, collected 403/404s, and returned `status:"empty"` —
-    which the main agent turns into a *cleared* board card. The visible symptom
-    was a progress card vanishing after ~60s with no explanation.
+- **`web_search` is ENABLED, gated per deployment by the Brave key.** The
+  switch is `WEB_SEARCH_ENABLED` in `gateway/src/agent/subagents.js` (kept as
+  a kill switch); the capability is only granted when the llm secret carries a
+  `braveApiKey` (`runner.js`), so a keyless deployment behaves exactly as the
+  disabled era did: no capability, no tool offered, the line describing it
+  dropped from the sub-agent prompt.
+  - History: it was disabled project-wide while dev had no `braveApiKey` — sub-
+    agents were left with `web_fetch` alone, guessed URLs, collected 403/404s,
+    and returned `status:"empty"`, each failed guess costing a full LLM
+    iteration. With a key, one search replaces that whole loop.
 - `webFetch(url)` fetches a page/API endpoint as text (HTML stripped, byte +
   time budgets). Still enabled; it is what answers real-time data questions.
 - Dev mode: opencode's built-in `websearch`/`webfetch` (allowed in the persona

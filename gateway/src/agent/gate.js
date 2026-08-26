@@ -2,6 +2,33 @@ import { tagTranscript } from "@kelabo/contracts";
 import { ASSISTANT_NAME } from "./persona.js";
 
 const SENSITIVITY_THRESHOLD = { low: 0.8, medium: 0.5, high: 0.2 };
+
+// Pure backchannel: an utterance that is only acknowledgement can never be
+// the "LAST line" an assistant should act on, so it never needs a model to
+// say NONE. This is the cheapest latency/cost lever the gate has — meetings
+// are full of these, and each one otherwise pays a full classifier call.
+// Deliberately a closed list of exact matches (after stripping punctuation),
+// not a length heuristic: "what is it?" is nine letters and a real question.
+const BACKCHANNEL = new Set([
+  "yeah", "yep", "yes", "no", "nope", "ok", "okay", "right", "sure", "cool",
+  // Hyphens normalize to spaces before lookup, so the hyphenated spellings
+  // STT produces ("mm-hmm", "uh-huh") land on the space-joined entries.
+  "mm", "hmm", "mhm", "mm hmm", "uh huh", "huh", "oh", "ah", "wow", "nice",
+  "thanks", "thank you", "got it", "gotcha", "i see", "makes sense", "sounds good",
+  "exactly", "totally", "true", "fair", "fair enough", "alright", "all right",
+  "good", "great", "perfect", "awesome", "hello", "hi", "hey", "bye", "goodbye",
+  "see you", "one sec", "one second", "hang on", "hold on",
+]);
+
+/** True when the caption is pure acknowledgement — nothing to classify. */
+export function isBackchannel(text) {
+  const t = String(text ?? "")
+    .toLowerCase()
+    .replace(/[.,!?…'’-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length > 0 && BACKCHANNEL.has(t);
+}
 const GATE_SYSTEM = `You are a TRIGGER GATE for a kelabo assistant. Given a rolling kelabo transcript, decide whether an expert assistant should proactively help with the LAST line.
 
 Verdicts:
@@ -52,6 +79,14 @@ export class TriggerGate {
     if (now - st.lastFireAt < cooldownMs) {
       return this.record(kelaboId, at, "NONE", "cooldown_active");
     }
+    // Before any counter or model: a pure acknowledgement line has no
+    // question in it by construction. Skipping the call matters twice over —
+    // the classifier is often the single largest line item, and on a
+    // reasoning model each skipped call is ~10 seconds the room does not
+    // spend wondering whether the assistant is thinking.
+    if (isBackchannel(caption.text)) {
+      return this.record(kelaboId, at, "NONE", "backchannel");
+    }
     // Captions arrive faster than a classification returns. Checking the
     // cooldown, awaiting the model, and only then recording the fire is a
     // check-then-act race: two captions half a second apart both passed the
@@ -96,6 +131,11 @@ export class TriggerGate {
         messages: [{ role: "user", content: user }],
         maxTokens: 1024,
         temperature: 0,
+        // JSON mode: the reply is one JSON object and nothing else (the
+        // prompt already says so — providers require the word to appear).
+        // Beyond parse reliability, this reins in reasoning-model
+        // narration, which is where the gate's seconds actually go.
+        responseFormat: "json",
       });
       raw = res.text;
       usage = res.usage ?? null;
