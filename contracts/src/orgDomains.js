@@ -1,5 +1,4 @@
-// Email domains: what one is, and whether it may become an organisation
-// (docs/saas/design-organisations.md §1.2).
+// Email domains: what one is, and whether it may become an organisation.
 //
 // An organisation IS an email domain — the tenant boundary registration already
 // establishes. That only works where the domain belongs to one company. On
@@ -19,8 +18,8 @@
  * `lastIndexOf`, not `split("@")[1]`: a quoted local part may itself contain an
  * `@` (`"a@b"@example.com` is a legal address), and the split form returns `b"`
  * for it. The five sites that still split inline agree with this on every
- * ordinary address and are folded onto it separately (plan-organisations §5,
- * D4) so that this module lands additively.
+ * ordinary address and are folded onto it separately, so that this module
+ * lands additively.
  *
  * A trailing dot is stripped: `example.com.` is the fully-qualified spelling of
  * `example.com` and a resolver accepts both, so a blocklist that only knew one

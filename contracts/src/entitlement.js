@@ -1,12 +1,12 @@
 // **What a kelabo may do, how much of it, and until when.**
 //
-// One function, called at four moments (docs/saas/design-entitlements.md §3):
-// PLAN at creation, GRANT when a call starts, REVISE while it runs, and it is
-// what SETTLE reconciles against at the end. Both services call it and neither
-// re-derives it; the SPA renders its output and decides nothing.
+// One function, called at four moments: PLAN at creation, GRANT when a call
+// starts, REVISE while it runs, and it is what SETTLE reconciles against at
+// the end. Both services call it and neither re-derives it; the SPA renders
+// its output and decides nothing.
 //
 // It exists because docs/19 gave a capability three states and no *quantity*.
-// Every rule in design-billing-system §0 is about amounts and deadlines —
+// Every rule a hosted tier adds is about amounts and deadlines —
 // ninety minutes, a cent a minute, three minutes of grace, a balance that runs
 // out mid-call — and with nowhere to put them they ended up in nine gate
 // functions with nine shapes, plus four ad-hoc fields the SPA turned back into
@@ -21,11 +21,11 @@ export const ENTITLEMENT_VERSION = 1;
 
 /**
  * Why a capability is off. `not_configured` and `policy` are docs/19's;
- * a hosted tier appends its own money states (design-billing-system §5.3).
+ * a hosted tier appends its own money states.
  */
 export const OFF_REASONS = ["not_configured", "policy"];
 
-/** An assistant reads speech always; typed input is what a balance buys (§5.8). */
+/** An assistant reads speech always; typed input is what a balance buys. */
 export const INPUT_SPEECH = "speech";
 export const INPUT_TYPED = "typed";
 
@@ -34,7 +34,7 @@ const off = (reason, extra = {}) => ({ on: false, reason, ...extra });
 
 /**
  * The entitlement for one kelabo (or, with no `options`, for an owner about to
- * create one — the PLAN moment, §3.1).
+ * create one — the PLAN moment).
  *
  * @param {object} input
  * @param {'guest'|'registered'} input.tier
@@ -69,7 +69,7 @@ export function entitlementFor({
     rateCardVersion: card?.version ?? 0,
   };
 
-  // ---- guest (user-tiers §1) ------------------------------------------------
+  // ---- guest --------------------------------------------------------------
   //
   // Not a degraded registered room: a deliberate tier with its own floor.
   // Signaling and a message store, forever, free, and outside the ledger.
@@ -114,12 +114,12 @@ export function entitlementFor({
       }),
       stt: sttOn ? cap(true) : off("not_configured"),
       assistant,
-      // Minutes are assistant spend (§5.9), so they follow the assistant
+      // Minutes are assistant spend, so they follow the assistant
       // *capability* rather than the dial behind it: an assistant that is off
       // for any reason writes no summary.
       minutes: assistant.on ? cap(true) : off(assistant.reason),
-      // Dev-agent access follows transcription access (user-tiers §4), and that
-      // holds however transcription came to be off.
+      // Dev-agent access follows transcription access, and that holds however
+      // transcription came to be off.
       agent: sttOn ? cap(true) : off("not_configured"),
     },
   };
@@ -130,7 +130,7 @@ export function entitlementFor({
  *
  * The wording lives in the SPA; this says *what happened*, so a notice is a
  * function of the diff rather than of six bespoke `reason` strings invented at
- * six call sites (§3.3).
+ * six call sites.
  *
  * @returns {Array<{capability: string, kind: 'off'|'on'|'inputs'|'warning', reason?: string}>}
  */
@@ -160,7 +160,7 @@ export function diffEntitlement(prev, next) {
 }
 
 /**
- * Does a receipt agree with the grant it ran under (§3.4)?
+ * Does a receipt agree with the grant it ran under?
  *
  * The invariant that makes "the debt is bounded" checkable rather than
  * asserted: a call cannot meter more than it was granted plus its grace, and a

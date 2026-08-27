@@ -125,12 +125,11 @@ tier needs two more dimensions — *how much* is left and *until when* — and
 four moments rather than one: what may be switched on at creation, what this
 call may do once it starts, what changed while it ran, and what it cost.
 
-That extension is designed in `docs/saas/design-entitlements.md` on the saas
-branch, as an **optional `allowance` and `until` on an existing capability
-entry** rather than a parallel structure — per §3's rule that new
-capabilities join this map. The mechanism belongs here, on master, with
-permissive defaults: a deployment that sets no allowance is unlimited and
-behaves exactly as it does today.
+That extension is designed in the private repo, as an **optional `allowance`
+and `until` on an existing capability entry** rather than a parallel
+structure — per §3's rule that new capabilities join this map. Per §4 the
+mechanism belongs here, with permissive defaults: a deployment that sets no
+allowance is unlimited and behaves exactly as it does today.
 
 ## 5. Checklist for touching a provider integration
 

@@ -49,7 +49,7 @@ export function createKelabos({ config, db, internal, credentials }) {
       // Opt-IN, so `=== true` rather than `!== false`: an absent field means no,
       // and every kelabo created before this existed means no too.
       historyEnabled: body.historyEnabled === true,
-      // A private record (design-registered §7): guests in the room see
+      // A private record: guests in the room see
       // everything while it runs and lose the record when it ends. Opt-in, like
       // `historyEnabled`, and for the same reason — an absent field means no,
       // including on every kelabo created before the flag existed.
@@ -162,9 +162,9 @@ export function createKelabos({ config, db, internal, credentials }) {
       ]);
 
       /**
-       * **The entitlement** (docs/saas/design-entitlements.md): what this
-       * kelabo may do, how much of it is left, and until when — one document,
-       * computed by one function, rendered by a client that decides nothing.
+       * **The entitlement**: what this kelabo may do, how much of it is left,
+       * and until when — one document, computed by one function, rendered by
+       * a client that decides nothing.
        *
        * This replaces a hand-built capability map whose entries were assembled
        * from four separate reads and whose money rules the SPA then re-derived
@@ -220,8 +220,9 @@ export function createKelabos({ config, db, internal, credentials }) {
             },
         rtc: { on: grant.capabilities.call.on, mode: grant.capabilities.call.mode },
         // Whether the assistant reads typed messages. The message itself is
-        // rung 0 and is never withheld — see design-entitlements §2.1 for why
-        // this stopped being a capability called `post`.
+        // rung 0 and is never withheld — which is why this is not a capability
+        // called `post`: what a balance can buy is the assistant's attention,
+        // never a participant's ability to speak in the room.
         typedAssistant: grant.capabilities.assistant.inputs?.includes("typed")
           ? { on: true }
           : { on: false, reason: grant.capabilities.assistant.typedReason ?? "free_quota", resetsAt: grant.resetsAt },

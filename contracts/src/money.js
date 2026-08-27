@@ -11,7 +11,7 @@
 // the third copy the next page would bring.
 //
 // Everything in the system is **micros** — 1 cent = 1 000 000, so 1e-8 AUD —
-// and AUD is the only currency (design-billing-system §5.5). Nothing here
+// and AUD is the only currency. Nothing here
 // converts a currency; a page that did would be inventing a number the receipt
 // cannot reproduce.
 //

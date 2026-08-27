@@ -258,7 +258,7 @@ export const createKelaboBodySchema = z.object({
   // a decision a host has to actually make, and a default that quietly said yes
   // would be making it for them every time.
   historyEnabled: z.boolean().optional(),
-  // Private record (design-registered-tier §7). Set by the owner at creation
+  // Private record. Set by the owner at creation
   // and carried onto the history row at archive time: a guest who was in the
   // room sees everything while it runs and loses the record when it ends.
   // Live-session behaviour is untouched — this is a record-access rule, not a

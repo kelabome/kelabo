@@ -639,7 +639,7 @@ await test("GET /kelabos/:id public vs participant views", async () => {
   );
   // How long the call may run is not a sixth capability: it is
   // `entitlement.call.allowance`, on the same response, where the rest of the
-  // grant is (design-entitlements §3.2).
+  // grant is.
   assert.ok(full.json.entitlement?.capabilities?.call);
   assert.equal(full.json.capabilities.stt.on, true);
   assert.equal(full.json.capabilities.assistant.on, true);
@@ -2369,7 +2369,7 @@ await test("stt: both providers answer the same interface", async () => {
   }
 });
 
-// --- private records (design-registered §7) ---------------------------------
+// --- private records --------------------------------------------------------
 
 let signInSeq = 0;
 async function signIn(email) {

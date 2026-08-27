@@ -153,7 +153,7 @@ export function createRecords({ config, db, s3 }) {
       row.host === identity ||
       (row.participantIdentities || []).includes(identity);
     if (!allowed) throw err(403, "not_a_participant");
-    // A private record (design-registered §7): a link guest was in the room and
+    // A private record: a link guest was in the room and
     // saw everything while it ran, and loses it at the end. One clause, here,
     // rather than a second listing rule — guests have no records list to filter
     // in the first place. The host is never their own exception: `host` is an

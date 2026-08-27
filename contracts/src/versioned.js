@@ -125,7 +125,7 @@ export function createVersionedCache({
  * The version in effect at an instant: the newest whose `effectiveFrom` has
  * passed.
  *
- * A call is priced by the card in effect **at episode start** (§4.1), so this
+ * A call is priced by the card in effect **at episode start**, so this
  * takes the instant rather than assuming now — re-pricing a finished episode
  * with a card published mid-call would make the receipt irreproducible.
  */

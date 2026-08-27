@@ -179,7 +179,7 @@ export const SSE_EVENT_RENAME = "rename";
 export const SSE_EVENT_ROSTER = "roster";
 export const SSE_EVENT_UTTERANCE = "utterance";
 // Something the room needs told about itself — today, that a metered service
-// stopped and when it comes back (design-registered §6, "the moment"). Not an
+// stopped and when it comes back. Not an
 // error and not a contribution: a silent absence of captions is the failure
 // this event exists to prevent, and a board card would outlive the moment.
 export const SSE_EVENT_NOTICE = "notice";

@@ -1,5 +1,4 @@
-// The one decision: what a kelabo may do, how much of it, and until when
-// (docs/saas/design-entitlements.md).
+// The one decision: what a kelabo may do, how much of it, and until when.
 //
 // Master carries the MECHANISM — the capability map with an optional
 // `allowance` and `until` per entry, the diff and the settlement check — with
@@ -81,7 +80,7 @@ test("with no transcription the assistant still reads typed input", () => {
   assert.equal(e.capabilities.stt.on, false);
   assert.equal(e.capabilities.assistant.on, true);
   assert.deepEqual(e.capabilities.assistant.inputs, ["typed"]);
-  // Dev-agent access follows transcription access (user-tiers §4).
+  // Dev-agent access follows transcription access.
   assert.equal(e.capabilities.agent.on, false);
 });
 

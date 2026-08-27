@@ -1,8 +1,8 @@
-// Organisations: the domain refusal (docs/saas/design-organisations.md §1.2).
+// Organisations: the domain refusal.
 //
 // The blocklist is the whole of the access control in v1 — DNS TXT verification
-// is deferred (plan-organisations §5, D1) — so what it lets through is the
-// security boundary, and it is asserted here rather than trusted.
+// is deferred — so what it lets through is the security boundary, and it is
+// asserted here rather than trusted.
 import assert from "node:assert/strict";
 import {
   domainOf,
