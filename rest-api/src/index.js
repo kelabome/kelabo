@@ -43,7 +43,7 @@ import { createCredentials } from "./credentials.js";
 import { createOtp } from "./otp.js";
 import { createMailer, mailSettingsFromConfig } from "./mail/index.js";
 import { mailKeyFrom } from "@kelabo/contracts/credentials";
-import { createSessions } from "./sessions.js";
+import { createSessions, resolveDisplayName } from "./sessions.js";
 import { createOidc } from "./oidc.js";
 import { createMcpOauth } from "./mcpOauth.js";
 import { createAuthProvider } from "./authProvider.js";
@@ -227,18 +227,14 @@ export function createApp(deps) {
       handle: async (req) => {
         const session = await requireSession(req);
         const user = await db.getUser(session.identity);
-        // The Settings display name is the user's own choice and wins.
-        // `users.displayName` is only ever stamped once, at first login, with the
-        // email local-part (otp.js, if_not_exists) — reporting that as the
-        // identity made every surface show the raw local-part no matter what the
-        // user had set.
-        const chosen = typeof user?.settings?.name === "string" ? user.settings.name.trim() : "";
         return {
           status: 200,
           body: {
             identity: {
               email: session.identity,
-              displayName: chosen || user?.displayName || session.identity.split("@")[0],
+              // Settings name, cleared name, or one derived — sessions.js owns
+              // that decision, so `/me` and refresh cannot drift apart.
+              displayName: resolveDisplayName(user, session.identity),
               // The identicon re-roll (Settings → Avatar). 0 = default.
               avatarVariant: Number(user?.settings?.avatar) || 0,
             },

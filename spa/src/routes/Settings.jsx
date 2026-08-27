@@ -25,15 +25,32 @@ const SETTINGS_TABS = [
   { id: 'data', label: 'Data & account' },
 ]
 
+// The name in the box: what is stored, or one derived from the identity when
+// nothing is stored *at all*.
+//
+// `??`, not `||`, and that is the whole of it. `getItem` answers `null` for a
+// key that was never set and `''` for one deliberately cleared, and only the
+// first of those should fall back. With `||` the field could not be emptied:
+// clearing the last character re-derived the old name inside the same React
+// batch (`saveName` -> `pushSettings` -> the synchronous `SETTINGS_SYNCED_EVENT`
+// -> `resync`), so the character reappeared as fast as it was deleted.
+//
+// An empty display name is a supported state, not a mistake to be corrected
+// here. Every render site already derives a label when there is none — see
+// `speakerLabel` in contracts/src/speaker.js, which owns that decision for the
+// whole system. Joining a kelabo is the one place a name is genuinely required,
+// and it asks for one there.
+function storedDisplayName(identity) {
+  return localStorage.getItem('kelabo-name') ?? displayName(identity) ?? ''
+}
+
 export default function Settings() {
   const toast = useToast()
   const confirm = useConfirm()
   const navigate = useNavigate()
   const { identity, tenantId, refresh } = useAuth()
 
-  const [name, setName] = useState(
-    localStorage.getItem('kelabo-name') || displayName(identity) || ''
-  )
+  const [name, setName] = useState(() => storedDisplayName(identity))
   const [notif, setNotif] = useState(localStorage.getItem('kelabo-notif') === '1')
   // Room chimes are on unless explicitly off — the inverse of the OS
   // notification toggle, which asks before it intrudes.
@@ -342,7 +359,7 @@ export default function Settings() {
   // Another device (or this one, post-login) may apply a newer snapshot.
   useEffect(() => {
     const resync = () => {
-      setName(localStorage.getItem('kelabo-name') || displayName(identity) || '')
+      setName(storedDisplayName(identity))
       setNotif(localStorage.getItem('kelabo-notif') === '1')
       setSounds(localStorage.getItem('kelabo-sounds') !== '0')
       setFinalOnly(localStorage.getItem('kelabo-final-only') === '1')

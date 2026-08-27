@@ -350,6 +350,53 @@ await test("session cookie works for /me and kelabo creation", async () => {
   assert.equal(anon.json.error, "unauthenticated");
 });
 
+await test("a display name can be cleared, and stays cleared", async () => {
+  // The bug this pins: emptying the name in Settings put "" in the row, and
+  // `GET /me` handed the local-part straight back, so the old name returned on
+  // the next load and the field could never be left empty.
+  const named = await call("PUT", "/me/settings", { body: { settings: { name: "Rico" } }, cookies: sessionCookies });
+  assert.equal(named.statusCode, 200);
+  const withName = await call("GET", "/me", { cookies: sessionCookies });
+  assert.equal(withName.json.identity.displayName, "Rico");
+
+  const cleared = await call("PUT", "/me/settings", {
+    body: { settings: { name: "" }, updatedAt: Date.now() + 1 },
+    cookies: sessionCookies,
+  });
+  assert.equal(cleared.statusCode, 200);
+  const after = await call("GET", "/me", { cookies: sessionCookies });
+  assert.equal(after.json.identity.displayName, "", "cleared means cleared, not the local-part again");
+
+  // Whitespace is the same choice typed differently.
+  await call("PUT", "/me/settings", {
+    body: { settings: { name: "   " }, updatedAt: Date.now() + 2 },
+    cookies: sessionCookies,
+  });
+  const blank = await call("GET", "/me", { cookies: sessionCookies });
+  assert.equal(blank.json.identity.displayName, "");
+
+  // And never choosing one still derives a name — absence is not emptiness.
+  await call("PUT", "/me/settings", {
+    body: { settings: { theme: "dark" }, updatedAt: Date.now() + 3 },
+    cookies: sessionCookies,
+  });
+  const unset = await call("GET", "/me", { cookies: sessionCookies });
+  assert.equal(unset.json.identity.displayName, "host", "no name set at all falls back to the local-part");
+
+  // Refresh answers the same question, and used to answer it differently: it
+  // read `users.displayName` and never looked at the setting, so which name you
+  // saw depended on which request last rotated your session.
+  await call("PUT", "/me/settings", {
+    body: { settings: { name: "Rico" }, updatedAt: Date.now() + 4 },
+    cookies: sessionCookies,
+  });
+  const refreshed = await call("POST", "/auth/refresh", { cookies: sessionCookies });
+  assert.equal(refreshed.statusCode, 200);
+  assert.equal(refreshed.json.identity.displayName, "Rico", "refresh agrees with /me");
+  sessionCookies.kelabo_session = cookieValue(refreshed, "kelabo_session");
+  sessionCookies.kelabo_refresh = cookieValue(refreshed, "kelabo_refresh");
+});
+
 let kelaboId;
 await test("POST /kelabos creates kelabo with one-active guard", async () => {
   const res = await call("POST", "/kelabos", { body: { title: "Standup" }, cookies: sessionCookies });

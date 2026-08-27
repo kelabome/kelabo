@@ -4,6 +4,27 @@ import { randomToken, sha256 } from "./jwt.js";
 import { mintCookie, readCookie, serializeCookie, clearCookie } from "./cookies.js";
 import { err } from "./errors.js";
 
+/**
+ * The display name for a user row, from the one place that decides it.
+ *
+ * Two rules, and they are easy to get backwards:
+ *
+ *  - The Settings name wins when the user has chosen one, including when the
+ *    choice is **no name at all**. `null` means never chosen; `""` means
+ *    deliberately cleared, and those are different answers. Collapsing them
+ *    with `||` is what made a cleared name come back on the next request.
+ *  - Only when nothing has been chosen do we fall back to `users.displayName`
+ *    (stamped once at first login) and then to the email local-part.
+ *
+ * `/me` and the refresh path both call this. They used to answer separately —
+ * refresh never consulted `settings.name` at all — so the name you saw depended
+ * on which request had most recently refreshed your session.
+ */
+export function resolveDisplayName(user, identity) {
+  const chosen = typeof user?.settings?.name === "string" ? user.settings.name.trim() : null;
+  return chosen ?? (user?.displayName || identity.split("@")[0]);
+}
+
 export function createSessions({ config, db, secrets }) {
   const { sessionTtlSeconds, refreshTtlDays, participantTtlSeconds } = config.auth;
 
@@ -91,7 +112,7 @@ export function createSessions({ config, db, secrets }) {
     }
     await db.setRefreshRevoked(tokenId, true);
     const user = await db.getUser(item.identity);
-    const displayName = user?.displayName || item.identity.split("@")[0];
+    const displayName = resolveDisplayName(user, item.identity);
     const session = await mintSessionCookie(item.identity, item.tenantId);
     const rotated = await mintRefreshCookie(item.identity, item.tenantId, {
       chainId: item.chainId,
