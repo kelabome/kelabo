@@ -68,8 +68,8 @@ function fromEnv() {
     // `LLM_CONFIG.baseUrl`, never a literal OpenAI URL: a deployment that pins
     // its provider in contracts sets no `KELABO_OPENAI_BASE_URL`, and a
     // hard-coded default here would win over the pin and post that provider's
-    // key to api.openai.com. Where `LLM_CONFIG` is env-derived, as here, the
-    // two are the same string.
+    // key to api.openai.com. Where `LLM_CONFIG` is env-derived the two are the
+    // same string.
     openaiBaseUrl: e.KELABO_OPENAI_BASE_URL || LLM_CONFIG.baseUrl,
     // Bootstrap only, and deliberately not under `secrets` — it is a key, not a
     // Secrets Manager name. It fills the `llm` credential slot for a deployment
