@@ -1,3 +1,5 @@
+import { LLM_CONFIG } from "@kelabo/contracts/credentials";
+
 const num = (v, d) => (v !== undefined && v !== "" ? Number(v) : d);
 
 export async function loadGatewayConfig() {
@@ -59,11 +61,16 @@ function fromEnv() {
       video: e.KELABO_RTC_VIDEO === "true",
     },
     llm: {
-      provider: e.KELABO_LLM_PROVIDER || "anthropic",
+      provider: e.KELABO_LLM_PROVIDER || LLM_CONFIG.provider,
       model: e.KELABO_LLM_MODEL || "",
       smallModel: e.KELABO_LLM_SMALL_MODEL || "",
     },
-    openaiBaseUrl: e.KELABO_OPENAI_BASE_URL || "https://api.openai.com/v1",
+    // `LLM_CONFIG.baseUrl`, never a literal OpenAI URL: a deployment that pins
+    // its provider in contracts sets no `KELABO_OPENAI_BASE_URL`, and a
+    // hard-coded default here would win over the pin and post that provider's
+    // key to api.openai.com. Where `LLM_CONFIG` is env-derived, as here, the
+    // two are the same string.
+    openaiBaseUrl: e.KELABO_OPENAI_BASE_URL || LLM_CONFIG.baseUrl,
     // Bootstrap only, and deliberately not under `secrets` — it is a key, not a
     // Secrets Manager name. It fills the `llm` credential slot for a deployment
     // whose credentials table is still empty; see `bootstrapCredential` in
@@ -121,7 +128,7 @@ function fromBase(base) {
     // Honor the provider base URL from config (e.g. deepseek's endpoint); env
     // override still wins for local experiments. deepseek/other providers route
     // through the OpenAI-compatible client, so this is the endpoint it hits.
-    openaiBaseUrl: process.env.KELABO_OPENAI_BASE_URL || base.llm.baseUrl || "https://api.openai.com/v1",
+    openaiBaseUrl: process.env.KELABO_OPENAI_BASE_URL || base.llm.baseUrl || LLM_CONFIG.baseUrl,
     bootstrapLlmApiKey: process.env.KELABO_LLM_API_KEY || "",
     gateway: { agent: { ...base.gateway.agent } },
     retentionDays: base.retentionDays,
