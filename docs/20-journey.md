@@ -298,11 +298,35 @@ run as a plain control-plane job in rest-api's Lambda. That reasoning about
 *what the job needs* is still correct — but it missed a harder constraint
 discovered while implementing it: **the LLM credential itself is not
 readable from rest-api, by design.** `infra/lib/lambda-stack.js` grants the
-REST API's role only `secretsmanager:DescribeSecret` on the LLM secret —
-enough to answer "is the assistant configured at all" for the capability
-map (docs 19 §3) — never `GetSecretValue`. The comment there is explicit:
-*"those values stay gateway-owned."* Only `infra/lib/gateway-ecs-stack.js`
-grants the Gateway's task role `GetSecretValue` on it.
+REST API's role enough to answer "is the assistant configured at all" for
+the capability map (docs 19 §3) and no more. Only
+`infra/lib/gateway-ecs-stack.js` grants a role that can read the key
+itself, to the Gateway's task.
+
+Under Secrets Manager that was one statement holding
+`secretsmanager:DescribeSecret` and never `GetSecretValue`. Since the
+supplier keys moved to DynamoDB (docs 08 §6c) it is the same asymmetry
+expressed in that table's terms, because "does the item exist" and "what
+is in it" are otherwise the same `GetItem`:
+
+- `CRED#stt` and `CRED#mail` — the two slots whose **values** the control
+  plane legitimately uses (minting a browser transcription credential,
+  sending mail) — are granted as plain whole-item `GetItem`.
+- `CRED#llm` and `CRED#rtc` are granted `GetItem` fenced by
+  `dynamodb:Attributes` (`ForAllValues:StringEquals`, the frozen
+  `CREDENTIAL_STATUS_ATTRS` list from `contracts/src/credentials.js`) plus
+  `dynamodb:Select = SPECIFIC_ATTRIBUTES`. That list is the row minus its
+  `value`, and it carries a non-secret `configured` marker written beside
+  the credential — so the question is answerable and the answer is not the
+  key. An attribute-scoped `GetItem` is `DescribeSecret`; an unscoped one
+  is `GetSecretValue`; a whole-item read of `CRED#llm` from this role is
+  AccessDenied.
+
+The Lambda holds no `PutItem` on that table at all: master has no
+credential-write route, and the operator scripts that write one run under
+the operator's own AWS credentials. (The private SaaS branch has a
+root-only credential reveal console and widens this grant on its own side;
+the split is deliberate.)
 
 Giving rest-api its own readable copy of the same credential would work
 mechanically, but it would be re-opening a boundary this codebase drew on

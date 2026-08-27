@@ -8,13 +8,19 @@
 //
 // Exports:
 //   Login       — the sign-in page component.
-//   extraRoutes — [{ path, element }] appended inside <Routes> (empty here).
+//   NewKelabo   — the create-a-kelabo page.
 //   JourneyHelmExtra — a section rendered at the foot of a journey's Helm tab,
 //                 or null. Null here, and deliberately: what a journey's AI
 //                 costs is a question only a deployment that bills for it can
 //                 answer, and a self-host build runs on its own LLM key and
 //                 has nothing to say. The seam exists so that build does not
 //                 have to fork JourneyDetail.jsx to add a panel to it.
+//   extraRoutes — [{ path, element, shell }] added to <Routes> (empty here).
+//                 `shell` says which group: omitted or true puts the route
+//                 inside <ShellRoutes>, so it gets the sidebar and the
+//                 signed-in guard; `shell: false` is the chrome-less kind,
+//                 beside /join and /invite.
 export { default as Login } from './routes/Login'
+export { default as NewKelabo } from './routes/NewKelabo'
 export const extraRoutes = []
 export const JourneyHelmExtra = null

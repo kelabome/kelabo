@@ -33,7 +33,8 @@ SSE subscriber sets); (b) it terminates **long-lived WSS + SSE**; (c) it runs th
 5. **Archive:** on kelabo end, persist transcript + board to history (DynamoDB +
    S3).
 6. **Journey duties (docs 20):** generate journey reports on behalf of the REST
-   API (the LLM secret is readable here and nowhere else), push linked-journey
+   API (the LLM key is readable here and nowhere else — the control plane's role
+   can see only *that* `CRED#llm` exists, §6.1 of docs 20), push linked-journey
    context into the agent's system prompt, serve the dev-mode journey tools
    over the tunnel, and settle journey contributor counts on kelabo end — §6a.
 
@@ -217,7 +218,11 @@ the LLM secret, the live agent context, the tunnel, and the archive hook.
   caps and limits, docs 20 §6.2, unlike the unbounded main-agent thread), calls
   the LLM via `agent/llm.js`, and writes the `REPORT#` row back `ready` or
   `failed` — never left `pending`. This runs here and not in rest-api because
-  only this task role holds `GetSecretValue` on the LLM secret (docs 20 §6.1).
+  only this task role can read the LLM key: rest-api's role may `GetItem`
+  `CRED#llm` **only** through the non-secret `CREDENTIAL_STATUS_ATTRS`
+  projection (a `dynamodb:Attributes` + `dynamodb:Select` fence, the DynamoDB
+  equivalent of `DescribeSecret` without `GetSecretValue`), which answers "is
+  the assistant configured?" and nothing else — docs 20 §6.1.
 - **Agent context push** — `agent/journeyContext.js`, sibling to `history.js`,
   loaded in `runner.js`'s `ensureContext()` on every turn, no opt-in flag. For
   up to `JOURNEY_LIMIT = 3` linked journeys (found via the kelabo's own

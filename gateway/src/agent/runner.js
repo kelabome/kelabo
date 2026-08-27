@@ -5,8 +5,26 @@ import { loadJourneyContext, historyStillApplies } from "./journeyContext.js";
 import { loadEffectiveMcp } from "./mcp.js";
 import { WEB_SEARCH_ENABLED } from "./subagents.js";
 import { languageName } from "./language.js";
+import { LLM_CONFIG, llmApiKeyFrom } from "@kelabo/contracts/credentials";
 
-const SUMMARIZE_TIMEOUT_MS = 90_000;
+/**
+ * How long the minutes may take before the request is abandoned.
+ *
+ * Minutes are the largest prompt the system ever sends — the entire transcript
+ * of the kelabo against an 8k output — and they run on the same single worker
+ * that is still classifying whatever captions arrived while the room was being
+ * torn down. At 90 s this silently produced **no minutes for any real kelabo**:
+ * a one-utterance test finished in 10 s and passed, a 32-minute conversation
+ * with 103 utterances did not, and because a timeout resolved `null` and the
+ * caller logged nothing, the only symptom was a record with no minutes and not
+ * one line anywhere saying why.
+ *
+ * Generous on purpose. Nothing waits on this — the kelabo has already ended and
+ * the archive is already durable — so the only cost of a long ceiling is a
+ * pending promise, while the cost of a short one is the feature silently not
+ * working. The real bound is the task's shutdown, not this number.
+ */
+const SUMMARIZE_TIMEOUT_MS = 8 * 60_000;
 // How stale the push journey digest may grow before a caption re-checks it.
 // The digest is baked into the worker's system prompt (deliberately, for
 // provider prompt caching), so this is a compromise between two costs: a
@@ -17,6 +35,9 @@ const JOURNEY_REFRESH_MS = 60_000;
 
 export function createAgentDispatcher(c) {
   let worker = null;
+  // What the running worker was last configured with, so a published change can
+  // be told from a no-op.
+  let activeModelConfig = null;
   let workerReady = false;
   let reqSeq = 0;
   let initInfo = { llmApiKey: null, webSearchKey: null };
@@ -26,8 +47,70 @@ export function createAgentDispatcher(c) {
   // stay here and the worker reaches them over postMessage.
   const mcpReauthorizers = new Map();
 
+  async function resolveLlmKeys(modelConfig) {
+    if (modelConfig.provider === "fake") return { llmApiKey: null, webSearchKey: null };
+    try {
+      const cred = await c.getCredential("llm");
+      if (cred && typeof cred === "object") {
+        // Both stored shapes, read in one shared place (`llmApiKeyFrom`).
+        return { llmApiKey: llmApiKeyFrom(cred), webSearchKey: cred.braveApiKey ?? null };
+      }
+    } catch (err) {
+      c.logError("llm_credential_resolve_failed", err);
+    }
+    return { llmApiKey: null, webSearchKey: null };
+  }
+
+  /**
+   * Which model answers.
+   *
+   * This was two sources with a resolution order and the endpoint coming from a
+   * third, and the value actually in force could not be read off any one of
+   * them. One object now, with the same four fields `LLM_CONFIG` names, so the
+   * worker, the reconfigure check below and the journey-report path all agree
+   * on what "the model" is.
+   *
+   * Sourced from this deployment's own config rather than from `LLM_CONFIG`
+   * directly: on ECS the two are the same thing (`LLM_CONFIG` reads the
+   * `KELABO_LLM_*` the task definition sets), but a self-hosted operator
+   * running from `config/kelabo.json` has the provider and model there and
+   * nowhere in the environment at all. `LLM_CONFIG` supplies the defaults, so
+   * neither path can end up with a field nobody set.
+   */
+  function resolveModelConfig() {
+    return {
+      provider: c.config.llm?.provider || LLM_CONFIG.provider,
+      model: c.config.llm?.model || LLM_CONFIG.model,
+      smallModel: c.config.llm?.smallModel || LLM_CONFIG.smallModel,
+      baseUrl: c.config.openaiBaseUrl || LLM_CONFIG.baseUrl,
+    };
+  }
+
+  const sameModelConfig = (a, b) =>
+    !!a && !!b && a.provider === b.provider && a.model === b.model && a.smallModel === b.smallModel && a.baseUrl === b.baseUrl;
+
   async function ensureWorker() {
-    if (worker) return worker;
+    if (worker) {
+      // A configuration change reaches a *running* task. The worker is
+      // long-lived — without this, swapping the model would take effect on the
+      // next deploy, exactly the wait this replaced.
+      const next = resolveModelConfig();
+      if (next && !sameModelConfig(next, activeModelConfig)) {
+        const keys = await resolveLlmKeys(next);
+        activeModelConfig = next;
+        initInfo = keys;
+        worker.postMessage({
+          type: "init",
+          modelConfig: next,
+          knobs: c.config.gateway.agent,
+          llmApiKey: keys.llmApiKey,
+          webSearchKey: keys.webSearchKey,
+          openaiBaseUrl: next.baseUrl,
+        });
+        c.log("agent_model_reconfigured", { provider: next.provider, model: next.model });
+      }
+      return worker;
+    }
     const w = new Worker(new URL("./worker.js", import.meta.url));
     w.on("message", (msg) => onWorkerMessage(msg));
     w.on("error", (err) => c.logError("agent_worker_error", err));
@@ -45,28 +128,17 @@ export function createAgentDispatcher(c) {
     });
     worker = w;
 
-    let llmApiKey = null;
-    let webSearchKey = null;
-    if (c.config.llm.provider !== "fake") {      try {
-        const secret = await c.getSecret(c.config.secrets.llm);
-        if (secret && typeof secret === "object") {
-          llmApiKey = secret.apiKey ?? null;
-          webSearchKey = secret.braveApiKey ?? null;
-        } else if (typeof secret === "string") {
-          llmApiKey = secret;
-        }
-      } catch (err) {
-        c.logError("llm_secret_resolve_failed", err);
-      }
-    }
-    initInfo = { llmApiKey, webSearchKey };
+    const modelConfig = resolveModelConfig();
+    const keys = await resolveLlmKeys(modelConfig);
+    activeModelConfig = modelConfig;
+    initInfo = keys;
     w.postMessage({
       type: "init",
-      modelConfig: c.config.llm,
+      modelConfig,
       knobs: c.config.gateway.agent,
-      llmApiKey,
-      webSearchKey,
-      openaiBaseUrl: c.config.openaiBaseUrl,
+      llmApiKey: keys.llmApiKey,
+      webSearchKey: keys.webSearchKey,
+      openaiBaseUrl: modelConfig.baseUrl,
     });
     workerReady = true;
     c.shutdownHooks.push(async () => {
@@ -86,11 +158,20 @@ export function createAgentDispatcher(c) {
         return;
       case "summarize_result": {
         const p = pendingSummarize.get(msg.reqId);
-        if (p) {
-          pendingSummarize.delete(msg.reqId);
-          clearTimeout(p.timer);
-          p.resolve(msg.minutes ?? null);
+        if (!p) {
+          // The worker answered after the request was abandoned. The minutes it
+          // carries are real and are being thrown away, which is worth a line:
+          // it is the signature of a ceiling set too low rather than of an LLM
+          // that failed.
+          c.log("summarize_late", { kelaboId: msg.kelaboId, hadMinutes: !!msg.minutes, error: msg.error ?? null });
+          return;
         }
+        pendingSummarize.delete(msg.reqId);
+        clearTimeout(p.timer);
+        // An error from the worker is the one outcome that used to arrive as an
+        // ordinary `null` — indistinguishable from "the model wrote nothing".
+        if (msg.error) c.logError("summarize_failed", new Error(msg.error), { kelaboId: msg.kelaboId });
+        p.resolve(msg.minutes ?? null);
         return;
       }
       case "mcp_reauth": {
@@ -275,9 +356,14 @@ export function createAgentDispatcher(c) {
   async function summarize(kelaboId) {
     await ensureContext(kelaboId);
     const reqId = ++reqSeq;
+    const startedAt = Date.now();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         pendingSummarize.delete(reqId);
+        // Said out loud. A silent timeout here is indistinguishable from a
+        // kelabo that never asked for minutes, which is how this went unnoticed
+        // for every long kelabo the system has ever archived.
+        c.log("summarize_timeout", { kelaboId, waitedMs: Date.now() - startedAt });
         resolve(null);
       }, SUMMARIZE_TIMEOUT_MS);
       timer.unref?.();

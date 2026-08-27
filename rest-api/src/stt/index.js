@@ -1,4 +1,5 @@
 import { sttSessionSchema } from "@kelabo/contracts/schemas";
+import { sttKeyFrom } from "@kelabo/contracts/credentials";
 import { err } from "../errors.js";
 import { sttProvider } from "./interface.js";
 
@@ -9,9 +10,9 @@ import { sttProvider } from "./interface.js";
 // Kelabo, so the only thing standing between a kelabo's audio and somebody
 // else's bill is this endpoint. Hence the order: prove the kelabo is live and
 // the caller is in it BEFORE the long-lived key is even read, so a stranger
-// asking for a credential never reaches Secrets Manager, let alone the provider.
+// asking for a credential never reaches the credential store, let alone the provider.
 
-export function createSttToken({ config, db, secrets, fetchImpl = fetch }) {
+export function createSttToken({ config, db, credentials, fetchImpl = fetch }) {
   /**
    * @param {{kelaboId: string, participant: {identity: string},
    *          opts?: {language?: string, diarize?: boolean}}} args
@@ -38,8 +39,15 @@ export function createSttToken({ config, db, secrets, fetchImpl = fetch }) {
 
     let key;
     try {
-      key = await secrets.getSttKey(config);
+      // One credential holding a key per engine, so switching engines is a
+      // config change and never a credential rotation. The slot is the
+      // address now — there is no published secret name to resolve first.
+      key = sttKeyFrom(await credentials.get("stt"), id);
     } catch (e) {
+      // Refused, never silently switched. Falling back to whichever key the
+      // credential happens to hold would put us back where this started:
+      // capturing on one supplier and billing at another's rate, with nothing
+      // to show that it had happened.
       throw err(502, "stt_unavailable", String(e));
     }
 

@@ -301,7 +301,7 @@ async function executeRun(job) {
 
 async function onSummarize(msg) {
   if (!runtime) {
-    parentPort.postMessage({ type: "summarize_result", reqId: msg.reqId, minutes: null, error: "not_initialized" });
+    parentPort.postMessage({ type: "summarize_result", reqId: msg.reqId, kelaboId: msg.kelaboId, minutes: null, error: "not_initialized" });
     return;
   }
   const ctx = ensureCtx(msg.kelaboId);
@@ -309,8 +309,8 @@ async function onSummarize(msg) {
   if (msg.mcp) ctx.mcp = msg.mcp;
   try {
     const minutes = await ctx.mainAgent.summarize({ kelaboId: msg.kelaboId, transcript: ctx.transcript });
-    parentPort.postMessage({ type: "summarize_result", reqId: msg.reqId, minutes });
+    parentPort.postMessage({ type: "summarize_result", reqId: msg.reqId, kelaboId: msg.kelaboId, minutes });
   } catch (err) {
-    parentPort.postMessage({ type: "summarize_result", reqId: msg.reqId, minutes: null, error: err.message });
+    parentPort.postMessage({ type: "summarize_result", reqId: msg.reqId, kelaboId: msg.kelaboId, minutes: null, error: err.message });
   }
 }

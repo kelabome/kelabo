@@ -16,6 +16,8 @@ import { createRecords } from "../src/records.js";
 import { cutoffFromAge } from "@kelabo/contracts/retention";
 import { createSttToken } from "../src/stt/index.js";
 import { createAgent } from "../src/agent.js";
+import { createCredentials } from "../src/credentials.js";
+import { CREDENTIAL_SLOTS } from "@kelabo/contracts/credentials";
 
 const config = {
   env: "test",
@@ -57,12 +59,36 @@ const config = {
   retentionDays: 30,
 };
 
-const mcpSecretCalls = [];
 const secrets = {
   getCookieKey: async () => "test-signing-key",
-  getSttKey: async () => "stt-api-key",
-  putMcpSecret: async (config, identity, name, token) => mcpSecretCalls.push({ op: "put", identity, name, token }),
-  deleteMcpSecret: async (config, identity, name) => mcpSecretCalls.push({ op: "delete", identity, name }),
+};
+
+// Supplier credentials, by slot. The real module is a TTL cache over two db
+// calls; what every test here actually needs is "what is in the slot", so this
+// stands in for it and `credentialStore` below exercises the real one against
+// the stub db where the storage itself is what is under test.
+const credentialValues = {
+  llm: '{"apiKey":"llm-key"}',
+  stt: '{"deepgram":"stt-api-key","soniox":"stt-api-key"}',
+  rtc: '{"sfuAppId":"app","sfuAppSecret":"sec"}',
+};
+const credentials = {
+  get: async (slot) => (credentialValues[slot] ? JSON.parse(credentialValues[slot]) : null),
+  getRaw: async (slot) => credentialValues[slot] ?? null,
+  exists: async (slot) => !!credentialValues[slot],
+  describe: async (slot) => ({
+    slot,
+    configured: !!credentialValues[slot],
+    version: credentialValues[slot] ? 1 : 0,
+    rotatedAt: credentialValues[slot] ? 1 : null,
+    rotatedBy: "",
+  }),
+  describeAll: async () =>
+    Promise.all(CREDENTIAL_SLOTS.map((slot) => credentials.describe(slot))),
+  put: async (slot, value, { by } = {}) => {
+    credentialValues[slot] = typeof value === "string" ? value : JSON.stringify(value);
+    return { slot, configured: true, version: 1, rotatedAt: 1, rotatedBy: by ?? "" };
+  },
 };
 const sentEmails = [];
 const sentInvites = [];
@@ -212,13 +238,13 @@ const records = createRecords({
     },
   },
 });
-const sttToken = createSttToken({ config, db, secrets, fetchImpl: async () => ({ ok: false, status: 500 }) });
+const sttToken = createSttToken({ config, db, credentials, fetchImpl: async () => ({ ok: false, status: 500 }) });
 
 const mcpOauth = createMcpOauth({ config, db, secrets, fetchImpl: mcpFetch });
 
 const agent = createAgent({ config, db, secrets });
 
-const app = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
+const app = createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
 
 function cookieValue(res, name) {
   const c = (res.cookies || []).find((s) => s.startsWith(`${name}=`));
@@ -558,11 +584,20 @@ await test("GET /kelabos/:id public vs participant views", async () => {
   assert.equal(full.json.me, guestIdentity, "participant-scoped view reports the caller's own identity");
   // The capability map (docs 19 §3): stated to participants so the client
   // renders absence instead of discovering it by failing. The stub wires no
-  // secrets module, and everything short of a definitive "secret missing"
+  // credentials module, and everything short of a definitive "slot empty"
   // must read as on — the permissive default.
-  assert.deepEqual(Object.keys(full.json.capabilities).sort(), ["assistant", "rtc", "stt", "video"]);
+  assert.deepEqual(
+    Object.keys(full.json.capabilities).sort(),
+    ["assistant", "rtc", "stt", "typedAssistant", "video"]
+  );
+  // How long the call may run is not a sixth capability: it is
+  // `entitlement.call.allowance`, on the same response, where the rest of the
+  // grant is (design-entitlements §3.2).
+  assert.ok(full.json.entitlement?.capabilities?.call);
   assert.equal(full.json.capabilities.stt.on, true);
   assert.equal(full.json.capabilities.assistant.on, true);
+  assert.equal(full.json.capabilities.typedAssistant.on, true);
+  assert.equal(full.json.capabilities.rtc.on, true);
   assert.equal(full.json.capabilities.rtc.mode, full.json.rtcMode);
   assert.equal(pub.json.capabilities, undefined, "capabilities are participant-scoped");
 
@@ -684,10 +719,13 @@ await test("MCP servers: upsert/list/toggle/delete (host scope)", async () => {
   const put = await call("PUT", "/me/mcp", { body: { name: "jira", url: "https://mcp.example.com/jira", secret: "tok123" }, cookies: sessionCookies });
   assert.equal(put.statusCode, 200);
   assert.equal(put.json.server.name, "jira");
-  assert.equal(put.json.server.secretRef, undefined, "secretRef is an internal path, never returned");
+  assert.equal(put.json.server.secretRef, undefined, "there is no secret path any more");
   assert.equal(put.json.server.hasSecret, true);
   assert.equal(put.json.server.authType, "bearer", "a pasted token implies bearer auth");
-  assert.deepEqual(mcpSecretCalls, [{ op: "put", identity: "host@example.com", name: "jira", token: "tok123" }]);
+  // The token itself is a SECRET# row in the same partition as the server —
+  // beside the TOKEN# row an OAuth server would use. It used to be one Secrets
+  // Manager secret per user per server.
+  assert.equal(await db.getMcpSecret("host#host@example.com", "jira"), "tok123");
 
   const list = await call("GET", "/me/mcp", { cookies: sessionCookies });
   assert.equal(list.json.servers.length, 1);
@@ -695,18 +733,21 @@ await test("MCP servers: upsert/list/toggle/delete (host scope)", async () => {
   assert.equal(list.json.servers[0].enabled, true);
   assert.equal(list.json.servers[0].hasSecret, true);
   assert.equal(list.json.servers[0].secret, undefined, "token never returned");
-  assert.equal(list.json.servers[0].secretRef, undefined, "secret path never returned");
+  assert.equal(list.json.servers[0].token, undefined, "token never returned under any name");
+  assert.equal(JSON.stringify(list.json).includes("tok123"), false, "and not nested anywhere either");
   assert.equal(list.json.servers[0].connected, false, "no OAuth token for a bearer server");
 
-  // Toggle off without a secret: existing secretRef must survive.
+  // Toggle off without a secret: the existing token must survive.
   const off = await call("PUT", "/me/mcp", { body: { name: "jira", url: "https://mcp.example.com/jira", enabled: false }, cookies: sessionCookies });
   assert.equal(off.json.server.enabled, false);
   assert.equal(off.json.server.hasSecret, true, "existing secret survives a toggle");
-  assert.equal(mcpSecretCalls.length, 1, "no secret rewrite on toggle");
+  assert.equal(await db.getMcpSecret("host#host@example.com", "jira"), "tok123", "and is not rewritten");
 
   const del = await call("DELETE", "/me/mcp/jira", { cookies: sessionCookies });
   assert.equal(del.statusCode, 200);
-  assert.deepEqual(mcpSecretCalls.at(-1), { op: "delete", identity: "host@example.com", name: "jira" });
+  // Deleting the server takes its token with it, rather than orphaning a row
+  // in a partition nothing lists.
+  assert.equal(await db.getMcpSecret("host#host@example.com", "jira"), null);
   const gone = await call("GET", "/me/mcp", { cookies: sessionCookies });
   assert.equal(gone.json.servers.length, 0);
 
@@ -2045,7 +2086,7 @@ await test("stt: a session carries the provider, the socket url and server-chose
   const mint = createSttToken({
     config,
     db: sttDb,
-    secrets,
+    credentials,
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
       return { ok: true, status: 200, json: async () => ({ access_token: "tok-123", expires_in: 60 }) };
@@ -2078,7 +2119,7 @@ await test("stt: a session carries the provider, the socket url and server-chose
 
 await test("stt: the deployment language is used when the client asks for none", async () => {
   const mint = createSttToken({
-    config, db: sttDb, secrets,
+    config, db: sttDb, credentials,
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ access_token: "t" }) }),
   });
   const session = await mint.mint({ kelaboId: "stt-2", participant: { identity: "host@example.com" } });
@@ -2091,7 +2132,7 @@ await test("stt: the deployment language is used when the client asks for none",
 await test("stt: a provider this build does not carry degrades, it does not 500", async () => {
   const mint = createSttToken({
     config: { ...config, stt: { ...config.stt, provider: "not-a-provider" } },
-    db: sttDb, secrets,
+    db: sttDb, credentials,
     fetchImpl: async () => { throw new Error("must not be called"); },
   });
   // Reached before the secret is read and before the network: an operator's
@@ -2106,7 +2147,10 @@ await test("stt: authorization happens before the key is ever read", async () =>
   let keyReads = 0;
   const mint = createSttToken({
     config, db: sttDb,
-    secrets: { ...secrets, getSttKey: async () => { keyReads++; return "k"; } },
+    credentials: {
+      ...credentials,
+      get: async () => { keyReads++; return { deepgram: "k", soniox: "k" }; },
+    },
     fetchImpl: async () => { throw new Error("must not be called"); },
   });
   await assert.rejects(
@@ -2125,7 +2169,7 @@ await test("stt: a provider returning an unusable session fails here, not in the
   // opens against `undefined`, audio streams, nothing is transcribed, and
   // nothing anywhere raises an error.
   const mint = createSttToken({
-    config, db: sttDb, secrets,
+    config, db: sttDb, credentials,
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
   });
   await assert.rejects(
@@ -2147,7 +2191,7 @@ await test("stt: soniox mints a restricted temporary key, not the long-lived one
   const mint = createSttToken({
     config: sonioxConfig,
     db: sttDb,
-    secrets: { ...secrets, getSttKey: async () => "long-lived-secret" },
+    credentials: { ...credentials, get: async () => ({ soniox: "long-lived-secret" }) },
     fetchImpl: async (url, init) => {
       calls.push({ url, body: JSON.parse(init.body), headers: init.headers });
       return {
@@ -2203,7 +2247,7 @@ await test("stt: soniox key ttl is long enough to refresh off the critical path"
   // whole latency budget the pooled design exists to protect.
   const mint = createSttToken({
     config: { ...config, stt: { ...config.stt, provider: "soniox", providers: {} } },
-    db: sttDb, secrets,
+    db: sttDb, credentials,
     fetchImpl: async (url, init) => {
       const body = JSON.parse(init.body);
       assert.ok(body.expires_in_seconds >= 300, `ttl ${body.expires_in_seconds}s is too short to refresh between utterances`);
@@ -2221,7 +2265,7 @@ await test("stt: turning endpoint detection off removes its tuning too", async (
       ...config,
       stt: { ...config.stt, provider: "soniox", providers: { soniox: { endpointDetection: false } } },
     },
-    db: sttDb, secrets,
+    db: sttDb, credentials,
     fetchImpl: async () => ({ ok: true, status: 201, json: async () => ({ api_key: "t" }) }),
   });
   const session = await mint.mint({ kelaboId: "stt-11", participant: { identity: "host@example.com" } });
@@ -2234,7 +2278,7 @@ await test("stt: turning endpoint detection off removes its tuning too", async (
 await test("stt: 'multi' means no language hint, which is soniox's native mode", async () => {
   const mint = createSttToken({
     config: { ...config, stt: { ...config.stt, provider: "soniox", language: "multi", providers: {} } },
-    db: sttDb, secrets,
+    db: sttDb, credentials,
     fetchImpl: async () => ({ ok: true, status: 201, json: async () => ({ api_key: "t" }) }),
   });
   const session = await mint.mint({ kelaboId: "stt-7", participant: { identity: "host@example.com" } });
@@ -2248,7 +2292,7 @@ await test("stt: endpoint detection is a knob, because it trades against diariza
       ...config,
       stt: { ...config.stt, provider: "soniox", providers: { soniox: { endpointDetection: false } } },
     },
-    db: sttDb, secrets,
+    db: sttDb, credentials,
     fetchImpl: async () => ({ ok: true, status: 201, json: async () => ({ api_key: "t" }) }),
   });
   const session = await mint.mint({ kelaboId: "stt-8", participant: { identity: "host@example.com" } });
@@ -2264,7 +2308,7 @@ await test("stt: both providers answer the same interface", async () => {
   ]) {
     const mint = createSttToken({
       config: { ...config, stt: { ...config.stt, provider } },
-      db: sttDb, secrets,
+      db: sttDb, credentials,
       fetchImpl: async () => ({ ok: true, status: 200, json: async () => response }),
     });
     const session = await mint.mint({
@@ -2276,6 +2320,232 @@ await test("stt: both providers answer the same interface", async () => {
     assert.ok(session.expiresInSeconds > 0);
     assert.equal(typeof session.params, "object");
   }
+});
+
+// --- private records (design-registered §7) ---------------------------------
+
+let signInSeq = 0;
+async function signIn(email) {
+  const ip = `10.9.0.${++signInSeq}`;
+  await call("POST", "/auth/otp/request", { body: { email }, ip });
+  const code = sentEmails.at(-1).code;
+  const ver = await call("POST", "/auth/otp/verify", { body: { email, code }, ip });
+  return { cookies: { kelabo_session: cookieValue(ver, "kelabo_session") }, identity: email };
+}
+
+await test("records: a private record is closed to the guests who were in the room", async () => {
+  const host = await signIn("keeper@example.com");
+  const created = await call("POST", "/kelabos", {
+    cookies: host.cookies,
+    body: { title: "Board seat", private: true },
+  });
+  // The flag is a property of the kelabo from creation, not something applied
+  // at the end — a host must be able to decide it before anyone speaks.
+  assert.equal((await db.getKelaboMeta(created.json.kelaboId)).private, true);
+
+  const guestIdentity = "guest:11111111-2222-3333-4444-555555555555";
+  db.__putHistory({
+    archiveId: "arch-private-1",
+    kelaboId: created.json.kelaboId,
+    title: "Board seat",
+    host: "keeper@example.com",
+    startedAt: Date.now() - 60_000,
+    endedAt: Date.now(),
+    participantIdentities: ["keeper@example.com", "colleague@example.com", guestIdentity],
+    private: true,
+  });
+
+  // The people with accounts keep it…
+  const owner = await call("GET", "/records/arch-private-1", { cookies: host.cookies });
+  assert.equal(owner.statusCode, 200);
+  const colleague = await signIn("colleague@example.com");
+  assert.equal((await call("GET", "/records/arch-private-1", { cookies: colleague.cookies })).statusCode, 200);
+
+  // …the link guest, who saw everything while it ran, loses it at the end.
+  const asGuest = await records.getRecord({ identity: guestIdentity, archiveId: "arch-private-1" }).then(
+    () => "allowed",
+    (e) => e.code
+  );
+  assert.equal(asGuest, "not_a_participant");
+});
+
+await test("records: an ordinary record still belongs to everyone who was there", async () => {
+  const guestIdentity = "guest:99999999-8888-7777-6666-555555555555";
+  db.__putHistory({
+    archiveId: "arch-open-1",
+    kelaboId: "k-open",
+    title: "Open",
+    host: "keeper@example.com",
+    startedAt: Date.now() - 60_000,
+    endedAt: Date.now(),
+    participantIdentities: ["keeper@example.com", guestIdentity],
+  });
+  const rec = await records.getRecord({ identity: guestIdentity, archiveId: "arch-open-1" });
+  assert.equal(rec.archiveId, "arch-open-1");
+});
+
+// --- the credential store ---------------------------------------------------
+
+// The real credential store, over the stub db's credentials table. Not a
+// hand-written fake: the properties these tests care about — that a value
+// round-trips, that a status carries none of it, that one slot cannot be read
+// through another — are properties of that module and its keys, so it is the
+// thing under test.
+const credentialStore = createCredentials({ db, ttlMs: 0, now: () => 1_700_000_000_000 });
+
+await test("credentials: a slot round-trips, and its status carries none of the value", async () => {
+  const status = await credentialStore.put("stt", { deepgram: "dg-key" }, { by: "op@example.com" });
+  assert.equal(status.configured, true);
+  assert.equal(status.version, 1);
+  assert.equal(status.rotatedBy, "op@example.com");
+  assert.equal(JSON.stringify(status).includes("dg-key"), false, "a status must never carry a credential");
+  assert.equal(status.fields.deepgram, true);
+  assert.equal(status.fields.soniox, false, "per field, so a key stored under a typo cannot look correct");
+
+  assert.deepEqual(await credentialStore.get("stt"), { deepgram: "dg-key" });
+  assert.equal(await credentialStore.getRaw("stt"), '{"deepgram":"dg-key"}', "stored verbatim, byte for byte");
+  assert.equal(await credentialStore.exists("stt"), true);
+  // One partition per slot: reading one must never reach another.
+  assert.equal(await credentialStore.get("llm"), null);
+  assert.equal(await credentialStore.exists("llm"), false);
+});
+
+await test("credentials: a rotation counts, and keeps the slot's own first-written date", async () => {
+  const first = await credentialStore.put("mail", { mailersend: "ms-1" });
+  const second = await credentialStore.put("mail", { mailersend: "ms-2" });
+  assert.equal(second.version, first.version + 1);
+  // `createdAt` belongs to the first write of a slot, not to the latest
+  // rotation — "when did this deployment get a mail key?" is a different
+  // question from "when was it last changed?".
+  assert.equal((await db.getCredential("mail")).createdAt, 1_700_000_000_000);
+  assert.deepEqual(await credentialStore.get("mail"), { mailersend: "ms-2" });
+});
+
+await test("credentials: an unknown slot is refused rather than silently created", async () => {
+  await assert.rejects(() => credentialStore.put("nonsense", "x"), /unknown slot/);
+  await assert.rejects(() => credentialStore.get("nonsense"), /unknown slot/);
+  assert.equal(await credentialStore.exists("nonsense"), false);
+});
+
+await test("credentials: a deployment with no credentials table reports off, not broken", async () => {
+  // The upgrade order AGENTS.md warns about: the code can reach a deployment
+  // before `cdk deploy` has made the table. Every consumer treats a missing
+  // credential as "this capability is off", which is the same answer a missing
+  // secret used to give — so the failure is a hidden feature, not a 500 on
+  // every request.
+  const tableless = createCredentials({
+    db: { getCredential: async () => null, getCredentialStatus: async () => null, putCredential: async () => {} },
+    ttlMs: 0,
+  });
+  assert.equal(await tableless.get("stt"), null);
+  assert.equal(await tableless.exists("stt"), false);
+  assert.equal((await tableless.describe("stt")).configured, false);
+
+  // And a read that FAILS is not the same thing: a probe hiccup must never
+  // switch a working feature off, so it reads as configured (docs 19 §4).
+  // AccessDenied from a drifted IAM grant lands here too, deliberately: a
+  // mistake in the policy leaves a capability that looks on and fails at use,
+  // never one that silently disappears.
+  const thrower = async () => { throw new Error("throttled"); };
+  const flaky = createCredentials({
+    db: { getCredential: thrower, getCredentialStatus: thrower, putCredential: async () => {} },
+    ttlMs: 0,
+  });
+  assert.equal(await flaky.exists("stt"), true, "a probe failure must not switch a capability off");
+});
+
+// --- the boundary the projected read exists to restore ------------------------
+
+await test("credentials: existence is answerable from a row with no value attribute at all", async () => {
+  // The whole point, and the only version of this test that proves anything.
+  //
+  // The Lambda's role may read `CRED#llm` and `CRED#rtc` *only* through the
+  // `CREDENTIAL_STATUS_ATTRS` projection (`infra/lib/lambda-stack.js`), which
+  // is how it can answer "is the assistant configured?" for the capability map
+  // (docs 19 §3) while being unable to read the key — the property
+  // `secretsmanager:DescribeSecret`-without-`GetSecretValue` gave before the
+  // move to DynamoDB (docs 20 §6.1). So `exists()` must work against a row
+  // that has no `value` in it. A stub row carrying the value would pass
+  // whatever `exists()` did, including reading it.
+  const rows = {
+    // Written today: carries the non-secret `configured` marker.
+    llm: { PK: "CRED#llm", SK: "META", slot: "llm", configured: true, version: 3, rotatedAt: 7, rotatedBy: "op", createdAt: 1 },
+    // Written before the marker existed, seen through the same projection:
+    // neither `configured` nor `value`. The row being there is the signal.
+    rtc: { PK: "CRED#rtc", SK: "META", slot: "rtc", version: 1, rotatedAt: 7, rotatedBy: "op", createdAt: 1 },
+  };
+  const projected = createCredentials({
+    ttlMs: 0,
+    db: {
+      getCredentialStatus: async (slot) => rows[slot] ?? null,
+      // A whole-item read of these slots is AccessDenied in the deployment, so
+      // it is AccessDenied here. Nothing on the status path may reach it.
+      getCredential: async () => { throw new Error("AccessDeniedException"); },
+      putCredential: async () => {},
+    },
+  });
+
+  for (const row of Object.values(rows)) {
+    assert.equal("value" in row, false, "the fixture must not carry a credential, or it proves nothing");
+  }
+  assert.equal(await projected.exists("llm"), true, "the marker answers it");
+  assert.equal(await projected.exists("rtc"), true, "a legacy row answers it by existing");
+  assert.equal(await projected.exists("stt"), false, "a slot with no row at all is off");
+
+  const st = await projected.describe("llm");
+  assert.equal(st.configured, true);
+  assert.equal(st.version, 3);
+  assert.equal(st.rotatedBy, "op");
+  // Per-field detail is information about the credential; a component that may
+  // not read the credential does not get it.
+  assert.deepEqual(st.fields, { apiKey: false });
+  assert.deepEqual(st.unknown, []);
+});
+
+await test("credentials: the projected cache and the full cache are separate", async () => {
+  // One cache would defeat the arrangement in both directions: a cheap
+  // `exists()` could hand `get()` a row with no `value` in it, and a whole-row
+  // read could satisfy a status read — so the code would stop exercising the
+  // projected path IAM actually permits, and the boundary would only be
+  // discovered in production on the slot that matters.
+  let full = 0;
+  let status = 0;
+  const row = { PK: "CRED#stt", SK: "META", slot: "stt", value: '{"soniox":"SECRET"}', configured: true, version: 1 };
+  const both = createCredentials({
+    ttlMs: 60_000,
+    now: () => 1_700_000_000_000,
+    db: {
+      getCredential: async () => { full++; return row; },
+      getCredentialStatus: async () => {
+        status++;
+        return { PK: row.PK, SK: row.SK, slot: row.slot, configured: true, version: 1 };
+      },
+      putCredential: async () => {},
+    },
+  });
+
+  assert.equal(await both.exists("stt"), true);
+  assert.equal(status, 1);
+  assert.equal(full, 0, "a status question must not read the credential");
+
+  // The projected read is cached and did not populate the full one.
+  assert.deepEqual(await both.get("stt"), { soniox: "SECRET" });
+  assert.equal(full, 1, "the full read had to go to the table itself");
+  assert.equal(status, 1);
+
+  // And now the reverse: the full read must not have populated the projected
+  // cache either — it already had its own entry, and a hit there must not be
+  // servable from a row that carries the value.
+  assert.equal(await both.exists("stt"), true);
+  assert.equal(status, 1, "still the cached projected row");
+  assert.equal(full, 1);
+
+  // A rotation drops both, because it invalidates both.
+  both.forget("stt");
+  assert.equal(await both.exists("stt"), true);
+  assert.deepEqual(await both.get("stt"), { soniox: "SECRET" });
+  assert.equal(status, 2);
+  assert.equal(full, 2);
 });
 
 console.log(`\n${passed} tests passed${process.exitCode ? " (with failures)" : ""}`);

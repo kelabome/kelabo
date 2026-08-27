@@ -30,7 +30,11 @@ export function useTypeAnywhere(ref, enabled = true) {
     // default action then types the character into the newly focused input.
     const onKeyDown = e => {
       if (e.metaKey || e.ctrlKey || e.altKey) return
-      if (e.key.length !== 1) return
+      // `key` is absent on synthetic keydowns — password managers and some IMEs
+      // dispatch them — and reading `.length` off undefined threw out of a
+      // document-level listener, which takes the whole page with it. Seen on
+      // the sign-in page, which is exactly where a password manager fires.
+      if (typeof e.key !== 'string' || e.key.length !== 1) return
       if (isEditable(document.activeElement) || overlayOpen()) return
       target()?.focus()
     }

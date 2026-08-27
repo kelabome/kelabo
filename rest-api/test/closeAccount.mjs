@@ -59,6 +59,7 @@ function makeWorld(overrides = {}) {
       return world.favourites.length;
     },
     getMcpServers: async () => world.mcpServers,
+    deleteMcpSecret: async (scope, name) => ops.push(["mcpSecret", name]),
     deleteMcpToken: async (scope, name) => ops.push(["mcpToken", name]),
     deleteMcpServer: async (scope, name) => ops.push(["mcpServer", name]),
     listRefreshTokensByIdentity: async () => world.refreshRows,
@@ -77,9 +78,7 @@ function makeWorld(overrides = {}) {
       return { archiveId, outcome: row?.host === identity ? "purged" : "removed_from_list" };
     },
   };
-  const secrets = {
-    deleteMcpSecret: async (config, identity, name) => ops.push(["mcpSecret", name]),
-  };
+  const secrets = {};
   const closeAccount = createCloseAccount({
     config: { retentionDays: 30 },
     db,
@@ -174,12 +173,16 @@ function makeWorld(overrides = {}) {
   // The hosted record was deleted once despite two index rows; the secretless
   // MCP server deleted without a secret call.
   assert.equal(ops.filter((o) => o[0] === "deleteRecord" && o[1] === "hosted1").length, 1);
+  // Every server's bearer token is deleted, not only the ones carrying the old
+  // `secretRef` pointer: since the token moved into the mcp table, a row
+  // written today has no pointer at all, and gating on one would leave the new
+  // rows behind on exactly the accounts this function exists to erase.
   assert.deepEqual(
     ops.filter((o) => o[0] === "mcpSecret").map((o) => o[1]),
-    ["github"],
-    "only the server with a secretRef gets a Secrets Manager delete"
+    ["github", "plain"],
+    "every server's SECRET# row is deleted with it"
   );
-  ok("duplicate index rows collapse to one deletion; only real secrets are deleted");
+  ok("duplicate index rows collapse to one deletion; every bearer token goes with its server");
 }
 
 // --- dry run ----------------------------------------------------------------

@@ -19,6 +19,7 @@ where it fits (ARCHITECTURE §15.8), add OTP + MCP.
 | `kelabo-<env>-refresh` | `RT#<tokenId>` | — | `identity-index` | yes (~30–90d) | rotating, revocable refresh tokens (long sessions) |
 | `kelabo-<env>-mcp` | `MCP#<scope>` | `SK` | — | none | org/host/kelabo MCP config |
 | `kelabo-<env>-contacts` | `CONTACT#<owner>` | `SK` | — | on external decline-cleanup | favourites (`FAV#`) + external links (`PEER#`) — docs 18 §4 |
+| `kelabo-<env>-credentials` | `CRED#<slot>` | `META` | — | **none, deliberately** | supplier keys (LLM, STT, Cloudflare Realtime, mail) — §6c |
 | `kelabo-<env>-journeys` | `PK` | `SK` | `tenant-status-index`, `accessor-index` | **none, deliberately** | journeys: container linking related kelabos — docs 20, §6b |
 
 S3: `kelabo-<env>-archives-<acct>` — full transcript/board JSON.
@@ -243,6 +244,7 @@ sharing the table.
 |------------|----|----|---------|
 | host defaults | `MCP#host#<identity>` | `SERVER#<name>` | host personal MCP servers (managed in Settings, `GET/PUT/DELETE /me/mcp`) |
 | OAuth tokens | `MCP#host#<identity>` | `TOKEN#<name>` | `{accessToken, refreshToken, tokenType, scope, expiresAt, obtainedAt}` — never returned by any API route |
+| bearer tokens | `MCP#host#<identity>` | `SECRET#<name>` | `{token, updatedAt}` — a host's pasted bearer token; never returned by any API route |
 | client registrations | `MCP#client` | `AS#<issuer>` | RFC 7591 dynamic client registration, one per authorization server, shared by all users of the deployment |
 
 **This table is encrypted with a customer-managed KMS key** (`alias/kelabo-<env>-mcp`)
@@ -253,9 +255,13 @@ the kelabo meta has `mcpEnabled: false` (host opt-out at creation).
 
 Credentials by `authType`:
 
-- `bearer` — a pasted token, written to Secrets Manager at
-  `kelabo/<env>/mcp/<identity>/<name>` by the REST API; the item stores only
-  `secretRef` (`<identity>/<name>`).
+- `bearer` — a pasted token, stored as the `SECRET#<name>` row above, in the
+  same partition as the `SERVER#<name>` it belongs to and under the same
+  customer-managed key. It used to be one Secrets Manager secret per user per
+  server (`kelabo/<env>/mcp/<identity>/<name>`), which put the two halves of
+  "authenticate to an MCP server" in two different stores and was the only
+  thing here that scaled with users × servers rather than with environments.
+  No route returns it; `GET /me/mcp` reports `hasSecret`.
 - `oauth` — tokens in the `TOKEN#` item above, obtained by the REST API
   (authorization-code + PKCE) and **refreshed by the gateway**, which therefore
   holds `dynamodb:PutItem` on this table plus KMS encrypt/decrypt. See
@@ -330,6 +336,117 @@ Access is shared: the REST API has read/write (the whole §11 surface of docs
 writes their `ready`/`failed` rows, reads journey context for the agent's
 system prompt, and settles contributor counts on kelabo end
 (`infra/lib/gateway-ecs-stack.js`).
+
+---
+
+## 6c. `credentials` table (supplier keys)
+
+One item per slot. `PK = CRED#<slot>`, `SK = META`
+(`contracts/src/credentials.js`). PITR on, RETAIN, **and its own
+customer-managed KMS key** (`alias/kelabo-<env>-credentials`) — so the material
+can be made unreadable by disabling a key, independently of who holds
+`dynamodb:GetItem`. That was the property Secrets Manager was giving us and the
+one thing that had to survive the move.
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `slot` | S | `llm` \| `stt` \| `rtc` \| `mail` — a **closed set**; an unknown slot is refused |
+| `value` | S | JSON, one key per **declared field** for that slot (below). An unknown key is refused |
+| `version` | N | counts rotations |
+| `rotatedAt`, `rotatedBy` | N/S | when it last moved, and who moved it |
+| `createdAt` | N | the **first** write of the slot, preserved across rotations |
+
+**Every slot declares its fields, and nothing else is accepted**
+(`CREDENTIAL_FIELDS`):
+
+| Slot | Fields | Required |
+|---|---|---|
+| `llm` | `apiKey` | yes |
+| `stt` | `soniox`, `deepgram` | neither — `stt.provider` picks which is used, so both may be set |
+| `rtc` | `sfuAppId`, `sfuAppSecret`, `turnKeyId`, `turnKeyApiToken` | the first two |
+| `mail` | `mailersend` | **none** — see below |
+
+`mail` is the only slot where an empty credential is a *working* configuration
+rather than a missing one, and the exception is worth stating because it looks
+like an oversight. Sending through SES needs no key at all: the Lambda
+authenticates with its own IAM role. So `mailKeyFrom` answers `""` where
+`sttKeyFrom` throws, and no field is `required`. The slot exists anyway, because
+the day SES refuses production access is the day that stops being true.
+
+The closed field list is not tidiness. A credential used to be a free-form JSON
+blob, and one deployment's `stt` secret accumulated four keys — `soniox`,
+`deepgram`, and the typos `oniox` and `onionx`. Nothing rejected them, nothing
+displayed them, and the lookup accepted
+`s[provider] || s.apiKey || s.key || s.value`, so a key stored under a
+misspelling was indistinguishable from a correct one until the fallback chain
+happened to pick differently. Three things changed together: the field list is
+closed, the lookup is exact (a missing key is an error at mint time), and status
+reports **per field** with any stray key listed under `unknown`.
+`rest-api/scripts/migrate-credentials.mjs` normalises rather than copying
+verbatim, so the typos are dropped on the way in and named in its output.
+
+**One partition per slot, not one partition with the slot in the sort key.** A
+single `PK = CRED` partition would make "list every slot" one Query — and would
+make every slot readable by anything that can read one. Per-slot partitions are
+what let `dynamodb:LeadingKeys` name exactly the credentials a component may
+reach, which is the shape the Secrets Manager prefix grants had. The gateway
+gets `CRED#llm` and `CRED#rtc`, read-only. The REST API gets `GetItem` only, in
+two statements: the **values** of `CRED#stt` and `CRED#mail` (it mints STT
+tokens and sends mail with them), and `CRED#llm`/`CRED#rtc` fenced to the
+non-secret attributes. No `Scan` (the one call that returns every credential in
+one response), no `DeleteItem` (a credential is replaced, never removed) and no
+`PutItem` — master has no credential-write route, and the operator scripts that
+write one run under the operator's own AWS credentials.
+
+**A non-secret `configured` marker, beside the value.** Always `true` —
+`credentialItem` refuses an empty value, so writing the row is what it records.
+It exists so that "is this capability configured?" has an answer that is not the
+credential. Under Secrets Manager the control plane held `DescribeSecret` and
+never `GetSecretValue`, which is why journey report synthesis runs in the
+Gateway (docs 20 §6.1); in DynamoDB "does the item exist" and "what is in it"
+are otherwise the same `GetItem`. `CREDENTIAL_STATUS_ATTRS` — the row minus
+`value`, frozen in `contracts/src/credentials.js` — is the one list behind both
+the `ProjectionExpression` of `rest-api/src/db.js`'s `getCredentialStatus` and
+the `dynamodb:Attributes` + `dynamodb:Select = SPECIFIC_ATTRIBUTES` condition in
+`infra/lib/lambda-stack.js`, so a projection and a policy cannot drift apart.
+It includes `PK`/`SK` because a `dynamodb:Attributes` condition that omits a
+table's key attributes denies the request outright.
+
+Rows written before the marker existed still read correctly: `credentialStatus`
+falls back to the value when the row carries one, and — for a legacy row seen
+through the projection, where there is by construction neither marker nor value
+— treats the row's existence as the signal, which is what "configured" meant
+before.
+
+**Its own table, not a partition of an existing one.** Every other table here is
+encrypted with the AWS-owned default key and walked by reset and export tooling,
+and the gateway already reads several of them. A credential in one would be one
+careless `Scan` away from a log.
+
+**No `ttl`.** A credential that expired itself would take a live capability down
+with nothing to say why.
+
+**The previous value is not kept.** A rotation overwrites. An old credential is
+not an audit record — it is a live key somebody could still use. What is kept is
+the count, the time and the author.
+
+### What stayed in Secrets Manager
+
+| Secret | Read by | Contents |
+|---|---|---|
+| `kelabo/<env>/cookie-key` | Lambda, gateway | signs **all three token families** |
+| `kelabo/<env>/api-origin` | Lambda; CloudFront at deploy time | the origin-check header value |
+| `kelabo/<env>/oidc-google`, `…/oidc-apple` | Lambda | OIDC client secrets |
+
+Every one is read at a cold start, compared against something, and never edited
+by an operator — so there is no rotation story a console improves. The line is
+*identity and perimeter stay in Secrets Manager; suppliers come here.* A
+supplier key that leaks costs money and is rotated at the supplier; a cookie key
+that leaks is every account in the deployment, and no rotation undoes the
+sessions already minted with it.
+
+Migration for an existing deployment: `make credentials-migrate env=<env>`
+(dry by default, `write=1` to commit). The source secrets are never deleted.
 
 ---
 
@@ -412,6 +529,7 @@ system prompt, and settles contributor counts on kelabo end
 | S3 archives | permanent (configurable lifecycle) |
 | guest identities | ephemeral (cookie only) |
 | journeys | permanent — no TTL attribute at all; deletion is always an explicit owner act (docs 20 §14) |
+| supplier credentials | permanent — no TTL attribute at all; a rotation overwrites, and the previous value is not kept (§6c) |
 
 Ephemeral-by-default posture for privacy (ARCHITECTURE §14.3): only registered
 participants retain access; guests leave no durable identity.

@@ -4,6 +4,7 @@ import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import { CREDENTIAL_STATUS_ATTRS } from "@kelabo/contracts/credentials";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logRetention } from "./log-retention.js";
@@ -76,18 +77,17 @@ export class LambdaStack extends Stack {
         KELABO_TABLE_REFRESH: names.refresh,
         KELABO_TABLE_MCP: names.mcp,
         KELABO_TABLE_CONTACTS: names.contacts,
+        // Supplier credentials. Each key used to arrive here as its own secret
+        // NAME; they are now rows in this table, addressed by slot, so one
+        // table name replaces the lot — and adding a supplier (mail was the
+        // most recent) is no longer a change to this stack.
+        KELABO_TABLE_CREDENTIALS: names.credentials,
         KELABO_TABLE_JOURNEYS: names.journeys,
         KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
         KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
-        KELABO_SECRET_STT: cfg.secrets.stt,
-        // Existence-probed only (capability map, docs 19 §3) — the API never
-        // reads these values; see the DescribeSecret-only policy below.
-        KELABO_SECRET_LLM: cfg.secrets.llm,
-        KELABO_SECRET_CLOUDFLARE_RTC: cfg.secrets.cloudflareRealtime,
         KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
         KELABO_SECRET_OIDC_GOOGLE: cfg.secrets.oidcGoogle,
         KELABO_SECRET_OIDC_APPLE: cfg.secrets.oidcApple,
-        KELABO_SECRET_MCP_PREFIX: cfg.secrets.mcpPrefix,
         // The shared secret CloudFront sends, and whether to insist on it.
         // Only the NAME travels here; the value is read at runtime.
         // Empty unless the env made a configuration set. Naming one that does
@@ -98,12 +98,10 @@ export class LambdaStack extends Stack {
         // Which transport in rest-api/src/mail/ carries outbound mail, and the
         // address it sends from. `fromAddress` is provider-neutral; the
         // KELABO_SES_* pair below configures the SES transport specifically.
+        // No mail secret name travels with them: the key is the `mail`
+        // credential slot, like every other supplier's.
         KELABO_MAIL_PROVIDER: cfg.mail.provider,
         KELABO_MAIL_FROM_ADDRESS: cfg.mail.fromAddress,
-        // Only read when the provider needs a key. SES does not — it
-        // authenticates with this function's own role — so an SES deployment
-        // never touches it and the secret need not exist.
-        KELABO_SECRET_MAIL: cfg.secrets.mail,
         // Usually this stack's own region. It differs only when a deployment
         // moved an environment's mail to another region to give it its own
         // sandbox status and reputation, so the SES client cannot just take
@@ -147,6 +145,109 @@ export class LambdaStack extends Stack {
     tables.history.grantReadData(this.fn);
     tables.mcp.grantReadWriteData(this.fn);
     tables.contacts.grantReadWriteData(this.fn);
+    // Supplier credentials, in two statements, because this component's
+    // relationship with the four slots is not one relationship.
+    //
+    // ## What broke, and what these two statements put back
+    //
+    // Under Secrets Manager this role held `secretsmanager:DescribeSecret` on
+    // the supplier secrets and *never* `GetSecretValue`. That asymmetry was
+    // load-bearing: it let the control plane answer "is the assistant
+    // configured at all?" for the capability map (docs 19 §3) while being
+    // structurally unable to read the LLM key — which is the decisive reason
+    // journey report synthesis runs in the Gateway and not here (docs 20 §6.1,
+    // `gateway/src/journeys.js`). The move to DynamoDB lost it silently,
+    // because "does the item exist" and "what is in it" are the same `GetItem`,
+    // and a single `CRED#*` statement therefore handed this role the LLM key.
+    //
+    // `dynamodb:Attributes` + `dynamodb:Select` is the DynamoDB equivalent of
+    // the split. An `Attributes`-scoped `GetItem` is `DescribeSecret`; an
+    // unscoped one is `GetSecretValue`; IAM can grant the first without the
+    // second. It only works because there is a **non-secret attribute that
+    // answers the question** — `configured`, written beside the value by
+    // `credentialItem` — since a projection that had to include `value` to
+    // learn anything would be no projection at all.
+    //
+    // ## Rules that survive from the single statement this replaces
+    //
+    //   - **No `Scan`.** Four `GetItem`s by known key is the whole access
+    //     pattern. A `Scan` is the one call that returns every credential in
+    //     the deployment in a single response, which is exactly the shape of
+    //     the accident this design exists to prevent. (It would also bypass the
+    //     attribute fence: `dynamodb:Attributes` restricts the attributes a
+    //     request *names*, so a call that names none is unrestricted.)
+    //   - **No `DeleteItem`.** A credential is replaced, never removed.
+    //   - **No `PutItem` any more, either.** Master has no credential-write
+    //     route: nothing under `rest-api/src/` calls `credentials.put()`. The
+    //     operator scripts that do (`rest-api/scripts/put-credential.mjs`,
+    //     `migrate-credentials.mjs`) run on a laptop under the operator's own
+    //     AWS credentials, not under this role. A `PutItem` here would be a
+    //     permission with no caller — and `PutItem` replaces the whole item, so
+    //     holding it would let this role overwrite `CRED#llm` with a key of its
+    //     choosing, which is a different way of ending up in possession of the
+    //     one it is not allowed to read.
+    //
+    // **The private SaaS branch will widen this, and that split is deliberate.**
+    // It has a root-only credential reveal console, so its Lambda genuinely
+    // needs whole-item reads and a write path, and it will add them on its own
+    // side. Master does not have that console, so master does not carry the
+    // grant for it: the open-core deployment's control plane cannot read the
+    // LLM key, full stop, and that is the property four documents describe.
+
+    // 1. The two slots whose VALUES this component legitimately uses: `stt`
+    //    (minting a short-lived browser transcription credential,
+    //    `rest-api/src/stt/`) and `mail` (the outbound transport's API token,
+    //    `rest-api/src/mail/`). Both are read whole, by name, and no attribute
+    //    condition applies — reading the key *is* the job.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [tables.credentials.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["CRED#stt", "CRED#mail"] },
+        },
+      }),
+    );
+
+    // 2. The two slots this component may only ask *about*. `llm` is the
+    //    assistant's key (gateway-owned, docs 20 §6.1) and `rtc` is the
+    //    Cloudflare Realtime app credential (gateway-owned, docs 15) — this
+    //    role needs neither value and needs both answers, for the capability
+    //    map. `rest-api/src/db.js` `getCredentialStatus` sends exactly the
+    //    matching `ProjectionExpression`; both sides are built from the same
+    //    frozen list so they cannot drift.
+    //
+    //    `StringEquals` rather than `StringEqualsIfExists` on `Select`, and the
+    //    difference matters: `IfExists` is what AWS's own example uses because
+    //    it mixes read and write actions, and a write has no `Select`. This
+    //    statement grants `GetItem` alone, where `Select` always has a value
+    //    (`ALL_ATTRIBUTES` unless a projection says otherwise) — so the plain
+    //    form is both correct and the strict one. It closes the hole that makes
+    //    `Attributes` alone useless: a `GetItem` naming no attributes returns
+    //    the whole item and satisfies `ForAllValues` vacuously.
+    //
+    //    `CREDENTIAL_STATUS_ATTRS` includes `PK`/`SK` because DynamoDB requires
+    //    an `Attributes` condition to name a table's key attributes — the
+    //    request's `Key` counts as attributes accessed — and omitting them
+    //    denies the call outright rather than narrowing it.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [tables.credentials.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": ["CRED#llm", "CRED#rtc"],
+            "dynamodb:Attributes": [...CREDENTIAL_STATUS_ATTRS],
+          },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+
+    // The table's customer-managed key: decrypt only. This component no longer
+    // writes a credential (see above), and an encrypt grant it cannot use is
+    // the same kind of leftover the `CRED#*` statement was.
+    tables.credentials.encryptionKey?.grantDecrypt(this.fn);
     tables.journeys.grantReadWriteData(this.fn);
     archiveBucket.grantRead(this.fn);
 
@@ -163,26 +264,24 @@ export class LambdaStack extends Stack {
       }),
     );
 
-    // Host-managed MCP tokens: the API creates/updates/deletes secrets under
-    // kelabo/<env>/mcp/<identity>/<server> on behalf of the signed-in user.
-    this.fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "secretsmanager:CreateSecret",
-          "secretsmanager:PutSecretValue",
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DeleteSecret",
-          "secretsmanager:DescribeSecret",
-        ],
-        resources: [`arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.mcpPrefix}*`],
-      }),
-    );
+    // Host-managed MCP bearer tokens used to be one Secrets Manager secret per
+    // user per server, at kelabo/<env>/mcp/<identity>/<server>. They are now
+    // `SECRET#<server>` rows in the mcp table, beside the `TOKEN#<server>` rows
+    // that already held the OAuth access and refresh tokens for the same
+    // servers under the same customer-managed key — so the grant they need is
+    // the `tables.mcp.grantReadWriteData` above, and this statement is gone.
+    //
+    // Two things followed from the old shape and are worth recording: the two
+    // halves of "authenticate to an MCP server" lived in two different stores,
+    // and the Secrets Manager half was the only thing in this system that
+    // scaled with users × servers rather than with environments.
 
     // Only what this deployment's mail provider actually needs. SES gets an
     // identity-independent send permission fenced by the from-address; every
-    // other provider gets nothing here and reads its API key below instead.
-    // Granting both would leave a function that can still send from the SES
-    // identity long after the deployment stopped meaning to.
+    // other provider gets nothing here and reads its API key from the `mail`
+    // credential slot instead. Granting both would leave a function that can
+    // still send from the SES identity long after the deployment stopped
+    // meaning to.
     if (cfg.mail.provider === "ses") {
       this.fn.addToRolePolicy(
         new iam.PolicyStatement({
@@ -194,31 +293,37 @@ export class LambdaStack extends Stack {
     }
 
     for (const [id, secretName] of Object.entries({
-      Stt: cfg.secrets.stt,
       CookieKey: cfg.secrets.cookieSigningKey,
       OidcGoogle: cfg.secrets.oidcGoogle,
       OidcApple: cfg.secrets.oidcApple,
       // Read, not describe: the Lambda compares the presented header against
       // this value on every request that reaches a cold container.
       ApiOrigin: cfg.secrets.apiOrigin,
-      ...(cfg.mail.provider === "ses" ? {} : { Mail: cfg.secrets.mail }),
+      // No mail entry, and no STT one. Both used to name a Secrets Manager
+      // secret; they are the `mail` and `stt` credential slots now, covered by
+      // the first of the two credentials-table statements above — the one that
+      // grants whole-item reads, because those two are the slots whose values
+      // this component actually uses.
     })) {
       secretsmanager.Secret.fromSecretNameV2(this, `Secret${id}`, secretName).grantRead(this.fn);
     }
 
-    // The capability map (docs 19 §3) answers "is the assistant / conference
-    // audio configured at all?" from secret EXISTENCE. Describe-only on
-    // purpose: the API can state that the LLM key exists without being able
-    // to read it — those values stay gateway-owned.
-    this.fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["secretsmanager:DescribeSecret"],
-        resources: [
-          `arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.llm}*`,
-          `arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.cloudflareRealtime}*`,
-        ],
-      }),
-    );
+    // The supplier slots — llm, stt, rtc, mail — needed five Secrets Manager
+    // statements between them: read to use a key, describe to answer "is this
+    // configured at all?" for the capability map (docs 19 §3), all by prefix so
+    // that pointing a deployment at a second account did not need a deploy.
+    //
+    // All five are gone. The credentials table replaces them, and the
+    // properties they were buying survive in a different form: a rotation is a
+    // PutItem (by an operator, not by this role), "is it configured?" is a
+    // `configured` marker read through an attribute-scoped GetItem, and the
+    // second-account case never needed a new *address* at all — it needed a new
+    // *value*.
+    //
+    // The read/describe split is the one that needed rebuilding by hand rather
+    // than surviving the move: see the two statements above. It was briefly
+    // lost, between the migration to this table and the pair of statements that
+    // replaced the single `CRED#*` one.
 
     new CfnOutput(this, "RestApiFnName", { value: this.fn.functionName });
     new CfnOutput(this, "RestApiFnArn", { value: this.fn.functionArn });

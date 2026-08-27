@@ -54,6 +54,7 @@ export const api = {
         ...(opts.rtcMode ? { rtcMode: opts.rtcMode } : {}),
         // Opt-in, so it is only ever sent when true — the server's default is no.
         ...(opts.historyEnabled ? { historyEnabled: true } : {}),
+        ...(opts.private ? { private: true } : {}),
         // Link into one or more journeys at creation time (docs 20 §11) —
         // the field already exists server-side; this call just used to
         // silently drop it.

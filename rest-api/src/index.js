@@ -39,8 +39,10 @@ import { ZodError } from "zod";
 import { ensureConfig } from "./config.js";
 import { createDb } from "./db.js";
 import { createSecrets } from "./secrets.js";
+import { createCredentials } from "./credentials.js";
 import { createOtp } from "./otp.js";
 import { createMailer, mailSettingsFromConfig } from "./mail/index.js";
+import { mailKeyFrom } from "@kelabo/contracts/credentials";
 import { createSessions } from "./sessions.js";
 import { createOidc } from "./oidc.js";
 import { createMcpOauth } from "./mcpOauth.js";
@@ -108,7 +110,7 @@ function htmlErrorPage(status, code) {
 }
 
 export function createApp(deps) {
-  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent, journeys } = deps;
+  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, credentials, mcpOauth, scheduling, contacts, huddle, agent, journeys } = deps;
 
   /**
    * Best-effort link into the journeys named at kelabo creation/schedule time
@@ -275,12 +277,14 @@ export function createApp(deps) {
         const byName = new Map(tokens.map((t) => [t.name, t]));
         const servers = items.map(({ PK, SK, secretRef, ...s }) => {
           const token = byName.get(s.name);
+          // `secretRef` is destructured off and dropped: rows written before
+          // bearer tokens moved into this table carry one, and it is a stale
+          // Secrets Manager path. Its presence still means "there is a token".
+          const hasSecret = !!(s.hasSecret ?? secretRef);
           return {
             ...s,
-            authType: s.authType ?? (secretRef ? "bearer" : "none"),
-            // secretRef is an internal Secrets Manager path — the browser only
-            // needs to know whether a credential exists, never where it lives.
-            hasSecret: !!secretRef,
+            authType: s.authType ?? (hasSecret ? "bearer" : "none"),
+            hasSecret,
             oauth: s.oauth ? { issuer: s.oauth.issuer, scope: s.oauth.scope ?? null } : undefined,
             connected: !!token,
             expiresAt: token?.expiresAt ?? null,
@@ -349,10 +353,9 @@ export function createApp(deps) {
         if (!parsed.success) throw err(400, "bad_request", JSON.stringify(parsed.error.issues));
         const { name, url, headers, enabled, secret, authType } = parsed.data;
         const scope = `host#${session.identity}`;
-        const secretRef = `${session.identity}/${name}`;
-        if (secret) await secrets.putMcpSecret(config, session.identity, name, secret);
+        if (secret) await db.putMcpSecret(scope, name, secret);
         const existing = (await db.getMcpServers(scope)).find((s) => s.name === name);
-        const keepsSecret = !!(secret || existing?.secretRef);
+        const keepsSecret = !!(secret || existing?.hasSecret || existing?.secretRef);
         // An explicit authType wins; otherwise infer from what we hold, and
         // never silently downgrade an already-connected OAuth server.
         const effectiveAuthType =
@@ -362,16 +365,16 @@ export function createApp(deps) {
           transport: "http",
           url,
           ...(headers ? { headers } : {}),
-          // Keep a previously stored secret unless the request replaces it; a
-          // new server with no token gets no secretRef.
-          ...(keepsSecret ? { secretRef } : {}),
+          // Keep a previously stored token unless the request replaces it; a
+          // new server with no token gets no flag.
+          ...(keepsSecret ? { hasSecret: true } : {}),
           authType: effectiveAuthType,
           // Discovery metadata only survives while the server stays on OAuth.
           ...(effectiveAuthType === "oauth" && existing?.oauth ? { oauth: existing.oauth } : {}),
           enabled: enabled ?? existing?.enabled ?? true,
         };
         await db.putMcpServer(scope, server);
-        return { status: 200, body: { server: { ...server, secretRef: undefined, hasSecret: keepsSecret } } };
+        return { status: 200, body: { server: { ...server, hasSecret: keepsSecret } } };
       },
     },
     {
@@ -385,7 +388,7 @@ export function createApp(deps) {
         await db.deleteMcpServer(scope, req.params.name);
         // Tokens live in a sibling item and would otherwise be orphaned.
         await db.deleteMcpToken(scope, req.params.name);
-        if (existing.secretRef) await secrets.deleteMcpSecret(config, session.identity, req.params.name);
+        await db.deleteMcpSecret(scope, req.params.name);
         return { status: 200, body: { ok: true } };
       },
     },
@@ -1388,8 +1391,10 @@ export function createApp(deps) {
     }
 
     let body = null;
+    let rawBodyText = "";
     if (event.body) {
       const raw = event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
+      rawBodyText = raw;
       const ct = headers["content-type"] || "";
       if (ct.includes("application/x-www-form-urlencoded")) {
         body = Object.fromEntries(new URLSearchParams(raw).entries());
@@ -1403,6 +1408,10 @@ export function createApp(deps) {
     }
     const req = {
       method,
+      // The exact bytes, for the one route that verifies a signature over them:
+      // JSON.parse + re-stringify does not round-trip byte-for-byte, and an
+      // HMAC over re-serialized JSON is an HMAC over a different document.
+      rawBody: rawBodyText,
       path: path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path,
       query,
       headers,
@@ -1449,38 +1458,78 @@ export function createApp(deps) {
 
 let defaultApp;
 
+/**
+ * The composition root: every module this deployment runs, wired together.
+ *
+ * Exported, and separate from `handler`, only so a test can run it. It used to
+ * be inline in `handler`, which meant nothing ever executed it — `smoke.mjs`
+ * builds the app through `createApp(deps)` with its own stubs, the right seam
+ * for route behaviour and the wrong one for wiring. A factory called here but
+ * never imported is a `ReferenceError` on the first request of every cold
+ * container, and it shipped: this threw before the app's own try/catch
+ * existed, and the whole control plane answered 500 with no `unhandled` log
+ * line to say why. `node --check` sees only syntax and esbuild bundles an
+ * unresolved identifier happily. Running this once, in `test/wiring.mjs`, is
+ * the only thing that catches it.
+ *
+ * Constructing the AWS clients is safe offline: they open no socket until a
+ * command is sent.
+ */
+export function composeApp(config) {
+  const db = createDb({ config });
+  const secrets = createSecrets({ region: config.region });
+  // Supplier credentials, by slot. Goes through the db module, like every other
+  // reader, so exactly one place knows the table's name and keys — see
+  // contracts/src/credentials.js for why it is not a partition of an existing
+  // table. It takes `db`, not a document client.
+  //
+  // Nothing here reads Secrets Manager for a supplier key any more, and there
+  // is deliberately no read-through fallback to one: two homes for a
+  // credential is exactly what makes "which key is actually in use?"
+  // unanswerable. A deployment that still holds its keys in Secrets Manager
+  // moves them across once with `scripts/migrate-credentials.mjs`, which is
+  // also how a fresh self-host fills the slots the first time.
+  const credentials = createCredentials({ db });
+  // Mail is a supplier like the rest: the key is the `mail` credential slot,
+  // read per send rather than captured here. That is what makes rotating it a
+  // console operation instead of a redeploy, and the 5-minute credential cache
+  // is what bounds how long the old one is still used. The key is read only
+  // when a provider needs one: SES authenticates with this Lambda's own IAM
+  // role, so an SES deployment never fills the slot and does not have to.
+  const mailer = createMailer({
+    resolve: async () =>
+      mailSettingsFromConfig(
+        config,
+        // Empty for SES, which takes no key. `mailKeyFrom` returns "" rather
+        // than throwing for exactly that reason; a provider that needs one
+        // refuses the send itself, with a message naming the problem.
+        mailKeyFrom(await credentials.get("mail").catch(() => null), config.mail.provider)
+      ),
+  });
+  const otp = createOtp({ config, db, mailer });
+  const sessions = createSessions({ config, db, secrets });
+  const oidc = createOidc({ config, secrets });
+  const auth = createAuthProvider({ otp, oidc, sessions });
+  const mcpOauth = createMcpOauth({ config, db, secrets });
+  const internal = createInternal({ config, secrets });
+  const kelabos = createKelabos({ config, db, internal, credentials });
+  const scheduling = createScheduling({ config, db, mailer, internal });
+  const contacts = createContacts({ config, db });
+  const huddle = createHuddle({ config, db, internal, kelabos });
+  const join = createJoin({ config, db, secrets });
+  const joinCodes = createJoinCodes({ config, db });
+  const records = createRecords({ config, db });
+  const sttToken = createSttToken({ config, db, credentials });
+  const agent = createAgent({ config, db, secrets });
+  // Journey (docs 20) — a persistent container linking related kelabos.
+  // Only needs `internal` beyond config/db: a report's LLM call is a
+  // synchronous HTTP round trip to the Gateway, the same shape every other
+  // rest-api -> Gateway call already uses.
+  const journeys = createJourneys({ config, db, internal });
+  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys });
+}
+
 export async function handler(event, context) {
-  if (!defaultApp) {
-    const config = await ensureConfig();
-    const db = createDb({ config });
-    const secrets = createSecrets({ region: config.region });
-    // Resolved per send rather than captured here, which costs nothing on a
-    // self-hosted deployment (the same object every time) and is what lets a
-    // deployment holding its mail settings elsewhere change provider or
-    // rotate a key without a restart. The key is read only when a provider
-    // needs one: SES authenticates with this Lambda's own IAM role, so an SES
-    // deployment never touches the mail secret and does not have to have one.
-    const mailer = createMailer({
-      resolve: async () =>
-        mailSettingsFromConfig(config, config.mail.provider === "ses" ? "" : await secrets.getMailApiKey(config)),
-    });
-    const otp = createOtp({ config, db, mailer });
-    const sessions = createSessions({ config, db, secrets });
-    const oidc = createOidc({ config, secrets });
-    const auth = createAuthProvider({ otp, oidc, sessions });
-    const mcpOauth = createMcpOauth({ config, db, secrets });
-    const internal = createInternal({ config, secrets });
-    const kelabos = createKelabos({ config, db, internal, secrets });
-    const scheduling = createScheduling({ config, db, mailer, internal });
-    const contacts = createContacts({ config, db });
-    const huddle = createHuddle({ config, db, internal, kelabos });
-    const join = createJoin({ config, db, secrets });
-    const joinCodes = createJoinCodes({ config, db });
-    const records = createRecords({ config, db });
-    const journeys = createJourneys({ config, db, internal });
-    const sttToken = createSttToken({ config, db, secrets });
-    const agent = createAgent({ config, db, secrets });
-    defaultApp = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys });
-  }
+  if (!defaultApp) defaultApp = composeApp(await ensureConfig());
   return defaultApp(event, context);
 }

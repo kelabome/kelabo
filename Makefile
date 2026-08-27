@@ -12,8 +12,8 @@ export AWS_PROFILE
 REGION = $(eval REGION := $(shell cd config && KELABO_ENV=$(env) node --input-type=module -e "import('./loadConfig.mjs').then(m=>console.log(m.loadConfig(process.env.KELABO_ENV).region))"))$(REGION)
 STACK_PREFIX := kelabo-$(env)
 
-.PHONY: help deploy infra docker gateway restart backend frontend synth secrets rtc-secrets bootstrap test check \
-	origin-secret stt-key stt-adopt mail-secret \
+.PHONY: help deploy infra docker gateway restart backend frontend synth secrets bootstrap test check \
+	origin-secret credential-set credentials-migrate credentials-show \
 	allow-list allow-ip allow-rm \
 	agent-login agent-pack agent-publish agent-release agent-tarball connector-install install-connector install-oc-connector \
 	install-cc-connector uninstall-connector uninstall-oc-connector uninstall-cc-connector
@@ -37,7 +37,7 @@ help: ## show this help
 	@awk 'BEGIN{FS=":.*## "} /^(agent-login|agent-pack|agent-publish|agent-release):.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "deploy (needs AWS creds + config/kelabo.json):"
-	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets):.*## /{printf "  %-10s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets|credential-set|credentials-migrate|credentials-show):.*## /{printf "  %-19s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "access control (allowIps — empty means open):"
 	@awk 'BEGIN{FS=":.*## "} /^(allow-list|allow-ip|allow-rm):.*## /{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -77,6 +77,36 @@ backend: ## deploy the rest-api (lambda + api stacks)
 frontend: ## build the SPA + s3 sync + CloudFront invalidation
 	./scripts/deploy-frontend.sh $(env)
 
+# Copies the four SUPPLIER credentials out of Secrets Manager into the
+# credentials table. The cookie key and the origin secret stay where they are —
+# identity and perimeter, read once per cold start, never edited from a console.
+# Dry unless you pass write=1; the source secrets are never deleted.
+credentials-migrate: ## copy supplier credentials from Secrets Manager into DDB (write=1 [force=1])
+	cd rest-api && node scripts/migrate-credentials.mjs $(env) $(if $(write),--write,) $(if $(force),--force,) $(if $(by),by=$(by),)
+
+# Set one supplier credential slot — the first-run counterpart to
+# `credentials-migrate`, which can only copy keys a deployment already had.
+# Dry unless you pass write=1, and merging unless you pass replace=1.
+#
+# `@`-prefixed, unlike its siblings, for the one reason that matters here: make
+# echoes a recipe line before running it, so without it a key passed in
+# `fields=` would be printed to the terminal (and to whatever CI log ran this)
+# before the script that is careful never to print it ever starts. The env-var
+# form below keeps the key out of the argument list altogether and is the one
+# to prefer for a real credential.
+#
+#   make credential-set env=dev slot=rtc                       # what the slot takes
+#   make credential-set env=dev slot=llm fields="apiKey=sk-…"  # dry run
+#   KELABO_CRED_LLM_API_KEY=sk-… make credential-set env=dev slot=llm write=1
+credential-set: ## set one supplier credential slot (slot=llm fields="apiKey=…" [write=1] [replace=1])
+	@cd rest-api && node scripts/put-credential.mjs $(env) --slot=$(slot) $(fields) \
+	  $(if $(write),--write,) $(if $(replace),--replace,) $(if $(force),--force,) $(if $(by),by=$(by),)
+
+credentials-show: ## print which credential slots this env has set (never the values)
+	@aws dynamodb scan --table-name kelabo-$(env)-credentials --region $(REGION) \
+	  --projection-expression "slot,version,rotatedAt,rotatedBy" \
+	  --query "Items[].{slot:slot.S,version:version.N,rotatedBy:rotatedBy.S}" --output table
+
 synth: ## cdk synth (offline-safe)
 	cd infra && npx cdk synth -c env=$(env)
 
@@ -86,93 +116,17 @@ origin-secret: ## create the CloudFront->API shared secret (generated, idempoten
 	  || (aws secretsmanager create-secret --name kelabo/$(env)/api-origin --secret-string "$$(openssl rand -hex 32)" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null \
 	      && echo "created kelabo/$(env)/api-origin")
 
-secrets: origin-secret ## create/update secrets (needs STT_PROVIDER=.. STT_API_KEY=.. LLM_API_KEY=..)
-	@test -n "$(STT_PROVIDER)" || (echo "STT_PROVIDER required (the id in config stt.provider, e.g. deepgram)"; exit 1)
-	@test -n "$(STT_API_KEY)" || (echo "STT_API_KEY required"; exit 1)
-	@test -n "$(LLM_API_KEY)" || (echo "LLM_API_KEY required"; exit 1)
-	aws secretsmanager describe-secret --secret-id kelabo/$(env)/cookie-key --region $(REGION) >/dev/null 2>&1 \
-	  || aws secretsmanager create-secret --name kelabo/$(env)/cookie-key --secret-string "$$(openssl rand -hex 48)" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
-	$(MAKE) stt-key env=$(env) provider=$(STT_PROVIDER) key=$(STT_API_KEY)
-	aws secretsmanager describe-secret --secret-id kelabo/$(env)/llm --region $(REGION) >/dev/null 2>&1 \
-	  && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/llm --secret-string '{"apiKey":"$(LLM_API_KEY)","provider":"deepseek"}' --region $(REGION) \
-	  || aws secretsmanager create-secret --name kelabo/$(env)/llm --secret-string '{"apiKey":"$(LLM_API_KEY)","provider":"deepseek"}' --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
-	@echo "secrets ready for env=$(env)"
-
-# One key for one transcription provider, MERGED into kelabo/<env>/stt rather
-# than replacing it. The secret holds a key per provider so that switching
-# provider — or rolling back after a switch — is a config change and a redeploy,
-# never a scramble to re-enter a credential:
-#
-#   { "deepgram": "…", "soniox": "…" }
-#
-# The Lambda reads whichever one `stt.provider` names (rest-api/src/secrets.js).
-stt-key: ## add/replace one provider's STT key (provider=deepgram key=..)
-	@test -n "$(provider)" || (echo "provider required, e.g. provider=deepgram"; exit 1)
-	@test -n "$(key)" || (echo "key required"; exit 1)
-	@command -v python3 >/dev/null || (echo "python3 required to merge the secret"; exit 1)
-	@existing=$$(aws secretsmanager get-secret-value --secret-id kelabo/$(env)/stt --region $(REGION) \
-	    --query SecretString --output text 2>/dev/null || echo '{}'); \
-	  merged=$$(python3 -c 'import json,sys; raw=(sys.argv[1] or "").strip() or "{}"; d=json.loads(raw); d=d if isinstance(d,dict) else {}; d[sys.argv[2]]=sys.argv[3]; print(json.dumps(d))' "$$existing" "$(provider)" "$(key)"); \
-	  aws secretsmanager describe-secret --secret-id kelabo/$(env)/stt --region $(REGION) >/dev/null 2>&1 \
-	    && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/stt --secret-string "$$merged" --region $(REGION) >/dev/null \
-	    || aws secretsmanager create-secret --name kelabo/$(env)/stt --secret-string "$$merged" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null
-	@echo "stt key set for provider=$(provider) env=$(env)"
-
-# Kept out of `secrets` on purpose: a deployment sending through SES needs no
-# key at all — the Lambda authenticates with its own IAM role — so this is only
-# for the deployments that cannot use SES. That is not a rare case: SES
-# production access is granted case by case and is regularly refused, and a
-# permanently sandboxed account can mail only addresses verified one at a time.
-#
-# Merged per provider, like the STT secret, so switching provider or rolling
-# back after a switch never means re-entering a credential:
-#
-#   { "mailersend": "…" }
-#
-# The Lambda reads whichever one `mail.provider` names (rest-api/src/secrets.js).
-# Needs `make backend` (not `make restart`) to take effect the first time,
-# because the read grant and KELABO_MAIL_PROVIDER live in the task's IAM policy
-# and environment.
-mail-secret: ## add/replace the outbound mail API key (provider=mailersend key=..)
-	@test -n "$(provider)" || (echo "provider required, e.g. provider=mailersend"; exit 1)
-	@test -n "$(key)" || (echo "key required"; exit 1)
-	@command -v python3 >/dev/null || (echo "python3 required to merge the secret"; exit 1)
-	@existing=$$(aws secretsmanager get-secret-value --secret-id kelabo/$(env)/mail --region $(REGION) \
-	    --query SecretString --output text 2>/dev/null || echo '{}'); \
-	  merged=$$(python3 -c 'import json,sys; raw=(sys.argv[1] or "").strip() or "{}"; d=json.loads(raw); d=d if isinstance(d,dict) else {}; d[sys.argv[2]]=sys.argv[3]; print(json.dumps(d))' "$$existing" "$(provider)" "$(key)"); \
-	  aws secretsmanager describe-secret --secret-id kelabo/$(env)/mail --region $(REGION) >/dev/null 2>&1 \
-	    && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/mail --secret-string "$$merged" --region $(REGION) >/dev/null \
-	    || aws secretsmanager create-secret --name kelabo/$(env)/mail --secret-string "$$merged" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null
-	@echo "mail key set for provider=$(provider) env=$(env) — set mail.provider in config/kelabo.json, then 'make backend env=$(env)'"
-
-# Migration for a deployment that predates the STT provider boundary, where the
-# key lived in a secret named after the provider (kelabo/<env>/deepgram). Copies
-# it into kelabo/<env>/stt under that provider's id, so the same credential keeps
-# working and nothing has to be re-entered from a vendor console.
-#
-# Run this BEFORE `make backend`: config now points the Lambda at the new secret,
-# and until it exists /stt-token answers stt_unavailable. Idempotent, and it
-# leaves the old secret alone — delete that by hand once the deploy is verified.
-stt-adopt: ## migrate kelabo/<env>/<provider> into kelabo/<env>/stt (provider=deepgram)
-	@test -n "$(provider)" || (echo "provider required, e.g. provider=deepgram"; exit 1)
-	@old=$$(aws secretsmanager get-secret-value --secret-id kelabo/$(env)/$(provider) --region $(REGION) \
-	    --query SecretString --output text 2>/dev/null) || (echo "kelabo/$(env)/$(provider) not found — nothing to adopt"; exit 1); \
-	  key=$$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("apiKey") or d.get("key") or d.get("value") or "")' "$$old"); \
-	  test -n "$$key" || (echo "no apiKey/key/value in kelabo/$(env)/$(provider)"; exit 1); \
-	  $(MAKE) --no-print-directory stt-key env=$(env) provider=$(provider) key="$$key"
-	@echo "adopted $(provider) into kelabo/$(env)/stt (old secret left in place)"
-
-# Kept out of `secrets` on purpose: conference audio is optional. Without this
-# secret the Gateway answers /rtc/* with rtc_unavailable and kelabos still run
-# with transcript + board, so an existing deployment does not break.
-rtc-secrets: ## Cloudflare Realtime creds (CF_SFU_APP_ID=.. CF_SFU_APP_SECRET=.. [CF_TURN_KEY_ID=.. CF_TURN_KEY_TOKEN=..])
-	@test -n "$(CF_SFU_APP_ID)" || (echo "CF_SFU_APP_ID required"; exit 1)
-	@test -n "$(CF_SFU_APP_SECRET)" || (echo "CF_SFU_APP_SECRET required"; exit 1)
-	$(eval CF_JSON := {"sfuAppId":"$(CF_SFU_APP_ID)","sfuAppSecret":"$(CF_SFU_APP_SECRET)","turnKeyId":"$(CF_TURN_KEY_ID)","turnKeyApiToken":"$(CF_TURN_KEY_TOKEN)"})
-	aws secretsmanager describe-secret --secret-id kelabo/$(env)/cloudflare-realtime --region $(REGION) >/dev/null 2>&1 \
-	  && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/cloudflare-realtime --secret-string '$(CF_JSON)' --region $(REGION) \
-	  || aws secretsmanager create-secret --name kelabo/$(env)/cloudflare-realtime --secret-string '$(CF_JSON)' --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
-	@echo "cloudflare realtime secret ready for env=$(env) — run 'make restart env=$(env)' to pick it up"
+# The only Secrets Manager entries left: identity (cookie key) and perimeter
+# (the CloudFront->API origin secret). The four SUPPLIER credentials moved to
+# the credentials table — set by `credential-set`, or copied out of the old
+# Secrets Manager entries by `credentials-migrate`. A target here that still
+# wrote them would be writing a store nothing reads.
+secrets: origin-secret ## create the secrets the deployment still reads (cookie key, origin secret)
+	@aws secretsmanager describe-secret --secret-id kelabo/$(env)/cookie-key --region $(REGION) >/dev/null 2>&1 \
+	  && echo "kelabo/$(env)/cookie-key already exists — left alone" \
+	  || (aws secretsmanager create-secret --name kelabo/$(env)/cookie-key --secret-string "$$(openssl rand -hex 48)" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null \
+	      && echo "created kelabo/$(env)/cookie-key")
+	@echo "secrets ready for env=$(env) — supplier keys live in the credentials table (make credential-set, or credentials-migrate to copy existing ones)"
 
 # `allowIps` — who may reach the deployment at all. Adding an address writes
 # config/kelabo.json *and* edits AWS live, so the two cannot drift and a new

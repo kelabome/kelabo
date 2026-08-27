@@ -197,9 +197,9 @@ service unless the backend authenticates request origins. So:
 3. `location:"local"` tracks are recorded on the caller's peer and announced, so
    peers learn what to pull.
 
-All four Cloudflare credentials live in one Secrets Manager entry read only by
-the Gateway task role. The browser sees SDP and short-lived ICE credentials,
-never an app id or secret.
+All four Cloudflare credentials live in the one `rtc` credential row
+(`CRED#rtc`), which the Gateway task role may read and nothing else may. The
+browser sees SDP and short-lived ICE credentials, never an app id or secret.
 
 ---
 
@@ -493,17 +493,20 @@ holding a session the server has already evicted.
 
 `config/loadConfig.mjs` derives `rtcApiBase` (`https://rtc.live.cloudflare.com/v1`)
 and defaults the whole `rtc` block, so a `kelabo.json` predating conference audio
-still loads. Secret payload:
+still loads. The credential is the `rtc` slot of the credentials table:
 
 ```json
 { "sfuAppId": "…", "sfuAppSecret": "…", "turnKeyId": "…", "turnKeyApiToken": "…" }
 ```
 
-Set it with `make rtc-secrets env=dev CF_SFU_APP_ID=… CF_SFU_APP_SECRET=… CF_TURN_KEY_ID=… CF_TURN_KEY_TOKEN=…`,
-then `make restart env=dev`. It is deliberately **not** part of `make secrets`:
-without it the Gateway answers `/rtc/*` with `rtc_unavailable` and kelabos still
-run with transcript and board, so an existing deployment does not break. Without
-the TURN half, STUN alone is used and only relay-requiring peers fail to connect.
+Like every supplier credential, it is a table row now, not a Secrets Manager
+entry, and the gateway's five-minute cache picks a change up without a redeploy.
+Set it with `make credential-set env=dev slot=rtc write=1`; an existing
+deployment's `kelabo/<env>/cloudflare-realtime` secret is copied across by
+`make credentials-migrate` instead. It is deliberately optional: without it
+the Gateway answers `/rtc/*` with `rtc_unavailable` and kelabos still run with
+transcript and board, so an existing deployment does not break. Without the TURN
+half, STUN alone is used and only relay-requiring peers fail to connect.
 
 ---
 

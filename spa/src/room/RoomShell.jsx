@@ -13,6 +13,7 @@ import { useIdleChrome } from './useIdleChrome'
 import { useRoomFavourites } from './useRoomFavourites'
 import { isStageLayout, loadLayout } from './layouts'
 import { roomTitle } from '../kelaboTitle'
+import { useToast } from '../components/Toaster'
 
 /**
  * The kelabo room.
@@ -118,11 +119,16 @@ export function RoomShell({
   const [activeSpeaker, setActiveSpeaker] = useState(null)
   const [panel, setPanel] = useState(null) // null | 'messages' | 'transcript' | 'board'
   const [captionsOn, setCaptionsOn] = useState(() => localStorage.getItem(CAPTIONS_KEY) !== '0')
+  // Alert keys the reader has closed. Per-room and in memory: a banner
+  // dismissed in this call should not still be dismissed next week.
+  const [dismissed, setDismissed] = useState(() => new Set())
+  const dismiss = useCallback(key => setDismissed(prev => new Set(prev).add(key)), [])
 
   const flip = useFlip()
   const fullscreen = useFullscreen()
   const chrome = useIdleChrome()
   const favourites = useRoomFavourites(me)
+  const toast = useToast()
 
   // Not persisted: every kelabo opens in the grid (see layouts.js).
   const setLayout = setLayoutState
@@ -262,16 +268,36 @@ export function RoomShell({
 
   const closePanel = flip.withFlip(() => setPanel(null))
 
-  const toggleCaptions = useCallback(() => {
-    setCaptionsOn(v => {
-      localStorage.setItem(CAPTIONS_KEY, v ? '0' : '1')
-      return !v
-    })
-  }, [])
+  /**
+   * `announce` is for the keyboard path only, and it is not decoration.
+   *
+   * Captions are the one control here whose effect can be completely invisible
+   * at the moment you change it: switch them off while nobody happens to be
+   * speaking and the room looks identical. The preference is then persisted per
+   * browser, so an unintended keystroke follows you into every later kelabo on
+   * that machine — which is exactly how this was found, reported from the other
+   * side as "live captions are broken in Chrome but fine in Safari".
+   *
+   * The button does not announce: clicking it is deliberate and it shows its
+   * own state (`aria-pressed`, `is-on`). A bare `c`, which fires from anywhere
+   * in the room including a control that was just clicked, does.
+   */
+  const setCaptions = useCallback(
+    (on, announce) => {
+      setCaptionsOn(on)
+      localStorage.setItem(CAPTIONS_KEY, on ? '1' : '0')
+      if (announce) toast(on ? 'Live captions on' : 'Live captions off')
+    },
+    [toast],
+  )
+
+  // Takes no argument on purpose: it is wired straight to the button's onClick,
+  // which would otherwise hand it a DOM event as `announce`.
+  const toggleCaptions = useCallback(() => setCaptions(!captionsOn), [captionsOn, setCaptions])
 
   // --- keyboard -------------------------------------------------------------
   const handlers = useRef({})
-  handlers.current = { openTile, collapseStage, changeLayout, togglePanel, toggleCaptions, capture, cam, screen, panel, layout, boardOnly, assistantOn }
+  handlers.current = { openTile, collapseStage, changeLayout, togglePanel, setCaptions, captionsOn, capture, cam, screen, panel, layout, boardOnly, assistantOn }
 
   useEffect(() => {
     const onKey = e => {
@@ -298,7 +324,9 @@ export function RoomShell({
           return
         case 'c':
           e.preventDefault()
-          h.toggleCaptions()
+          // Announced: see setCaptions. Mute, camera and share all change
+          // something you can see; this one need not.
+          h.setCaptions(!h.captionsOn, true)
           return
         case 't':
           e.preventDefault()
@@ -323,6 +351,14 @@ export function RoomShell({
   }, [])
 
   // --- alerts ---------------------------------------------------------------
+  //
+  // Most of these describe a *condition* and vanish when it lifts, so they carry
+  // no close button — there is nothing to dismiss that will not dismiss itself.
+  // The other kind is a statement of fact that stays true for the whole call and
+  // cannot be fixed from inside the room, so it is read once and then it is in
+  // the way. Those get `onClose`, and the key they are dismissed under carries
+  // their reason, so a *different* state says so again rather than inheriting
+  // the silence.
   const alerts = []
   if (boardOnly) {
     alerts.push({ kind: 'warn', key: 'watch', text: 'Watch-only — you joined without a microphone. Captions, transcript and the board all still work.' })
@@ -363,6 +399,11 @@ export function RoomShell({
   if (call.state === 'error') {
     alerts.push({ kind: 'warn', key: 'rtcerr', text: 'Could not join the call. Captions and the board are unaffected.' })
   }
+
+  // Computed once, and used for both the strip's own visibility and its
+  // contents: filtering only at the map left an empty, padded strip sitting
+  // above the room after the last banner was closed.
+  const visibleAlerts = alerts.filter(a => !dismissed.has(a.key))
 
   const idle = chrome.idle && !panel
   const title = roomTitle(kelabo?.title)
@@ -488,7 +529,7 @@ export function RoomShell({
         </Button>
       </div>
 
-      {(alerts.length > 0 || call.needsUnblock || archive?.failed) && (
+      {(visibleAlerts.length > 0 || call.needsUnblock || archive?.failed) && (
         <div className="room-alerts">
           {/* The kelabo ended but no record exists. Shown rather than toasted
               because it does not go away by itself and the host is the only
@@ -506,7 +547,11 @@ export function RoomShell({
               <Button size="sm" onClick={call.unblock}>Enable audio</Button>
             </Banner>
           )}
-          {alerts.map(a => <Banner key={a.key} kind={a.kind}>{a.text}</Banner>)}
+          {visibleAlerts.map(a => (
+            <Banner key={a.key} kind={a.kind} onClose={a.onClose}>
+              {a.text}
+            </Banner>
+          ))}
         </div>
       )}
 

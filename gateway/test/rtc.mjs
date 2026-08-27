@@ -84,7 +84,7 @@ const config = {
   tableNames: { kelabos: "t-kelabos", history: "t-history", mcp: "t-mcp" },
   archiveBucket: "t-bucket",
   archiveKeyPrefix: "archives",
-  secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
+  secrets: { cookieSigningKey: "t/cookie" },
   rtcApiBase: "http://rtc.test/v1",
   // Grace 0 keeps the eviction tests immediate; the grace-window behaviour has
   // its own container below.
@@ -266,8 +266,53 @@ async function testCloudflareClient() {
   ok("tracks/new is POST and renegotiate is PUT");
 }
 
+// Where the SFU app credentials come from, which is the only part of this that
+// changed when supplier credentials moved into their own table. The client
+// above takes a `getCreds`; the container is what supplies one, and it must
+// read the `rtc` slot rather than a Secrets Manager entry — a mismatch there
+// surfaces only as `rtc_unavailable` on a live call, with a perfectly good
+// credential sitting in the table.
+async function testCredentialSourcedRtcCreds() {
+  const { createContainer } = await import("../src/container.js");
+  const stored = new Map([["rtc", { sfuAppId: "app", sfuAppSecret: "sec" }]]);
+  const credDb = {
+    send: async (cmd) => {
+      const pk = String(cmd.input?.Key?.PK ?? "");
+      if (pk.startsWith("CRED#")) {
+        const value = stored.get(pk.slice("CRED#".length));
+        return { Item: value ? { value: JSON.stringify(value) } : undefined };
+      }
+      return {};
+    },
+  };
+  const make = () =>
+    createContainer({
+      config: { ...config, tableNames: { ...config.tableNames, credentials: "t-cred" } },
+      db: credDb,
+      s3: { send: async () => ({}) },
+      secrets,
+      skipRebuild: true,
+    });
+
+  const c = await make();
+  assert.deepEqual(await c.getCloudflareRtc(), { sfuAppId: "app", sfuAppSecret: "sec" });
+  ok("the container sources Cloudflare credentials from the `rtc` credential slot");
+
+  // The degrade-cleanly promise: an unfilled slot is null, not a throw, so the
+  // routes answer `rtc_unavailable` and the kelabo runs board+transcript only.
+  stored.delete("rtc");
+  const bare = await make();
+  assert.equal(await bare.getCloudflareRtc(), null);
+  await assert.rejects(
+    () => createCloudflareRtc({ apiBase: "http://rtc.test/v1", getCreds: bare.getCloudflareRtc, fetchImpl: async () => {} }).newSession(),
+    /rtc_unavailable/
+  );
+  ok("an unfilled `rtc` slot degrades to rtc_unavailable rather than throwing something else");
+}
+
 async function main() {
   await testCloudflareClient();
+  await testCredentialSourcedRtcCreds();
 
   const rtc = createRtcStub();
   const c = await createContainer({ config, db, s3: { send: async () => ({}) }, secrets, rtc, skipRebuild: true });

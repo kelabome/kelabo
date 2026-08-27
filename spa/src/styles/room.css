@@ -1273,7 +1273,18 @@
      readout here somebody might be checking for privacy rather than curiosity.
      Only the animation is dropped — `.conn-live::after` still draws it. */
   .conn-live::after { animation: none !important; }
-  .side, .caption, .astage-doc { animation-duration: .01ms; }
+  /* These three are dropped OUTRIGHT rather than merely shortened, and the
+     difference is the whole point. Each keyframe starts at `opacity: 0` and
+     each element carries `animation-fill-mode: both`, so it holds that first
+     frame until the animation actually runs. Shortening the duration still
+     depends on it running — and the platform that most often reports this
+     media query is Windows with animation effects off, which is precisely the
+     platform that may not run it at all. The element is then in the DOM, laid
+     out, correct, and invisible: a caption that never appears while the same
+     words show in the transcript panel. `animation: none` drops the name, so
+     the element simply renders at its own style. Same reasoning as the tile
+     meter further up this file. */
+  .side, .caption, .astage-doc { animation: none !important; }
 }
 
 /* --- debug: is a transcription stream open right now? ---------------------- */

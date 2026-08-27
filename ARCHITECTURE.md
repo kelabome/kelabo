@@ -148,8 +148,8 @@ Consequences (all good for the constraints above):
   (`spa/src/capture/vad.js`, docs 06).
 - **Key handling:** the browser must not hold a long-lived provider key. A tiny
   Lambda mints a short-lived credential (a Deepgram temporary token, a Soniox
-  temporary API key) from the server-side key in Secrets Manager
-  (`kelabo/<env>/stt`) that the browser uses to open its provider socket.
+  temporary API key) from the server-side key in the `stt` credential slot
+  (`CRED#stt`, docs 08 §6c) that the browser uses to open its provider socket.
   This is the only audio-related server touchpoint, and it's cheap + serverless.
 
 So the data plane is: **audio path = browser↔STT provider**; **control/text path =
@@ -352,8 +352,8 @@ truth consumed by CDK. Nothing environment-specific is hard-coded in source.
   "environments": {
     "dev":     { "endpoint": "dev",     "domain": "kelabo-dev.example.com",
                  "allowedEmailDomain": "example.com",
-                 "stt":      { "provider": "deepgram", "secretName": "kelabo/dev/stt" },
-                 "llm":      { "provider": "deepseek", "secretName": "kelabo/dev/llm" },
+                 "stt":      { "provider": "deepgram" },
+                 "llm":      { "provider": "deepseek" },
                  "ses":      { "fromAddress": "otp@kelabo-dev.example.com" },
                  "retentionDays": 30, "tenantId": "self" },
     "staging": { "endpoint": "staging", "domain": "kelabo-staging.example.com", "...": "..." },
@@ -367,7 +367,9 @@ Rules baked into CDK:
 - Each env is a **standalone stack set** (isolated resources).
 - **Every resource tagged** `endpoint=<env>` (plus `app=kelabo`) via
   `Tags.of(app).add(...)` at the app root.
-- Secrets are **referenced by name**, never inlined.
+- Secrets are **referenced by name**, never inlined. Supplier keys are not in
+  config at all — the config picks the *provider*, the key is a row in the
+  credentials table addressed by slot (`make credential-set`, docs 08 §6c).
 - Multi-tenant slots in by promoting `tenantId` from constant to per-user.
 
 ---
@@ -596,8 +598,8 @@ The v0's pattern (keep the *shape*, change the provider):
   prototype exactly).
 
 Kelabo change: replace the Transcribe presign Lambda with an **STT credential
-mint** behind a provider boundary (`rest-api/src/stt/<id>.js`; server key in
-Secrets Manager, `kelabo/<env>/stt`). The Deepgram provider mints a short-lived
+mint** behind a provider boundary (`rest-api/src/stt/<id>.js`; server key in the
+`stt` credential slot). The Deepgram provider mints a short-lived
 token via `/v1/auth/grant`; the Soniox provider mints a temporary API key via
 `/v1/auth/temporary-api-key`. The browser opens the provider's socket directly
 with that credential (`SttSession {provider, url, token, …}`). Diarized

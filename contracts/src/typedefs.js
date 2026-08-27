@@ -100,7 +100,7 @@
  * @property {"http"|"local"} transport
  * @property {string} [url]
  * @property {Object} [headers]
- * @property {string} [secretRef]
+ * @property {boolean} [hasSecret]
  * @property {boolean} enabled
  */
 /** @typedef {{servers: McpServer[]}} McpConfig */

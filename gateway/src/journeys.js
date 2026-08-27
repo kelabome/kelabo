@@ -1,9 +1,13 @@
 // Journey reports (docs 20 §6) — synthesis over a journey's own accumulated
 // content, answering a free-text question. Lives here, not in rest-api,
-// because the LLM credential is deliberately gateway-owned (rest-api's IAM
-// role holds only `secretsmanager:DescribeSecret` on it, never
-// `GetSecretValue` — see `infra/lib/lambda-stack.js`); routing the call
-// through the existing rest-api -> Gateway internal-request direction
+// because the LLM credential is deliberately gateway-owned: rest-api's IAM
+// role may `GetItem` `CRED#llm` only through the non-secret
+// `CREDENTIAL_STATUS_ATTRS` projection — a `dynamodb:Attributes` +
+// `dynamodb:Select` fence, which is the DynamoDB form of the
+// `DescribeSecret`-without-`GetSecretValue` grant it held when this was a
+// Secrets Manager secret (see `infra/lib/lambda-stack.js`). It can ask
+// whether the assistant is configured; it cannot read the key. Routing the
+// call through the existing rest-api -> Gateway internal-request direction
 // (the same one `requestMinutes`/`endKelabo` already use) keeps that
 // boundary intact rather than minting a second, rest-api-readable key.
 //
@@ -15,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { getMinutes, queryKelaboItems, pad, randSeq } from "./db.js";
 import { createLlmProvider } from "./agent/llm.js";
+import { llmApiKeyFrom } from "@kelabo/contracts/credentials";
 
 const journeysTable = (c) => c.config.tableNames.journeys;
 export const journeyPk = (id) => `JOURNEY#${id}`;
@@ -279,12 +284,15 @@ export async function generateJourneyReport(c, journeyId, { reportId, question, 
   }
 
   // Injected directly by tests (`c.llm`) so this function is exercised without
-  // a real secret or a real HTTP call to a provider.
+  // a real credential or a real HTTP call to a provider. In production
+  // `createContainer` always supplies `c.llm`; the fallback exists for a
+  // container assembled by hand, and reads the same `llm` credential slot the
+  // agent pipeline does — never a Secrets Manager entry, which is where this
+  // key used to live and no longer does (docs 08 §6c).
   let llm = c.llm;
   if (!llm) {
-    const raw = await c.getSecret(c.config.secrets.llm).catch(() => null);
-    if (!raw) return markFailed("llm_not_configured");
-    const apiKey = typeof raw === "string" ? raw : raw?.key ?? raw?.apiKey;
+    const apiKey = llmApiKeyFrom(await c.getCredential?.("llm").catch(() => null));
+    if (!apiKey) return markFailed("llm_not_configured");
     llm = createLlmProvider(c.config.llm, { apiKey, openaiBaseUrl: c.config.openaiBaseUrl, log: c.log });
   }
 

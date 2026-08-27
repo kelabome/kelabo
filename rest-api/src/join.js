@@ -51,6 +51,16 @@ export function createJoin({ config, db, secrets }) {
       isGuest = true;
     }
 
+    // Bound the participants list — each new browser is a new guest
+    // identity, and an unbounded list_append is how an item hits the 400 KB
+    // ceiling and bricks the room. Old entries only mattered to participant
+    // cookies that expired long before the list wrapped.
+    const ps = meta.participants || [];
+    if (ps.length >= 200) {
+      await db.updateKelaboMeta(kelaboId, { participants: ps.slice(-100) }).catch(() => {});
+      meta.participants = ps.slice(-100);
+    }
+
     const existing = (meta.participants || []).find((p) => p.identity === identity);
     if (!existing) {
       // The joiner's identicon re-roll rides on the participant record: this is

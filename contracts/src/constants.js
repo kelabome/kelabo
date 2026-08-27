@@ -146,6 +146,11 @@ export const ERROR_CODES = [
   "document_not_found",
   "already_archived",
   "report_not_found",
+  // Removing a document or archiving a board message is narrower than the
+  // general member write access above: only the item's own poster or the
+  // journey's lead may do it.
+  "not_document_owner_or_lead",
+  "not_message_author_or_lead",
 ];
 
 // Journey visibility (docs 20 §3.2): `public` grants full rights to every
@@ -173,3 +178,8 @@ export const SSE_EVENT_RENAME = "rename";
 // a stream but never joins the call, so only this one counts them.
 export const SSE_EVENT_ROSTER = "roster";
 export const SSE_EVENT_UTTERANCE = "utterance";
+// Something the room needs told about itself — today, that a metered service
+// stopped and when it comes back (design-registered §6, "the moment"). Not an
+// error and not a contribution: a silent absence of captions is the failure
+// this event exists to prevent, and a board card would outlive the moment.
+export const SSE_EVENT_NOTICE = "notice";

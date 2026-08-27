@@ -507,7 +507,7 @@ function stubContainer({ server, token, client }) {
   return {
     writes,
     c: {
-      config: { tableNames: { mcp: "t-mcp" }, secrets: { mcpPrefix: "kelabo/test/mcp/" } },
+      config: { tableNames: { mcp: "t-mcp" }, secrets: {} },
       db: {
         async send(cmd) {
           const i = cmd.input;
@@ -851,9 +851,17 @@ await test("the summary is given the research the agent actually did", async () 
   const agent = new MainAgent({
     llm: {
       ...mainLlm,
-      async complete(req) {
-        summaryPrompt = String(req.messages.at(-1).content);
-        return JSON.stringify({ title: "T", summary: "s", topics: [], decisions: [], actionItems: [], openQuestions: [], findings: [] });
+      // The summariser uses `completeRaw` too now — it counts its tokens, being
+      // the largest prompt in the system — so this stub has to tell the two
+      // apart instead of overriding the turn's own calls.
+      async completeRaw(req) {
+        const last = String(req.messages.at(-1).content);
+        if (!last.includes(":KELABO-END")) return mainLlm.completeRaw(req);
+        summaryPrompt = last;
+        return {
+          text: JSON.stringify({ title: "T", summary: "s", topics: [], decisions: [], actionItems: [], openQuestions: [], findings: [] }),
+          usage: { cacheRead: 0, cacheWrite: 0, input: 4200, output: 310, total: 4510 },
+        };
       },
     },
     smallModel: "flash", subAgentModel: "pro",
@@ -1210,7 +1218,7 @@ await test("minutes are written in the host's language, whatever the room spoke"
   // And the agent hands its host language through to that prompt.
   let system = "";
   const agent = new MainAgent({
-    llm: { async complete(req) { system = req.system; return "{}"; } },
+    llm: { async completeRaw(req) { system = req.system; return { text: "{}" }; } },
     smallModel: "flash", subAgentModel: "pro", hostLanguage: "Japanese",
     subAgentDeps: { strong: {}, webSearch: async () => [], webFetch: async () => ({}), makeMcpQuery: () => async () => ({}), capabilities: [], mcp: { servers: [] } },
     log: () => {}, debug: () => {},

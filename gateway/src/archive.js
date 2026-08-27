@@ -6,6 +6,7 @@ import {
   queryContrib,
   queryKelaboItems,
   putHistoryRow,
+  markHistoryMinutesSkipped,
   putParticipantIndex,
   deleteHostActive,
   putArchiveObject,
@@ -93,6 +94,9 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
     board,
     ...(minutes ? { minutes } : {}),
     ...(meta.isCall ? { isCall: true } : {}),
+    // Carried so the async minutes pass, which rewrites the history row from
+    // this object, does not drop the flag on the second write.
+    ...(meta.private ? { private: true } : {}),
     tenantId: meta.tenantId,
   };
   const valid = archiveSchema.safeParse(archive);
@@ -123,6 +127,10 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
       boardCount: board.length,
       hasMinutes: !!minutes,
       ...(archive.isCall ? { isCall: true } : {}),
+      // Carried from META onto the row the access check actually reads: the
+      // kelabo partition expires, the history row does not, so a private
+      // record that only remembered it in META would quietly become public.
+      ...(meta.private ? { private: true } : {}),
       s3Key,
       tenantId: archive.tenantId,
     });
@@ -186,8 +194,11 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
 
   // Drop the call roster before closing the streams: `ended` ends every SSE
   // response, and each close would otherwise fire a per-peer "left" fan-out
-  // into a room that no longer has subscribers.
-  c.rtcRoom?.closeKelabo(kelaboId);
+  // into a room that no longer has subscribers. Awaited so the SFU sessions are
+  // actually closed before the kelabo is declared over — the media plane does
+  // not stop on its own, and a fire-and-forget teardown would race the process
+  // going idle after a budget-triggered end.
+  await c.rtcRoom?.closeKelabo(kelaboId);
   // Per-kelabo caption bookkeeping dies with the kelabo.
   c.state.lastCaption.delete(kelaboId);
   c.sseHub.ended(kelaboId, { reason: "ended" });
@@ -230,14 +241,54 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
 }
 
 async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime) {
+  // Every branch here says what it did. This function used to end a kelabo
+  // without minutes and without a single line of log to say why: a dev summary
+  // that never came back, an agent context that had already gone, a refused or
+  // timed-out summarize, an LLM that wrote something unparseable — all four
+  // arrived as `null` and returned in silence. "The record has no minutes" was
+  // the only evidence, and it points at nothing.
   let minutes = null;
+  let reason = "";
   if (agentRuntime) {
-    const summary = await c.tunnel.requestDevSummary(kelaboId).catch(() => null);
-    if (summary) minutes = parseMinutesJson(summary.text, kelaboId, agentRuntime);
+    const summary = await c.tunnel.requestDevSummary(kelaboId).catch((err) => {
+      c.logError("dev_summary_failed", err, { kelaboId });
+      return null;
+    });
+    if (!summary) reason = "no_dev_summary";
+    else {
+      minutes = parseMinutesJson(summary.text, kelaboId, agentRuntime);
+      if (!minutes) reason = "dev_summary_unparseable";
+    }
   } else if (c.state.agentWorkers.has(kelaboId)) {
-    minutes = await c.agentDispatcher.summarize(kelaboId).catch(() => null);
+    minutes = await c.agentDispatcher.summarize(kelaboId).catch((err) => {
+      c.logError("summarize_call_failed", err, { kelaboId });
+      return null;
+    });
+    // `summarize` logs its own refusal and its own timeout; this covers the
+    // remaining case — it ran, and what came back could not be read as minutes.
+    if (!minutes) reason = "no_minutes_returned";
+  } else {
+    // The assistant never held a context for this kelabo: no captions were ever
+    // dispatched to it (a room with the assistant off, or one whose every turn
+    // was refused). There is nothing to summarise from, and that is a fact
+    // about the kelabo rather than a failure.
+    reason = "no_agent_context";
   }
-  if (!minutes) return;
+  if (!minutes) {
+    c.log("minutes_skipped", { kelaboId, reason, mode: agentRuntime || "server" });
+    if (reason === "no_agent_context") {
+      // No minutes are ever coming for this record. Recorded on the row the
+      // record page actually reads, so it can say "no minutes, and here is
+      // why" instead of spinning on a promise nothing is working to keep.
+      await updateMeta(c, kelaboId, { minutesSkipped: true }).catch((err) =>
+        c.logError("minutes_skipped_flag_failed", err, { kelaboId })
+      );
+      await markHistoryMinutesSkipped(c, archive.archiveId).catch((err) =>
+        c.logError("minutes_skipped_history_failed", err, { kelaboId })
+      );
+    }
+    return;
+  }
 
   // Untitled kelabo? Adopt the AI-generated title from the minutes and mark
   // it as generated, so the records list can label it.
@@ -275,6 +326,7 @@ async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRun
     boardCount: (archive.board || []).length,
     hasMinutes: true,
     ...(archive.isCall ? { isCall: true } : {}),
+    ...(archive.private ? { private: true } : {}),
     s3Key,
     tenantId: archive.tenantId,
   }).catch((err) => c.logError("history_minutes_update_failed", err, { kelaboId }));
@@ -312,7 +364,9 @@ export async function cancelKelabo(c, kelaboId) {
 
   // Same ordering rationale as endKelabo: drop the call roster before closing
   // the streams so `ended` does not fire a per-peer "left" into an empty room.
-  c.rtcRoom?.closeKelabo(kelaboId);
+  // Awaited for the same reason: the SFU sessions have to be closed, not just
+  // forgotten.
+  await c.rtcRoom?.closeKelabo(kelaboId);
   c.sseHub.ended(kelaboId, { reason: "cancelled" });
   c.messageBuffer?.drop(kelaboId);
   c.agentDispatcher.drop(kelaboId);

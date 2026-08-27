@@ -31,6 +31,7 @@ export function useBoard({
   onHistory,
   onDebug,
   onRtc,
+  onNotice,
   onAgent,
   onRoster,
   onStreamStatus,
@@ -53,6 +54,8 @@ export function useBoard({
   onDebugRef.current = onDebug
   const onRtcRef = useRef(onRtc)
   onRtcRef.current = onRtc
+  const onNoticeRef = useRef(onNotice)
+  onNoticeRef.current = onNotice
   const onAgentRef = useRef(onAgent)
   onAgentRef.current = onAgent
   const onRosterRef = useRef(onRoster)
@@ -185,6 +188,13 @@ export function useBoard({
       es.addEventListener('rtc', e => {
         mark()
         try { onRtcRef.current?.(JSON.parse(e.data)) } catch {}
+      })
+      // Something the room needs told about itself — today, that a metered
+      // service stopped and when it comes back. Deliberately not a board card:
+      // it is true for a few minutes and belongs to nobody's record.
+      es.addEventListener('notice', e => {
+        mark()
+        try { onNoticeRef.current?.(JSON.parse(e.data)) } catch {}
       })
       // A developer's local coding agent attached or detached (docs 16). This
       // used to be silent, so a dropped bridge handed the kelabo back to the

@@ -48,7 +48,29 @@ echo ">> syncing spa/dist -> s3://$BUCKET"
 # --only-show-errors: the per-file progress lines are noise to whoever ran
 # `make frontend` — a quiet sync that speaks only when something fails is the
 # useful shape. The bucket/dist echoes above are the receipt.
-aws s3 sync "$ROOT/spa/dist" "s3://$BUCKET" --delete --region "$KELABO_REGION" --only-show-errors
+#
+# Assets first, and `--exclude` the entry document: every filename under
+# assets/ is content-hashed by Vite, so those objects are immutable by
+# construction and can be cached forever. index.html is the opposite — one
+# mutable name pointing at this build's hashes — and it goes up separately
+# below, with headers that say so.
+aws s3 sync "$ROOT/spa/dist" "s3://$BUCKET" --delete --region "$KELABO_REGION" --only-show-errors \
+  --exclude "*.html" --cache-control "public,max-age=31536000,immutable"
+# Then the entry document, which keeps its name forever and must NOT be cached:
+# it is the file that names the current asset hashes, and the `--delete` above
+# has just removed the previous build's. A stale index.html therefore does not
+# merely show an old page — it names objects that no longer exist, and S3
+# answers a missing object with **403** (the distribution holds no
+# `s3:ListBucket`, deliberately). The symptom is a blank page logging
+# `ERR_ABORTED 403 (Forbidden)` for a bundle nobody can find.
+#
+# The invalidation below used to be the only thing preventing that, which made
+# it a single point of failure: one deploy interrupted between the sync and the
+# invalidation and every visitor holding a cached document has a broken site
+# until somebody notices. That happened. Revalidating means the worst a missed
+# invalidation can do is cost a round trip on a 1.5KB file.
+aws s3 sync "$ROOT/spa/dist" "s3://$BUCKET" --delete --region "$KELABO_REGION" --only-show-errors \
+  --exclude "*" --include "*.html" --cache-control "public,max-age=0,must-revalidate"
 
 # The speech model and its WebAssembly runtime, re-uploaded compressed.
 #
@@ -99,7 +121,11 @@ else
   echo ">> WARNING: brotli not installed - wasm/onnx ship uncompressed (13.5MB not 4.3MB)"
 fi
 
+# Printed rather than swallowed, and last, so the line that says the deploy
+# finished is preceded by proof that the step which makes it visible actually
+# ran. `>/dev/null` hid exactly that.
 echo ">> creating CloudFront invalidation /*"
-aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*" >/dev/null
+aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*" \
+  --query "Invalidation.{id:Id,status:Status}" --output table
 
 echo "== frontend deployed (env=$ENV) =="

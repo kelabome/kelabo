@@ -3,9 +3,10 @@
 //   SFU  https://rtc.live.cloudflare.com/v1/apps/<appId>/...   (Bearer appSecret)
 //   TURN https://rtc.live.cloudflare.com/v1/turn/keys/<id>/... (Bearer turnKeyApiToken)
 //
-// Credentials live in one Secrets Manager entry and never leave the Gateway —
-// the browser only ever sees short-lived ICE credentials and SDP. `fetchImpl` is
-// injected so tests run offline, the same seam rest-api/src/stt/index.js uses.
+// Credentials live in the `rtc` slot of the credentials table and never leave
+// the Gateway — the browser only ever sees short-lived ICE credentials and
+// SDP. `fetchImpl` is injected so tests run offline, the same seam
+// rest-api/src/stt/index.js uses.
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -23,6 +24,16 @@ export class RtcError extends Error {
 /**
  * @param {{ apiBase:string, getCreds:() => Promise<CloudflareRtcCreds|null>, fetchImpl?:typeof fetch }} opts
  */
+/**
+ * What a room gets when no TURN credentials can be minted: STUN alone. Direct
+ * connectivity still works on most networks; only relay-requiring peers fail.
+ * Exported so the routes can answer without touching Cloudflare.
+ */
+export const STUN_ONLY = Object.freeze({
+  iceServers: Object.freeze([Object.freeze({ urls: ["stun:stun.cloudflare.com:3478"] })]),
+  relay: false,
+});
+
 export function createCloudflareRtc({ apiBase, getCreds, fetchImpl = fetch }) {
   async function creds() {
     const c = await getCreds();
@@ -143,8 +154,7 @@ export function createCloudflareRtc({ apiBase, getCreds, fetchImpl = fetch }) {
   async function iceServers(ttlSeconds) {
     const c = await creds();
     if (!c.turnKeyId || !c.turnKeyApiToken) {
-      // STUN alone still works for most networks; only relay-requiring peers fail.
-      return { iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }], relay: false };
+      return STUN_ONLY;
     }
     const data = await call(
       `${apiBase}/turn/keys/${encodeURIComponent(c.turnKeyId)}/credentials/generate-ice-servers`,

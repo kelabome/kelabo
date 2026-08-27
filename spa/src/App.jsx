@@ -8,8 +8,7 @@ import { AppShell } from './components/AppShell'
 import { Banner } from './components/ui/Banner'
 import { Skeleton } from './components/ui/Skeleton'
 import Home from './routes/Home'
-import { Login, extraRoutes } from '@kelabo/variant'
-import NewKelabo from './routes/NewKelabo'
+import { Login, NewKelabo, extraRoutes } from '@kelabo/variant'
 import Schedule from './routes/Schedule'
 import ScheduledKelabo from './routes/ScheduledKelabo'
 import Invitation from './routes/Invitation'
@@ -85,6 +84,13 @@ export default function App() {
                   <Route path="/meetings" element={<Navigate to="/kelabos" replace />} />
                   <Route path="/meetings/:id" element={<RecordRedirect />} />
                   <Route path="/settings" element={<Settings />} />
+                  {/* Overlay-provided pages, inside the shell — which is the
+                      default, because it is the guarded one. A route that
+                      forgets to declare itself gets the sidebar and the
+                      redirect to /login; the alternative default was a page
+                      with neither, which is how /organisation shipped for a
+                      while as a bare <main> reachable signed-out. */}
+                  {extraRoutes.filter(r => r.shell !== false).map(r => <Route key={r.path} path={r.path} element={r.element} />)}
                 </Route>
                 <Route path="/login" element={<Login />} />
                 <Route path="/join/:id" element={<Join />} />
@@ -101,8 +107,10 @@ export default function App() {
                 <Route path="/enter" element={<EnterCode />} />
                 <Route path="/m/:id/lobby" element={<Lobby />} />
                 <Route path="/m/:id" element={<Kelabo />} />
-                {/* Overlay-provided pages (empty in default builds). */}
-                {extraRoutes.map(r => <Route key={r.path} path={r.path} element={r.element} />)}
+                {/* Overlay-provided pages that opted out of the shell with
+                    `shell: false` — the chrome-less kind, like /join and
+                    /invite above. Empty in default builds. */}
+                {extraRoutes.filter(r => r.shell === false).map(r => <Route key={r.path} path={r.path} element={r.element} />)}
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </PresenceProvider>

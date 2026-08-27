@@ -198,7 +198,7 @@ const config = {
   tableNames: { kelabos: "t-kelabos", history: "t-history", mcp: "t-mcp", refresh: "t-refresh", journeys: "t-journeys" },
   archiveBucket: "t-bucket",
   archiveKeyPrefix: "archives",
-  secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
+  secrets: { cookieSigningKey: "t/cookie" },
   rtcApiBase: "http://rtc.test/v1",
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, iceTtlSeconds: 3600, video: false },
   // The hosted-deployment posture, so the entitlement machinery is what gets

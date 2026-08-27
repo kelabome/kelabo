@@ -20,6 +20,7 @@ import { createMailerSendTransport } from "../src/mail/mailersend.js";
 import { createSesTransport } from "../src/mail/ses.js";
 import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage } from "../src/mail/messages.js";
 import { loadConfig } from "../../config/loadConfig.mjs";
+import { CREDENTIAL_SLOTS, mailKeyFrom } from "@kelabo/contracts/credentials";
 
 let passed = 0;
 async function test(name, fn) {
@@ -437,7 +438,25 @@ await test("choosing another provider turns off the SES identity stack", async (
   assert.equal(c.ses.createIdentity, false);
 });
 
-await test("every environment names a mail secret, whether or not it needs one", async () => {
+await test("the mail key is not read from Secrets Manager any more — it is a credential slot", async () => {
+  // Supplier keys are rows in the credentials table, addressed by slot: a
+  // second home for one of them is exactly the drift that makes "which key is
+  // actually in use?" unanswerable. Read as text, because the property is that
+  // no runtime code path resolves a name for it — which is a thing you can
+  // only assert by its absence.
+  const { readFileSync } = await import("node:fs");
+  const configSrc = readFileSync(new URL("../src/config.js", import.meta.url), "utf8");
+  assert.equal(/KELABO_SECRET_MAIL|KELABO_SECRET_STT/.test(configSrc), false, "a supplier secret name still reaches the runtime config");
+  assert.ok(CREDENTIAL_SLOTS.includes("mail"), "mail is not a credential slot");
+  // And the key that goes with it comes from the slot, by provider name.
+  assert.equal(mailKeyFrom({ mailersend: "ms-key" }, "mailersend"), "ms-key");
+  assert.equal(mailKeyFrom({ mailersend: "ms-key" }, "ses"), "", "SES takes no key");
+});
+
+await test("loadConfig still names the mail secret, because the migration has to find it", async () => {
+  // Deleting it here would strand every deployment that predates the
+  // credentials table: `scripts/migrate-credentials.mjs` copies the key across
+  // from exactly this name, and it is the only supported way over.
   for (const env of ["dev", "staging", "prod"]) {
     assert.equal(loadConfig(env, template).secrets.mail, `kelabo/${loadConfig(env, template).endpoint}/mail`);
   }

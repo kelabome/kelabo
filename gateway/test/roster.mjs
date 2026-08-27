@@ -31,7 +31,7 @@ const config = {
   contacts: { external: false },
   archiveBucket: "t-bucket",
   archiveKeyPrefix: "archives",
-  secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
+  secrets: { cookieSigningKey: "t/cookie" },
   rtcApiBase: "http://rtc.test/v1",
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, iceTtlSeconds: 3600, disconnectGraceSeconds: GRACE_SECONDS, video: false },
   llm: { provider: "fake", model: "fake", smallModel: "fake" },
@@ -60,6 +60,7 @@ function connectSse(port, kelaboId, cookie) {
       (res) => {
         if (res.statusCode !== 200) return reject(new Error(`sse status ${res.statusCode}`));
         const roster = [];
+        const notices = [];
         let buf = "";
         res.on("data", (d) => {
           buf += d.toString("utf8");
@@ -70,9 +71,10 @@ function connectSse(port, kelaboId, cookie) {
             const ev = block.match(/^event: (.+)$/m)?.[1];
             const data = block.match(/^data: (.+)$/m)?.[1];
             if (ev === "roster" && data) roster.push(JSON.parse(data));
+            if (ev === "notice" && data) notices.push(JSON.parse(data));
           }
         });
-        resolve({ res, roster, last: () => roster[roster.length - 1] });
+        resolve({ res, roster, notices, last: () => roster[roster.length - 1] });
       },
     );
     r.on("error", reject);
@@ -164,6 +166,16 @@ async function main() {
     await waitFor(() => alice.last()?.count === 1, 3000);
     assert.deepEqual(alice.last().participants, ["alice@example.com"]);
     ok("leaving lowers the count after the grace window");
+  }
+
+  // The notice channel: a room-level event fanned to every subscriber and
+  // never persisted — no db write, no board contribution.
+  {
+    c.sseHub.notice(K, { scope: "assistant", reason: "clock" });
+    await waitFor(() => alice.notices.length === 1);
+    assert.deepEqual(alice.notices[0], { scope: "assistant", reason: "clock" });
+    c.sseHub.notice("m-nobody-here", { scope: "sfu" }); // no subscribers: a no-op, not a crash
+    ok("notice() fans an ephemeral event to the room's subscribers");
   }
 
   // Ending the kelabo closes every stream; the pending timers must not outlive

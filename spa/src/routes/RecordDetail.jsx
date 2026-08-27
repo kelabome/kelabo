@@ -141,6 +141,10 @@ export default function RecordDetail() {
   // few times so they appear without a manual refresh.
   useEffect(() => {
     if (!record || record.minutes) return undefined
+    // Nothing is generating them, so there is nothing to poll for. Polling a
+    // record the server has already said will never have minutes is a request
+    // every few seconds in service of a spinner that is itself wrong.
+    if (record.minutesSkipped) return undefined
     // Minutes land within a minute or two of the end. A record opened long
     // after its kelabo ended and still without them is not "generating" —
     // say so at once, and don't poll for something that is not coming.
@@ -282,13 +286,23 @@ export default function RecordDetail() {
 
           {tab === 'minutes' && (
             <section className="anim-in record-panel">
-              {!minutes && !minutesTimedOut && (
+              {/* "Never" is not "not yet". The assistant was switched off for
+                  this kelabo, so nothing was ever going to write minutes, and a
+                  spinner promising them was the page keeping a promise the
+                  server had already declined to make. */}
+              {!minutes && record.minutesSkipped && (
+                <div className="empty">
+                  No minutes for this kelabo — the assistant was off when it ended, so nothing wrote
+                  them. The call, the transcript and the messages are all here.
+                </div>
+              )}
+              {!minutes && !record.minutesSkipped && !minutesTimedOut && (
                 <div className="empty hstack">
                   <span className="con-spinner" aria-hidden="true"></span>
                   Minutes are being generated… they'll appear here shortly.
                 </div>
               )}
-              {!minutes && minutesTimedOut && (
+              {!minutes && !record.minutesSkipped && minutesTimedOut && (
                 <div className="empty">
                   No minutes yet. They may still be generating — reload to check —
                   or minutes may not be enabled on this deployment.

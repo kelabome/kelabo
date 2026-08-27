@@ -75,6 +75,9 @@ export default function Schedule() {
   // rather than when it starts, because that is the only moment the host is
   // asked anything about it.
   const [historyEnabled, setHistoryEnabled] = useState(false)
+  // Same promise as on an instant kelabo, made at the same point: before
+  // anybody is invited.
+  const [privateRecord, setPrivateRecord] = useState(false)
   const [state, setState] = useState('idle') // idle | saving | done
   const titleRef = useRef(null)
   // Typing or pasting anywhere lands in the title until another field is
@@ -116,6 +119,7 @@ export default function Schedule() {
         invitees,
         ...(note.trim() ? { note: note.trim() } : {}),
         ...(historyEnabled ? { historyEnabled: true } : {}),
+        ...(privateRecord ? { private: true } : {}),
         ...(journeys.length ? { journeyIds: journeys.map(j => j.id) } : {}),
       })
       setResult(res)
@@ -284,6 +288,17 @@ export default function Schedule() {
             />
           </div>
         )}
+
+        <div className="settings-row settings-row-plain">
+          <div className="sr-main">
+            <div className="sr-title">Private record</div>
+            <div className="sr-sub">
+              People who join by link, without an account, follow everything while it runs and lose the
+              record when it ends. Everyone signed in keeps it as usual.
+            </div>
+          </div>
+          <Switch checked={privateRecord} onChange={setPrivateRecord} ariaLabel="Private record" />
+        </div>
 
         {error && <Banner kind="danger">{error}</Banner>}
 

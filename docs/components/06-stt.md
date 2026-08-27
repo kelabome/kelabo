@@ -13,7 +13,7 @@ short-lived credential and receives finalized transcripts.
 
 | Piece | Where | Responsibility |
 |-------|-------|----------------|
-| Mint core | REST API Lambda `POST /kelabos/:id/stt-token` (`rest-api/src/stt/index.js`) | everything provider-neutral: kelabo lookup, participant check, reading the secret, mapping every failure to `stt_unavailable`. Names no provider |
+| Mint core | REST API Lambda `POST /kelabos/:id/stt-token` (`rest-api/src/stt/index.js`) | everything provider-neutral: kelabo lookup, participant check, reading the `stt` credential, mapping every failure to `stt_unavailable`. Names no provider |
 | Mint provider | `rest-api/src/stt/<id>.js` | turn the long-lived API key into a credential a browser may hold, and say what that browser should send |
 | Capture pipeline | SPA (`spa/src/capture/useCapture.js`) | owns the mic, the VAD gate, the composer and the clock. Names no provider |
 | Transport provider | `spa/src/stt/<id>.js` | everything about talking to its service: how many connections, when a billable stream starts and stops, control frames |
@@ -60,12 +60,14 @@ ever mints.
 
 `POST /kelabos/:id/stt-token` (participant cookie required, kelabo active):
 
-- The long-lived keys live in **one Secrets Manager secret per environment**,
-  `kelabo/<env>/stt`, holding **one key per provider** —
-  `{ "deepgram": "…", "soniox": "…" }` — so switching provider (or rolling
-  back) is a config change, never a scramble to re-enter a credential
-  (`Makefile` `stt-key` / `stt-adopt`; `rest-api/src/secrets.js` picks
-  `s[config.stt.provider]`).
+- The long-lived keys live in **one credentials-table row per environment**,
+  the `stt` slot (`PK = CRED#stt`, docs 08 §6c), holding **one key per
+  provider** — `{ "deepgram": "…", "soniox": "…" }` — so switching provider
+  (or rolling back) is a config change, never a scramble to re-enter a
+  credential. The lookup is by exact provider id (`sttKeyFrom` in
+  `contracts/src/credentials.js`): there is no `|| apiKey || key || value`
+  fallback chain, because that made a key stored under a misspelling
+  indistinguishable from a correct one.
 - The core mints via the configured provider and returns an `SttSession`:
   ```json
   { "provider": "deepgram",
@@ -94,9 +96,10 @@ ever mints.
   `config.stt.providers.<id>` and is opaque to the core — a provider is handed
   its own block and only its own.
 
-> The env path mirrors config exactly: `KELABO_SECRET_STT`,
-> `KELABO_STT_PROVIDER`, `KELABO_STT_LANGUAGE`, `KELABO_STT_PROVIDERS`
-> (`infra/lib/lambda-stack.js`).
+> The env path mirrors config exactly: `KELABO_STT_PROVIDER`,
+> `KELABO_STT_LANGUAGE`, `KELABO_STT_PROVIDERS`
+> (`infra/lib/lambda-stack.js`). No secret name travels with them — the key is
+> the `stt` credential slot, reached through `KELABO_TABLE_CREDENTIALS`.
 
 ## 4. Capture client (browser)
 
@@ -225,7 +228,9 @@ the Gateway `/caption`, fanned out, persisted and offered to the agent.
 ## 11. Adding a provider
 
 Three files (§2), one line in each registry, a `config.stt.providers.<id>`
-block, and its key added with `make stt-key env=<env> provider=<id> key=…`.
+block, a field for it in `CREDENTIAL_FIELDS.stt`
+(`contracts/src/credentials.js` — the field list is closed, so an undeclared
+name is refused), and its key written into the `stt` credential slot.
 The conformance suite iterates the registry (`sttClientIds()`), so a new
 provider is exercised by the existing tests; nothing downstream of the
 `SttRead` / `Utterance` contracts changes. A self-hoster could swap in local

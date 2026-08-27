@@ -1,4 +1,13 @@
-import { queryMcpScope, getMcpToken, putMcpToken, getMcpClient } from "../db.js";
+// `getMcpSecret` is in this list for a reason worth recording: it is easy to
+// call below and **never import**, from the day pasted bearer tokens moved out
+// of Secrets Manager and into `SECRET#` rows in this table. A bearer-auth MCP
+// server would then throw `getMcpSecret is not defined`, be caught by the
+// handler two lines under the call, and be dropped from the kelabo — so the
+// feature is silently off for every user, with one log line
+// (`mcp_secret_resolve_failed`) that reads like a credential problem. That is
+// what `test/mcp.mjs` pins, on the Authorization header rather than on the
+// server's presence: presence alone passes while the token is missing entirely.
+import { queryMcpScope, getMcpSecret, getMcpToken, putMcpToken, getMcpClient } from "../db.js";
 import { refreshAccessToken, isTokenExpired } from "@kelabo/contracts/mcp-auth";
 import { createMcpQuery } from "./subagents.js";
 
@@ -12,7 +21,7 @@ const MAX_TOOL_DESC_CHARS = 180;
  *
  * Three auth shapes (see mcpServerSchema):
  *   none   - nothing to attach
- *   bearer - a static token from Secrets Manager, written by the rest-api
+ *   bearer - a static token from a SECRET# row here, written by the rest-api
  *   oauth  - an access token from the mcp table, refreshed HERE when stale
  *
  * A kelabo can outlive an access token (they are commonly ~1h), so callers also
@@ -43,10 +52,14 @@ export async function loadEffectiveMcp(c, { hostIdentity }) {
       enabled: true,
     };
 
-    const authType = server.authType ?? (server.secretRef ? "bearer" : "none");
+    const hasSecret = !!(server.hasSecret ?? server.secretRef);
+    const authType = server.authType ?? (hasSecret ? "bearer" : "none");
+    // The partition this server's credential lives in: its own for a shared
+    // one, the host's for a personal one.
+    const credentialPk = server.scopePk ?? scopePk;
 
     if (authType === "oauth") {
-      const refresh = makeOauthRefresher(c, { scopePk, server });
+      const refresh = makeOauthRefresher(c, { scopePk: credentialPk, server });
       const token = await refresh({ force: false }).catch((err) => {
         c.logError("mcp_oauth_resolve_failed", err, { server: server.name });
         return null;
@@ -68,17 +81,15 @@ export async function loadEffectiveMcp(c, { hostIdentity }) {
         if (!next) return null;
         return `${next.tokenType || "Bearer"} ${next.accessToken}`;
       });
-    } else if (authType === "bearer" && server.secretRef) {
+    } else if (authType === "bearer" && hasSecret) {
       try {
-        const secret = await c.getSecret(`${c.config.secrets.mcpPrefix}${server.secretRef}`);
-        if (secret && typeof secret === "object") {
-          if (secret.headers && typeof secret.headers === "object") Object.assign(resolved.headers, secret.headers);
-          else if (secret.token) resolved.headers.Authorization = `Bearer ${secret.token}`;
-        } else if (typeof secret === "string" && secret) {
-          resolved.headers.Authorization = `Bearer ${secret}`;
-        }
+        // A `SECRET#<name>` row in the same partition as the server itself —
+        // the token used to be a Secrets Manager secret per user per server,
+        // reached through a `secretRef` path on this item.
+        const token = await getMcpSecret(c, credentialPk, server.name);
+        if (token) resolved.headers.Authorization = `Bearer ${token}`;
       } catch (err) {
-        c.logError("mcp_secret_resolve_failed", err, { hostIdentity, server: server.name, secretRef: server.secretRef });
+        c.logError("mcp_secret_resolve_failed", err, { hostIdentity, server: server.name });
         continue;
       }
     }

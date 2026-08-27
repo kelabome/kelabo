@@ -15,10 +15,15 @@
     "./mention": "./src/mention.js",
     "./constants": "./src/constants.js",
     "./mcp-auth": "./src/mcpAuth.js",
-    "./retention": "./src/retention.js"
+    "./retention": "./src/retention.js",
+    "./org-domains": "./src/orgDomains.js",
+    "./credentials": "./src/credentials.js",
+    "./versioned": "./src/versioned.js",
+    "./entitlement": "./src/entitlement.js",
+    "./money": "./src/money.js"
   },
   "scripts": {
-    "test": "node test/frames.mjs && node test/mention.mjs && node test/speaker.mjs"
+    "test": "node test/frames.mjs && node test/mention.mjs && node test/speaker.mjs && node test/orgs.mjs && node test/credentials.mjs && node test/entitlement.mjs"
   },
   "dependencies": {
     "zod": "^3.23.8"

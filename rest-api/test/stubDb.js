@@ -1,3 +1,5 @@
+import { CREDENTIAL_STATUS_ATTRS } from "@kelabo/contracts/credentials";
+
 // 13, matching the Gateway's writer and the real reader. The stub used to pad to
 // 15 as well, which is why it agreed with the bug instead of catching it.
 const pad = (n) => String(Math.max(0, Math.floor(n))).padStart(13, "0");
@@ -10,6 +12,7 @@ export function createDb() {
   const mcp = new Map();
   const history = new Map();
   const contacts = new Map();
+  const credentials = new Map();
   const journeys = new Map();
 
   const mkey = (PK, SK) => `${PK}|${SK}`;
@@ -429,6 +432,46 @@ export function createDb() {
     },
     async deleteMcpToken(scope, name) {
       mcp.delete(mkey(`MCP#${scope}`, `TOKEN#${name}`));
+    },
+    // Bearer tokens sit in the same partition as the server they authenticate,
+    // beside the OAuth tokens for servers that use those instead.
+    async getMcpSecret(scope, name) {
+      return mcp.get(mkey(`MCP#${scope}`, `SECRET#${name}`))?.token ?? null;
+    },
+    async putMcpSecret(scope, name, token) {
+      mcp.set(mkey(`MCP#${scope}`, `SECRET#${name}`), {
+        PK: `MCP#${scope}`,
+        SK: `SECRET#${name}`,
+        token,
+        updatedAt: Date.now(),
+      });
+    },
+    async deleteMcpSecret(scope, name) {
+      mcp.delete(mkey(`MCP#${scope}`, `SECRET#${name}`));
+    },
+
+    // --- supplier credentials ----------------------------------------------
+    // Their own table in production, with its own customer-managed key. Here
+    // just a map, keyed the way the real one is, so `createCredentials` can be
+    // exercised against it.
+    async getCredential(slot) {
+      return credentials.get(`CRED#${slot}`) ?? null;
+    },
+    // The projected read, and projected for real: it drops every attribute the
+    // ProjectionExpression would not have named, so a test that passes here
+    // could not be passing because `value` happened to be present. On two of
+    // the four slots the deployed role cannot read `value` at all
+    // (`infra/lib/lambda-stack.js`), so a stub that returned the whole row
+    // would prove nothing about the path that actually runs.
+    async getCredentialStatus(slot) {
+      const item = credentials.get(`CRED#${slot}`);
+      if (!item) return null;
+      return Object.fromEntries(
+        CREDENTIAL_STATUS_ATTRS.filter((a) => a in item).map((a) => [a, item[a]])
+      );
+    },
+    async putCredential(item) {
+      credentials.set(item.PK, item);
     },
     async getMcpClient(issuer) {
       const item = mcp.get(mkey("MCP#client", `AS#${issuer}`));

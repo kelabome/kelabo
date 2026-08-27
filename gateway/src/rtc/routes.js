@@ -14,7 +14,7 @@ import {
 import { parseCookies, verifyParticipantCookie } from "../cookies.js";
 import { readJson, send } from "../caption.js";
 import { getMeta } from "../db.js";
-import { RtcError } from "./cloudflare.js";
+import { RtcError, STUN_ONLY } from "./cloudflare.js";
 
 // SDP payloads are much larger than a caption; 512 KiB comfortably fits a
 // multi-track offer with inline candidates while staying bounded.
@@ -164,7 +164,7 @@ async function join(c, req, res) {
 
   // ICE is best-effort: without it the SFU still works on most networks over
   // STUN, and a mesh call on a permissive network still connects directly.
-  let ice = { iceServers: [], relay: false };
+  let ice = STUN_ONLY;
   try {
     ice = await c.rtc.iceServers(c.config.rtc.iceTtlSeconds);
   } catch (err) {

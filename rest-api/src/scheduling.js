@@ -77,6 +77,8 @@ export function createScheduling({ config, db, mailer, internal }) {
       // Opt-IN, so `=== true` rather than `!== false`: an absent field means no,
       // and every kelabo created before this existed means no too.
       historyEnabled: body.historyEnabled === true,
+      // Same promise as an instant kelabo's, made before anyone is invited.
+      private: body.private === true,
       rtcMode: RTC_MODES.includes(body.rtcMode) ? body.rtcMode : config.rtc.defaultMode,
       tenantId,
       tenantStatus: `${tenantId}#scheduled`,

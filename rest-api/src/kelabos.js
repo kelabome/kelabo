@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { RTC_MODES } from "@kelabo/contracts";
+import { entitlementFor } from "@kelabo/contracts/entitlement";
 import { err } from "./errors.js";
 
-export function createKelabos({ config, db, internal, secrets }) {
-  // Is this optional provider configured at all? Existence of its secret is
-  // the deployment-config signal (docs 19 §3). Anything short of a definitive
-  // "no" — no secrets module wired (tests), probe error — answers "on": a
+export function createKelabos({ config, db, internal, credentials }) {
+  // Is this optional supplier configured at all? Existence of its credential
+  // row is the signal (docs 19 §3). Anything short of a definitive "no" — no
+  // credentials module wired (tests), a read error — answers "on": a
   // capability probe must never switch a working feature off (docs 19 §4).
-  const providerOn = async (secretName) => {
-    if (!secrets?.secretExists) return true;
+  const providerOn = async (slot) => {
+    if (!credentials?.exists) return true;
     try {
-      return await secrets.secretExists(secretName);
+      return await credentials.exists(slot);
     } catch {
       return true;
     }
@@ -48,6 +49,11 @@ export function createKelabos({ config, db, internal, secrets }) {
       // Opt-IN, so `=== true` rather than `!== false`: an absent field means no,
       // and every kelabo created before this existed means no too.
       historyEnabled: body.historyEnabled === true,
+      // A private record (design-registered §7): guests in the room see
+      // everything while it runs and lose the record when it ends. Opt-in, like
+      // `historyEnabled`, and for the same reason — an absent field means no,
+      // including on every kelabo created before the flag existed.
+      private: body.private === true,
       // Conference transport, fixed for the life of the kelabo (docs 15). It
       // cannot change mid-kelabo: switching a `mesh` room to `sfu` would revoke
       // the peer-to-peer guarantee participants joined under.
@@ -150,21 +156,83 @@ export function createKelabos({ config, db, internal, secrets }) {
       // runtime failures of an `on` capability are the client's `degraded`
       // path and are not represented here.
       const [stt, assistant, rtc] = await Promise.all([
-        providerOn(config.secrets.stt),
-        providerOn(config.secrets.llm),
-        providerOn(config.secrets.cloudflareRealtime),
+        providerOn("stt"),
+        providerOn("llm"),
+        providerOn("rtc"),
       ]);
+
+      /**
+       * **The entitlement** (docs/saas/design-entitlements.md): what this
+       * kelabo may do, how much of it is left, and until when — one document,
+       * computed by one function, rendered by a client that decides nothing.
+       *
+       * This replaces a hand-built capability map whose entries were assembled
+       * from four separate reads and whose money rules the SPA then re-derived
+       * for itself in three route files. The inputs are unchanged: deployment
+       * config (the secrets above), policy (the tier and the owner's standing),
+       * and the room's own counters — docs/19 §3's three, in that order.
+       *
+       * Here that policy is the permissive default (`entitlementFor` with no
+       * standing and no card): every capability follows its configured
+       * provider, without limit. A hosted tier swaps this call for its own
+       * grant computation; the shape is the same.
+       */
+      const grant = entitlementFor({
+        options: {
+          rtcMode: body.rtcMode,
+          meshMaxParticipants: config.rtc.meshMaxParticipants,
+        },
+        providers: { stt, assistant, rtc, video: !!config.rtc.video },
+      });
+      body.entitlement = grant;
+      /**
+       * The capability map docs/19 defines, projected from the entitlement.
+       *
+       * Kept — and kept *derived* — because it is master's contract and every
+       * existing client reads it. The two can no longer disagree, which is the
+       * only thing that was ever wrong with having both.
+       */
       body.capabilities = {
-        // `provider` so the client can pick its defaults before it has minted
-        // anything — silence skipping is a saving on a provider that bills the
-        // audio it receives and a liability on one that bills the stream. No
-        // new disclosure: the same name is on every session and on the
-        // connection light.
-        stt: { on: stt, ...(stt ? { provider: config.stt.provider } : {}) },
-        assistant: { on: assistant },
-        video: { on: !!config.rtc.video },
-        rtc: { on: rtc, mode: body.rtcMode },
+        stt: grant.capabilities.stt.on
+          ? { on: true, provider: grant.capabilities.stt.mode || config.stt.provider }
+          : { on: false, reason: "quota", exhaustedReason: grant.capabilities.stt.reason, resetsAt: grant.resetsAt },
+        assistant: grant.capabilities.assistant.on
+          ? { on: true }
+          : {
+              on: false,
+              reason: "quota",
+              exhaustedReason: grant.capabilities.assistant.reason,
+              resetsAt: grant.resetsAt,
+            },
+        // Video is a deployment capability *and* a policy one: a card may
+        // withhold it from free-quota SFU calls (`freeQuota.sfuVideo`). Both
+        // arrive here as one answer, with the reason kept apart — "this build
+        // has no video" and "the free quota is not buying video this week" are
+        // different sentences and only one of them is fixable by paying.
+        video: grant.capabilities.call.video
+          ? { on: true }
+          : {
+              on: false,
+              reason: grant.capabilities.call.videoReason ? "quota" : "not_configured",
+              ...(grant.capabilities.call.videoReason
+                ? { exhaustedReason: grant.capabilities.call.videoReason, resetsAt: grant.resetsAt }
+                : {}),
+            },
+        rtc: { on: grant.capabilities.call.on, mode: grant.capabilities.call.mode },
+        // Whether the assistant reads typed messages. The message itself is
+        // rung 0 and is never withheld — see design-entitlements §2.1 for why
+        // this stopped being a capability called `post`.
+        typedAssistant: grant.capabilities.assistant.inputs?.includes("typed")
+          ? { on: true }
+          : { on: false, reason: grant.capabilities.assistant.typedReason ?? "free_quota", resetsAt: grant.resetsAt },
       };
+      // A provider that is absent is `not_configured`, not a quota problem, and
+      // the two must not be told as the same thing.
+      for (const [name, present] of [["stt", stt], ["assistant", assistant]]) {
+        if (!present) body.capabilities[name] = { on: false, reason: "not_configured" };
+      }
+      // The promise made at creation, stated in the room that has to keep it.
+      body.private = meta.private === true;
     }
     return body;
   }

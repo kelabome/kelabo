@@ -121,12 +121,17 @@ function baseSeed(journeyId) {
   };
 }
 
-function makeContainer({ store, llm, secretValue }) {
+// `getCredential` is here because `generateJourneyReport` falls back to the
+// `llm` credential slot when a container is assembled by hand — unreachable in
+// production, since `createContainer` always supplies `c.llm` (see the
+// container tests at the foot of this file), but it is the branch that decides
+// `llm_not_configured` and it is cheap to keep honest.
+function makeContainer({ store, llm, credential }) {
   return {
-    config: { tableNames: { journeys: "j", kelabos: "k" }, secrets: { llm: "kelabo/dev/llm" }, llm: { provider: "fake", model: "m" }, openaiBaseUrl: "" },
+    config: { tableNames: { journeys: "j", kelabos: "k" }, secrets: {}, llm: { provider: "fake", model: "m" }, openaiBaseUrl: "" },
     db: store,
     llm,
-    getSecret: async () => secretValue,
+    getCredential: async () => credential ?? null,
     log: () => {},
     logError: () => {},
   };
@@ -275,7 +280,7 @@ await test("llm failure: the report row is marked failed with a reason, not left
 await test("no LLM configured: fails cleanly instead of throwing", async () => {
   const journeyId = "j3";
   const store = makeStore(baseSeed(journeyId));
-  const c = makeContainer({ store, llm: undefined, secretValue: null });
+  const c = makeContainer({ store, llm: undefined, credential: null });
   const result = await generateJourneyReport(c, journeyId, { reportId: "r1", question: "q" });
   assert.equal(result.body.status, "failed");
   assert.equal(result.body.error, "llm_not_configured");
@@ -557,6 +562,99 @@ await test("bumpJourneyContributor: unconditional ADD idiom, same as rest-api's 
   assert.equal(row.kelaboJoinCount, 2);
   assert.equal(row.reportRequestCount, 1);
   assert.equal(row.contributorIdentity, "dana@example.com");
+});
+
+// --- the container's LLM, which is how a question gets answered at all -------
+//
+// Supplier credentials are rows in the credentials table, not Secrets Manager
+// entries, so `config.secrets.llm` no longer exists. `generateJourneyReport`
+// falls back to `c.llm` when nothing is injected, and this is the only test of
+// the one path that resolves an LLM key outside the agent worker — without it,
+// every journey question could fail with `llm_not_configured` while kelabos ran
+// perfectly, and nothing would say so.
+
+await test("the container supplies an LLM for journey questions, from the credentials table", async () => {
+  const { createContainer } = await import("../src/container.js");
+  const credentials = new Map([["llm", { apiKey: "sk-from-the-table" }]]);
+  const db = {
+    send: async (cmd) => {
+      // The credentials read: PK is `CRED#<slot>`.
+      const pk = String(cmd.input?.Key?.PK ?? "");
+      if (pk.startsWith("CRED#")) {
+        const slot = pk.slice("CRED#".length);
+        const value = credentials.get(slot);
+        return { Item: value ? { value: JSON.stringify(value) } : undefined };
+      }
+      return {};
+    },
+  };
+  const c = await createContainer({
+    config: {
+      region: "us-east-1",
+      // Exactly what the task carries now: no `secrets.llm` at all.
+      secrets: { cookieSigningKey: "k" },
+      llm: { provider: "openai", model: "gpt-x", smallModel: "gpt-x" },
+      openaiBaseUrl: "https://api.openai.com/v1",
+      tableNames: { credentials: "cred", kelabos: "k", journeys: "j" },
+    },
+    db,
+    s3: {},
+    secrets: {},
+    skipRebuild: true,
+  });
+
+  assert.ok(c.llm, "a container must be able to answer a journey question");
+  assert.equal(typeof c.llm.completeRaw, "function", "and `completeRaw`, since that is what the report path calls");
+
+  // An empty slot fails loudly rather than posting an empty key.
+  credentials.delete("llm");
+  await assert.rejects(() => c.llm.completeRaw({ messages: [] }), /llm_not_configured/);
+});
+
+await test("KELABO_LLM_API_KEY is a bootstrap for an empty credentials table, and a stored row beats it", async () => {
+  // The self-host path: this repository ships no console that writes the
+  // credentials table, so without the fallback a fresh deployment has no way
+  // to give the gateway a key at all — and a null credential is
+  // indistinguishable from a capability deliberately left unconfigured.
+  const { createContainer } = await import("../src/container.js");
+  const credentials = new Map();
+  const db = {
+    send: async (cmd) => {
+      const pk = String(cmd.input?.Key?.PK ?? "");
+      if (pk.startsWith("CRED#")) {
+        const value = credentials.get(pk.slice("CRED#".length));
+        return { Item: value ? { value: JSON.stringify(value) } : undefined };
+      }
+      return {};
+    },
+  };
+  const make = () =>
+    createContainer({
+      config: {
+        region: "us-east-1",
+        secrets: { cookieSigningKey: "k" },
+        llm: { provider: "openai", model: "gpt-x", smallModel: "gpt-x" },
+        openaiBaseUrl: "https://api.openai.com/v1",
+        bootstrapLlmApiKey: "sk-from-the-env",
+        tableNames: { credentials: "cred", kelabos: "k", journeys: "j" },
+      },
+      db,
+      s3: {},
+      secrets: {},
+      skipRebuild: true,
+    });
+
+  const empty = await make();
+  assert.deepEqual(await empty.getCredential("llm"), { apiKey: "sk-from-the-env" });
+  // Only the slot it bootstraps: an env var must not conjure a credential for
+  // a capability nobody configured.
+  assert.equal(await empty.getCredential("rtc"), null);
+
+  // A stored row always wins, so an operator who fills the slot later is not
+  // silently overridden by an environment variable set months earlier.
+  credentials.set("llm", { apiKey: "sk-from-the-table" });
+  const filled = await make();
+  assert.deepEqual(await filled.getCredential("llm"), { apiKey: "sk-from-the-table" });
 });
 
 console.log(`\n${passed} passed`);

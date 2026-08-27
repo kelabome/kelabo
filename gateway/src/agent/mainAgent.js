@@ -618,8 +618,20 @@ export class MainAgent {
     this.debug?.(kelaboId, { kind: "minutes", phase: "request", model: this.smallModel, system, messages: clipMessages(messages) });
     // Minutes are the one long-form output the agent produces; a 4k cap was
     // truncating the write-up back into the bullet list it is meant to replace.
-    const text = await this.llm.complete({ model: this.smallModel, system, messages, maxTokens: 8192 });
+    //
+    // `completeRaw`, not `complete`: the reply's finish reason is the only
+    // thing that can say the budget ran out, and `complete` discards it with
+    // the rest of the metadata.
+    const res = await this.llm.completeRaw({ model: this.smallModel, system, messages, maxTokens: 8192 });
+    const text = res.text;
     this.debug?.(kelaboId, { kind: "minutes", phase: "response", model: this.smallModel, raw: text });
+    // Say so when the budget ran out. The reply is then a fragment, and
+    // `parseMinutesJson` repairs what it can — but a kelabo whose minutes are
+    // routinely cut short needs the cap raised, and that is invisible from the
+    // record, which just looks a bit thin. Non-English kelabos hit this first:
+    // the same minutes cost far more output tokens per character.
+    if (res.truncated)
+      this.log?.("minutes_truncated", { kelaboId, model: this.smallModel, chars: text?.length ?? 0, maxTokens: 8192 });
     return parseMinutesJson(text, kelaboId, "server");
   }
 }

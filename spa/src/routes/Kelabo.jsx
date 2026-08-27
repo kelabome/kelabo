@@ -186,6 +186,13 @@ function KelaboRoom() {
   const capture = useCapture({
     kelaboId: id,
     enabled: micEnabled && sttOn,
+    // A typed message that the gateway refused, or that never got there. Said
+    // out loud, because the sender has already seen it echoed into their own
+    // panel and would otherwise have no way to know it went nowhere.
+    onPostError: err =>
+      toast(
+        `Message not sent${err?.status ? ` (${err.status})` : ''} — everyone else did not get it. Try again.`
+      ),
     finalOnly,
     startedAt: kelabo?.startedAt,
     language: sttLang,

@@ -26,13 +26,10 @@ the selected env; nothing env-specific is hard-coded.
       "subdomains": { "portal": "dev", "gateway": "dev-gw" },
       "allowedEmailDomain": "example.com",
       "secrets": {
-        "stt":      "kelabo/dev/stt",
-        "llm":      "kelabo/dev/llm",
         "cookieSigningKey": "kelabo/dev/cookie-key",
         "oidcGoogle": "kelabo/dev/oidc-google",
         "oidcApple":  "kelabo/dev/oidc-apple",
-        "cloudflareRealtime": "kelabo/dev/cloudflare-realtime",
-        "mcpPrefix": "kelabo/dev/mcp/"
+        "apiOrigin":  "kelabo/dev/api-origin"
       },
       "auth": {
         "sessionTtlSeconds": 3600,
@@ -229,14 +226,16 @@ not through CloudFront. *(No opencode subdomain — surface not built.)*
 
 ## 4. Secrets (Secrets Manager, by name)
 
+The supplier credentials moved out of Secrets Manager into the credentials
+table (`CRED#llm` / `stt` / `rtc` / `mail`, copied across by
+`make credentials-migrate`); what remains here is identity and perimeter — read
+once per cold start, never edited from a console.
+
 | Secret | Used by |
 |--------|---------|
-| `kelabo/<env>/stt` | REST API (mint STT credentials; one key per provider — `{"deepgram":"…","soniox":"…"}`, managed by `make stt-key`) |
-| `kelabo/<env>/llm` | Agent worker in Gateway (server mode) |
 | `kelabo/<env>/cookie-key` | REST API + Gateway (sign/verify cookies + tunnel JWT) |
 | `kelabo/<env>/oidc-google`, `.../oidc-apple` | REST API (social login client id/secret) |
-| `kelabo/<env>/cloudflare-realtime` | Gateway (Cloudflare Realtime SFU/TURN creds; populated by `make rtc-secrets` — without it RTC degrades to `rtc_unavailable`) |
-| `kelabo/<env>/mcp/*` (config `mcpPrefix`) | Agent worker reads (server MCP creds); REST API writes host-pasted tokens |
+| `kelabo/<env>/api-origin` | CloudFront→API shared secret (perimeter) |
 
 Dev may use inline values in local profiles; prod always references secrets.
 
@@ -247,17 +246,28 @@ Dev may use inline values in local profiles; prod always references secrets.
 - **REST Lambda:** DynamoDB RW (kelabos/users/otp/refresh/mcp/contacts/journeys),
   read history + read S3 archive (plus narrow `dynamodb:DeleteItem` on history and
   `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`
-  **when `mail.provider` is `ses`** and a read grant on `kelabo/<env>/mail`
-  when it is not, Secrets read (stt, cookie-key, oidc-*) and
-  Create/Put/Get/Delete/Describe under the `kelabo/<env>/mcp/` prefix (host MCP
-  tokens). No `transcribe:*`.
+  **when `mail.provider` is `ses`**, Secrets read (cookie-key, oidc-\*,
+  api-origin), and `dynamodb:GetItem` on the credentials table in **two
+  statements** — the whole item for `CRED#stt`/`CRED#mail`, whose values it
+  uses, and for `CRED#llm`/`CRED#rtc` only the non-secret attributes
+  (`dynamodb:Attributes` = `CREDENTIAL_STATUS_ATTRS` +
+  `dynamodb:Select = SPECIFIC_ATTRIBUTES`), which answers "is it configured?"
+  without the key being readable here (docs 02 §6, docs 20 §6.1) — plus
+  **decrypt only** on its KMS key. Deliberately **no `Scan`** (the one call that
+  returns every credential at once, and it would bypass the attribute fence),
+  **no `DeleteItem`** (a credential is replaced, never removed) and **no
+  `PutItem`** (master has no credential-write route; the operator scripts run
+  under the operator's own credentials). No `transcribe:*`.
 - **Gateway task role:** DynamoDB — kelabos RW, journeys RW (journey reports +
   context + join settling, docs 20), history RW (incl.
   `participant-index`), mcp read + narrow `dynamodb:PutItem` (persists rotated
-  OAuth tokens; cannot delete user config) + encrypt/decrypt on the mcp table's
-  KMS key, contacts read, refresh `GetItem` (agent-token revocation check); S3
-  archive write; Secrets read (cookie-key, **llm**, cloudflare-realtime, and
-  Get/Describe under the mcp prefix — because the agent runs here). No separate
+  OAuth tokens and host bearer tokens; cannot delete user config) +
+  encrypt/decrypt on the mcp table's KMS key, contacts read, refresh `GetItem`
+  (agent-token revocation check); S3 archive write; Secrets read (cookie-key
+  only); `dynamodb:GetItem` on the credentials table fenced to exactly
+  `CRED#llm` and `CRED#rtc` (the agent and the SFU proxy run here) plus
+  **decrypt only** on its KMS key — it holds no write of any kind, so a
+  compromised task cannot overwrite a working key with a blank. No separate
   agent role.
 
 ---

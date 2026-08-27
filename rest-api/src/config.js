@@ -93,22 +93,30 @@ function fromEnv() {
       history: env.KELABO_TABLE_HISTORY,
       mcp: env.KELABO_TABLE_MCP,
       contacts: env.KELABO_TABLE_CONTACTS,
+      credentials: env.KELABO_TABLE_CREDENTIALS,
       journeys: env.KELABO_TABLE_JOURNEYS,
     },
     contacts: { external: env.KELABO_CONTACTS_EXTERNAL === "true" },
     archiveBucket: env.KELABO_ARCHIVE_BUCKET,
     archiveKeyPrefix: env.KELABO_ARCHIVE_KEY_PREFIX || "archives",
+    // Only identity and perimeter are left here. Every supplier credential —
+    // the assistant, transcription, conference audio and outbound mail — is a
+    // row in the credentials table, addressed by slot
+    // (contracts/src/credentials.js), so they have no name to configure.
+    //
+    // `llm` and `cloudflareRealtime` were existence-probed only, for the
+    // capability map (docs 19 §3); `credentials.exists` answers that now.
+    // `stt` and `mail` were read for a key; the slot is the address instead.
+    // `mcpPrefix` went with the per-user MCP bearer tokens, which are rows in
+    // the mcp table beside the OAuth tokens for the same servers.
+    //
+    // `config/loadConfig.mjs` still derives all four names, because
+    // `scripts/migrate-credentials.mjs` is what copies an existing
+    // deployment's keys across and it has to know where they were.
     secrets: {
-      stt: env.KELABO_SECRET_STT,
       cookieSigningKey: env.KELABO_SECRET_COOKIE_KEY,
       oidcGoogle: env.KELABO_SECRET_OIDC_GOOGLE,
       oidcApple: env.KELABO_SECRET_OIDC_APPLE,
-      mcpPrefix: env.KELABO_SECRET_MCP_PREFIX || "",
-      mail: env.KELABO_SECRET_MAIL || "",
-      // Existence-probed only, for the capability map (docs 19 §3). The API
-      // holds no read grant on these values — they stay gateway-owned.
-      llm: env.KELABO_SECRET_LLM,
-      cloudflareRealtime: env.KELABO_SECRET_CLOUDFLARE_RTC,
       apiOrigin: env.KELABO_SECRET_API_ORIGIN,
     },
     api: {
@@ -186,14 +194,9 @@ function fromLoadConfig(c) {
     archiveBucket: c.archiveBucket,
     archiveKeyPrefix: c.archiveKeyPrefix,
     secrets: {
-      stt: c.secrets.stt,
       cookieSigningKey: c.secrets.cookieSigningKey,
       oidcGoogle: c.secrets.oidcGoogle,
       oidcApple: c.secrets.oidcApple,
-      mcpPrefix: c.secrets.mcpPrefix || "",
-      mail: c.secrets.mail || "",
-      llm: c.secrets.llm,
-      cloudflareRealtime: c.secrets.cloudflareRealtime,
       apiOrigin: c.secrets.apiOrigin,
     },
     api: { requireOriginSecret: !!c.api?.requireOriginSecret },

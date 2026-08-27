@@ -25,7 +25,7 @@ const config = {
   contacts: { external: false },
   archiveBucket: "t-bucket",
   archiveKeyPrefix: "archives",
-  secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
+  secrets: { cookieSigningKey: "t/cookie" },
   rtcApiBase: "http://rtc.test/v1",
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, iceTtlSeconds: 3600, video: false },
   llm: { provider: "fake", model: "fake", smallModel: "fake" },

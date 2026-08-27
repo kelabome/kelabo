@@ -157,7 +157,10 @@ function anthropicProvider(modelConfig, apiKey, log) {
     const toolCalls = (data.content ?? [])
       .filter((b) => b.type === "tool_use")
       .map((b) => ({ id: b.id, name: b.name, input: b.input }));
-    return { text, toolCalls, raw: data, usage: normalizeUsage(data.usage) };
+    // `max_tokens` was hit: the text is a fragment, not an answer. Minutes are
+    // the one call where that matters and the one call where it was invisible —
+    // a JSON object cut off mid-string parses as nothing.
+    return { text, toolCalls, raw: data, usage: normalizeUsage(data.usage), truncated: data.stop_reason === "max_tokens" };
   }
   return {
     async complete(req) {
@@ -306,7 +309,13 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
     // and leave content empty when max_tokens is exhausted mid-reasoning; fall back to it.
     const answer = (msg.content && msg.content.length ? msg.content : msg.reasoning_content) ?? "";
     const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
-    return { text: answer, toolCalls, raw: { content }, usage: normalizeUsage(data.usage) };
+    return {
+      text: answer,
+      toolCalls,
+      raw: { content },
+      usage: normalizeUsage(data.usage),
+      truncated: data.choices?.[0]?.finish_reason === "length",
+    };
   }
 
   async function call(req) {
@@ -366,6 +375,7 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
     let text = "";
     let reasoning = "";
     let usage = null;
+    let finishReason = "";
     const toolAcc = new Map(); // index -> {id, name, arguments}
     const decoder = new TextDecoder();
     let buffer = "";
@@ -378,6 +388,7 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
         return; // a torn frame; the split logic below should prevent this
       }
       if (chunk.usage) usage = chunk.usage;
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) return;
       if (delta.reasoning_content) reasoning += delta.reasoning_content;
@@ -421,7 +432,15 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
       .map(([, acc]) => parseToolArgs({ id: acc.id, function: { name: acc.name, arguments: acc.arguments } }, log));
     const answer = text.length ? text : reasoning;
     const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
-    const out = { text: answer, toolCalls, raw: { content }, usage: normalizeUsage(usage) };
+    const out = {
+      text: answer,
+      toolCalls,
+      raw: { content },
+      usage: normalizeUsage(usage),
+      // The stream's own finish_reason, so a streamed minutes call reports
+      // truncation exactly as the blocking path does.
+      truncated: finishReason === "length",
+    };
     wire?.response(wireCtx, res.status, { streamed: true, text: answer, toolCalls: toolCalls.length, usage });
     return out;
   }

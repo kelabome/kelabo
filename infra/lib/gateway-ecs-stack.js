@@ -129,6 +129,9 @@ export class GatewayEcsStack extends Stack {
           // to scope presence fan-out (docs 18 §5). It must never mutate a link.
           KELABO_TABLE_CONTACTS: names.contacts,
           KELABO_CONTACTS_EXTERNAL: String(cfg.contacts.external),
+          // Supplier credentials, addressed by slot. This task reads two of
+          // them — `CRED#llm` and `CRED#rtc` — and the grant below says so.
+          KELABO_TABLE_CREDENTIALS: names.credentials,
           // Read: journey context for a report. Write: the report result and
           // (docs 20 §10) the contributor rollup counters — the only table
           // besides its own kelabos/history the Gateway needs read+write on.
@@ -136,9 +139,6 @@ export class GatewayEcsStack extends Stack {
           KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
           KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
           KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
-          KELABO_SECRET_LLM: cfg.secrets.llm,
-          KELABO_SECRET_MCP_PREFIX: cfg.secrets.mcpPrefix,
-          KELABO_SECRET_CLOUDFLARE_RTC: cfg.secrets.cloudflareRealtime,
           KELABO_RTC_API_BASE: cfg.rtcApiBase,
           KELABO_RTC_DEFAULT_MODE: cfg.rtc.defaultMode,
           KELABO_RTC_MESH_MAX: String(cfg.rtc.meshMaxParticipants),
@@ -271,18 +271,41 @@ export class GatewayEcsStack extends Stack {
     );
     archiveBucket.grantWrite(taskRole);
 
+    // The cookie signing key is the one credential this task still reads from
+    // Secrets Manager, and it stays there deliberately: it signs all three
+    // token families, so anything holding it can mint a session for any user in
+    // any tenant. It is read once per task start and never rotated from a
+    // console, which is precisely the profile that gains nothing from moving
+    // into a table this task can also write to.
     secretsmanager.Secret.fromSecretNameV2(this, "SecretCookieKey", cfg.secrets.cookieSigningKey).grantRead(taskRole);
-    secretsmanager.Secret.fromSecretNameV2(this, "SecretLlm", cfg.secrets.llm).grantRead(taskRole);
-    // Cloudflare Realtime SFU app credentials + TURN key. The Gateway is the
-    // only component that holds them: the browser never sees more than an SDP
-    // answer and short-lived ICE credentials (docs 15).
-    secretsmanager.Secret.fromSecretNameV2(this, "SecretCloudflareRtc", cfg.secrets.cloudflareRealtime).grantRead(taskRole);
+
+    // Supplier credentials, by **slot**, read-only.
+    //
+    // This replaces three Secrets Manager prefix grants, and the shape is the
+    // same on purpose: one partition per slot means `dynamodb:LeadingKeys` can
+    // name exactly the credentials this task may reach, the way the secret
+    // prefixes did. It gets the LLM key (the agent) and the Cloudflare Realtime
+    // credentials (the SFU proxy — the browser never sees more than an SDP
+    // answer and short-lived ICE credentials, docs 15).
+    //
+    // It does NOT get `CRED#stt` or `CRED#mail`. The gateway never speaks to a
+    // transcription provider — it only ever sees text captions — and it sends
+    // no mail. It also holds no write of any kind here: rotating a credential
+    // is the control plane's, and a task that cannot write one cannot be made
+    // to overwrite a working key with a blank.
     taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        actions: ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-        resources: [`arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.mcpPrefix}*`],
+        actions: ["dynamodb:GetItem"],
+        resources: [tables.credentials.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["CRED#llm", "CRED#rtc"] },
+        },
       }),
     );
+    // Decrypt only. The table's customer-managed key is what makes revoking
+    // access to the material independent of who holds `GetItem`; granting
+    // encrypt here would hand back the write path the condition above removes.
+    tables.credentials.encryptionKey?.grantDecrypt(taskRole);
 
     new route53.ARecord(this, "GatewayARecord", {
       zone,

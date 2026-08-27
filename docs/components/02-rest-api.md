@@ -70,7 +70,7 @@ actions that touch live state must reach it synchronously:
 | `POST <gatewayBase>/internal/kelabos/:id/cancel` | notify a scheduled kelabo's cancellation |
 | `POST <gatewayBase>/internal/kelabos/:id/reschedule` | notify a schedule change |
 | `POST <gatewayBase>/internal/kelabos/:id/ring(/answer\|/cancel)` | deliver / answer / cancel a ring over the targets' presence streams (docs 18 §6) |
-| `POST <gatewayBase>/internal/journeys/:id/report` | generate a journey report (docs 20 §6.1) — the LLM secret is Gateway-only, so the synthesis cannot run here |
+| `POST <gatewayBase>/internal/journeys/:id/report` | generate a journey report (docs 20 §6.1) — the LLM key is Gateway-only (this role can read only *that* `CRED#llm` exists, §6), so the synthesis cannot run here |
 
 All are authenticated with an **internal app JWT** minted by the Lambda (HS256,
 Secrets Manager key, short exp, `aud:"gateway-internal"`); the Gateway rejects them
@@ -281,7 +281,7 @@ List archived kelabos the caller participated in or hosted.
 Mint a short-lived STT streaming credential for the browser.
 - **Behavior:** require valid participant cookie + kelabo `active`. The
   provider-neutral core (`rest-api/src/stt/index.js`) reads the long-lived key
-  from the `kelabo/<env>/stt` secret and dispatches to the configured
+  from the `stt` credential slot (`CRED#stt`) and dispatches to the configured
   provider's mint (`rest-api/src/stt/<id>.js` — Deepgram or Soniox); every
   failure maps to `stt_unavailable`. Details in [06-stt.md](./06-stt.md).
 - **200:** `SttSession` = `{ provider, url, token, expiresInSeconds, params }`
@@ -301,8 +301,9 @@ Host-personal MCP server config ([05-agent-mcp.md](./05-agent-mcp.md) §5, §7a)
 `GET /me/mcp` 🔑, `PUT /me/mcp` 🔑, `DELETE /me/mcp/:name` 🔑,
 `POST /me/mcp/probe` 🔑, plus the OAuth connect flow —
 `GET /me/mcp/:name/oauth/start` 🔑, `GET /me/mcp/oauth/callback` 🔑,
-`DELETE /me/mcp/:name/oauth` 🔑. Pasted bearer tokens are written to Secrets
-Manager under `kelabo/<env>/mcp/<identity>/<name>`; items store only `secretRef`.
+`DELETE /me/mcp/:name/oauth` 🔑. Pasted bearer tokens are written to the mcp
+table as `SECRET#<name>` rows, in the same partition as the `SERVER#<name>` they
+belong to; no route returns one, and `GET /me/mcp` reports `hasSecret`.
 
 ### 3.5c Journeys (docs 20)
 
@@ -335,9 +336,10 @@ docs 20 §11 but has no route yet.)*
 
 **Report generation does not run in this Lambda.** `POST /journeys/:id/reports`
 writes the `pending` `REPORT#` row, bumps the requester's rollup, then *awaits*
-`POST <gatewayBase>/internal/journeys/:id/report` (§2a) — the LLM secret is
-`GetSecretValue`-readable only by the Gateway's task role, by design, so the
-synthesis happens there (docs 20 §6.1 records the correction). The Gateway
+`POST <gatewayBase>/internal/journeys/:id/report` (§2a) — the LLM key is
+readable only by the Gateway's task role, by design; this Lambda's role can ask
+whether `CRED#llm` is set but not what it is (§6), so the synthesis happens
+there (docs 20 §6.1 records the correction). The Gateway
 writes the row `ready` or `failed`, never leaves it `pending`; the one failure
 it cannot observe — being unreachable at all — is written here as
 `failed: gateway_unreachable`. The response carries only `{reportId, status}`;
@@ -414,11 +416,41 @@ of docs 20 (`not_journey_owner`, `journey_completed`,
   the API still cannot *write* history rows or archives, which stay gateway-owned.
 - SES: `ses:SendEmail`, fenced by a `ses:FromAddress` condition — and granted
   **only when `mail.provider` is `ses`**. A deployment sending through another
-  provider gets a read grant on `kelabo/<env>/mail` instead, so it cannot still
-  send from the SES identity long after it stopped meaning to.
-- Secrets Manager: read the STT secret (`kelabo/<env>/stt`), cookie/JWT signing
-  key, social OIDC client secrets (Google/Apple); Create/Put/Get/Delete/Describe
-  on secrets under the `kelabo/<env>/mcp/` prefix (host-pasted MCP bearer
-  tokens). On the LLM secret: `DescribeSecret` **only**, never
-  `GetSecretValue` — the reason journey reports run in the Gateway (§3.5c).
+  provider gets nothing here and reads its API key from the `mail` credential
+  slot instead, so it cannot still send from the SES identity long after it
+  stopped meaning to.
+- Credentials table: `dynamodb:GetItem` only, in **two statements**, plus
+  `kms:Decrypt` on the table's customer-managed key.
+
+  | Slots | Grant | What this role can learn |
+  |---|---|---|
+  | `CRED#stt`, `CRED#mail` | `GetItem`, `LeadingKeys`-fenced, no attribute condition | the **values** — it mints STT tokens and sends mail with them |
+  | `CRED#llm`, `CRED#rtc` | `GetItem` + `ForAllValues:StringEquals dynamodb:Attributes` = `CREDENTIAL_STATUS_ATTRS` + `StringEquals dynamodb:Select = SPECIFIC_ATTRIBUTES` | **only that they exist** — a whole-item read is AccessDenied |
+
+  The second row is what makes the capability map (docs 19 §3) answerable
+  without the key being readable here: `CREDENTIAL_STATUS_ATTRS`
+  (`contracts/src/credentials.js`, imported by both `rest-api/src/db.js`'s
+  `getCredentialStatus` and `infra/lib/lambda-stack.js`, so policy and
+  projection cannot drift) is the row minus `value`, and it carries a
+  non-secret `configured` marker written beside the credential. An
+  attribute-scoped `GetItem` is `DescribeSecret`; an unscoped one is
+  `GetSecretValue`. `Select` is pinned as well as `Attributes` because
+  `dynamodb:Attributes` fences the attributes a request *names*, so a `GetItem`
+  naming none would return everything and satisfy `ForAllValues` vacuously.
+
+  Deliberately **no `Scan`** — a scan is the one call that returns every
+  credential in the deployment at once, and it would bypass the attribute fence
+  for the same reason — **no `DeleteItem`** (a credential is replaced, never
+  removed), and **no `PutItem`**: master has no credential-write route, and
+  `rest-api/scripts/put-credential.mjs` runs under the operator's own AWS
+  credentials rather than this role. `PutItem` replaces a whole item, so holding
+  it would let this role overwrite `CRED#llm` with a key of its choosing — a
+  different route to possessing the one it may not read. (The private SaaS
+  branch has a root-only credential reveal console and widens this grant on its
+  own side; the split is deliberate.)
+- Secrets Manager: read the cookie/JWT signing key, the social OIDC client
+  secrets (Google/Apple) and the CloudFront→API origin secret. Nothing else —
+  the supplier keys (llm/stt/rtc/mail) and the host-pasted MCP bearer tokens
+  both moved to DynamoDB, and the five statements they needed are gone
+  (`infra/lib/lambda-stack.js`).
 - No `transcribe:*` (STT is an external provider, not AWS Transcribe).

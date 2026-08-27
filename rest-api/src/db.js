@@ -9,6 +9,25 @@ import {
   TransactWriteCommand,
   BatchWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
+import {
+  CREDENTIAL_SK,
+  CREDENTIAL_STATUS_ATTRS,
+  credentialPk,
+  mcpSecretSk,
+} from "@kelabo/contracts/credentials";
+
+// The status projection, precomputed once. Every attribute goes through
+// `ExpressionAttributeNames` rather than only the ones that happen to be
+// reserved words today (`value`, `version` and `status` all are): a
+// ProjectionExpression that names a reserved word fails at request time with a
+// `ValidationException`, and "which of these is reserved?" is a list of ~570
+// words that grows. Aliasing all of them makes the question not arise, and
+// makes the expression a mechanical function of CREDENTIAL_STATUS_ATTRS rather
+// than a hand-maintained twin of it.
+const CRED_STATUS_NAMES = Object.freeze(
+  Object.fromEntries(CREDENTIAL_STATUS_ATTRS.map((a) => [`#${a}`, a]))
+);
+const CRED_STATUS_PROJECTION = Object.keys(CRED_STATUS_NAMES).join(", ");
 
 // Must match the width the Gateway writes with (`pad(at, 13)` in
 // gateway/src/db.js), because the sort key is compared as a *string*. Padding to
@@ -1423,6 +1442,96 @@ export function createDb({ config, client } = {}) {
     await doc.send(new DeleteCommand({ TableName: T.mcp, Key: { PK: `MCP#${scope}`, SK: `TOKEN#${name}` } }));
   }
 
+  // ---- MCP bearer tokens ---------------------------------------------------
+  // A pasted bearer token for one server, as a `SECRET#<name>` row beside the
+  // `SERVER#<name>` it authenticates and the `TOKEN#<name>` it is an
+  // alternative to. It used to be a Secrets Manager secret per user per server
+  // with only a `secretRef` pointer here — the same material as the OAuth
+  // tokens two rows away, in a different store, and the only thing in this
+  // system that scaled with users × servers.
+  //
+  // Same rule as the OAuth tokens: never returned by any API route. `GET
+  // /me/mcp` reports `hasSecret` and nothing else.
+
+  async function getMcpSecret(scope, name) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.mcp, Key: { PK: `MCP#${scope}`, SK: mcpSecretSk(name) } })
+    );
+    return res.Item?.token ?? null;
+  }
+
+  async function putMcpSecret(scope, name, token) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.mcp,
+        Item: { PK: `MCP#${scope}`, SK: mcpSecretSk(name), token, updatedAt: Date.now() },
+      })
+    );
+  }
+
+  async function deleteMcpSecret(scope, name) {
+    await doc.send(new DeleteCommand({ TableName: T.mcp, Key: { PK: `MCP#${scope}`, SK: mcpSecretSk(name) } }));
+  }
+
+  // --- supplier credentials -------------------------------------------------
+  //
+  // Their own table, their own customer-managed key, one partition per slot
+  // (contracts/src/credentials.js). Deliberately not a partition of any table
+  // an admin or export script walks, because the one thing that made the old
+  // design safe was that no bulk tool could ever emit a credential.
+  //
+  // A missing table name returns null rather than throwing, so an environment
+  // deployed before this table existed reports its capabilities as off instead
+  // of failing every request — the same behaviour a missing secret gave.
+
+  async function getCredential(slot) {
+    if (!T.credentials) return null;
+    const res = await doc.send(
+      new GetCommand({ TableName: T.credentials, Key: { PK: credentialPk(slot), SK: CREDENTIAL_SK } })
+    );
+    return res.Item || null;
+  }
+
+  /**
+   * The same row, minus the credential.
+   *
+   * Not an optimisation — a boundary. The Lambda's role may `GetItem` the
+   * `llm` and `rtc` slots **only** with a projection naming exactly
+   * `CREDENTIAL_STATUS_ATTRS` (`infra/lib/lambda-stack.js`); a whole-item read
+   * of either is denied by IAM, not merely discouraged. So this is not "the
+   * cheap read" and `getCredential` "the full read": for two of the four slots
+   * this is the only read that exists, and it is what makes "is the assistant
+   * configured?" answerable here without the key being readable here — the
+   * property `secretsmanager:DescribeSecret` gave for free before the move
+   * (docs 20 §6.1).
+   *
+   * Consequently the response *cannot* contain `value`, rather than merely not
+   * being looked at: a bug that read `.value` off this gets `undefined`, and a
+   * request that tried to ask for it gets an AccessDenied.
+   */
+  async function getCredentialStatus(slot) {
+    if (!T.credentials) return null;
+    const res = await doc.send(
+      new GetCommand({
+        TableName: T.credentials,
+        Key: { PK: credentialPk(slot), SK: CREDENTIAL_SK },
+        ProjectionExpression: CRED_STATUS_PROJECTION,
+        ExpressionAttributeNames: CRED_STATUS_NAMES,
+      })
+    );
+    return res.Item || null;
+  }
+
+  // Kept for the operator scripts (`scripts/put-credential.mjs`,
+  // `scripts/migrate-credentials.mjs`), which run under a human's own AWS
+  // credentials rather than the Lambda's role. The deployed function has no
+  // `dynamodb:PutItem` on this table at all — master has no credential-write
+  // route, so a grant for one would be a permission with no caller.
+  async function putCredential(item) {
+    if (!T.credentials) throw new Error("no credentials table configured");
+    await doc.send(new PutCommand({ TableName: T.credentials, Item: item }));
+  }
+
   // One dynamic client registration per authorization server, shared by every
   // user of this deployment — RFC 7591 registers a redirect_uri, not a user, so
   // re-registering per user would be both wasteful and (for some servers) rate
@@ -1646,6 +1755,12 @@ export function createDb({ config, client } = {}) {
     getMcpTokens,
     putMcpToken,
     deleteMcpToken,
+    getMcpSecret,
+    putMcpSecret,
+    deleteMcpSecret,
+    getCredential,
+    getCredentialStatus,
+    putCredential,
     getMcpClient,
     putMcpClient,
     createJourney,

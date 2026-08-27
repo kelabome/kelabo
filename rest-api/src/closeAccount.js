@@ -27,7 +27,7 @@ import { sha256 } from "./jwt.js";
  *      their own index row on records they merely attended,
  *   4. `INVITE#` rows naming them on other hosts' kelabos (invitee-index),
  *   5. their contacts partition and the mirror rows on peers' partitions,
- *   6. their MCP servers: the Secrets Manager secret behind each, cached
+ *   6. their MCP servers: the bearer token stored beside each, cached
  *      OAuth tokens, then the server rows,
  *   7. every refresh-table row (RT# chains and AGT# agent tokens — deleted,
  *      not revoked: the rows carry the email),
@@ -185,11 +185,16 @@ export function createCloseAccount({ config, db, records, secrets, log }) {
       if (!name) continue;
       report.mcpServersRemoved++;
       if (dryRun) continue;
-      if (server.secretRef) {
-        await secrets
-          .deleteMcpSecret(config, identity, name)
-          .catch((e) => warn("close_account_mcp_secret_failed", { identity, name, error: String(e) }));
-      }
+      // Unconditional, and no longer a Secrets Manager call: the bearer token
+      // is a `SECRET#<name>` row in the same partition as the server, so this
+      // is the same shape of idempotent delete as the OAuth token below and a
+      // delete of an absent row succeeds. Gating it on `server.secretRef` —
+      // which is the *old* pointer, absent on every row written since the move
+      // — would leave the new rows behind on exactly the accounts this
+      // function exists to erase.
+      await db.deleteMcpSecret(scope, name).catch((e) =>
+        warn("close_account_mcp_secret_failed", { identity, name, error: String(e) })
+      );
       await db.deleteMcpToken(scope, name).catch(() => {});
       await db.deleteMcpServer(scope, name).catch((e) =>
         warn("close_account_mcp_server_failed", { identity, name, error: String(e) })

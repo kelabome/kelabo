@@ -2,14 +2,41 @@ import {
   PutCommand,
   GetCommand,
   QueryCommand,
+  ScanCommand,
   UpdateCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  CREDENTIAL_SK,
+  credentialPk,
+  mcpSecretSk,
+  parseCredential,
+} from "@kelabo/contracts/credentials";
 
 const kelabosTable = (c) => c.config.tableNames.kelabos;
 const historyTable = (c) => c.config.tableNames.history;
 const mcpTable = (c) => c.config.tableNames.mcp;
+const credentialsTable = (c) => c.config.tableNames.credentials;
+
+/**
+ * A supplier credential, by slot.
+ *
+ * IAM lets this task read `CRED#llm` and `CRED#rtc` and nothing else — one
+ * partition per slot is what makes that expressible as a `LeadingKeys`
+ * condition, the same way the Secrets Manager prefix grants worked. There is
+ * no write of any kind: rotating a credential is the control plane's.
+ *
+ * A missing table or a missing item returns null, and every caller treats that
+ * as "this capability is not configured" — the behaviour a missing secret gave.
+ */
+export async function getCredential(c, slot) {
+  if (!credentialsTable(c)) return null;
+  const out = await c.db.send(
+    new GetCommand({ TableName: credentialsTable(c), Key: { PK: credentialPk(slot), SK: CREDENTIAL_SK } })
+  );
+  return out.Item?.value ? parseCredential(out.Item.value) : null;
+}
 
 export const kelaboPk = (kelaboId) => `KELABO#${kelaboId}`;
 export const pad = (n, w = 12) => String(Math.max(0, Math.floor(n))).padStart(w, "0");
@@ -257,28 +284,57 @@ export async function getMinutes(c, kelaboId) {
   return out.Item ?? null;
 }
 
-export async function queryActiveKelabos(c) {
+/**
+ * Every kelabo whose `tenantStatus` ends in `#<status>`.
+ *
+ * One configured tenant is a Query on the GSI. **No configured tenant is not
+ * one tenant called `""`** — it is a deployment where the tenant is the
+ * verified email domain and there are as many as there are users. Both callers
+ * used to build the key as `` `${tenant}#active` `` regardless, so on the SaaS
+ * they asked for the partition `"#active"`, which nothing is ever in: the
+ * sweeper saw zero kelabos, every time, and the entire recovery path for a
+ * failed settlement was dead while looking perfectly healthy in the logs.
+ *
+ * Across tenants it is a Scan of the index, filtered in code. The index holds
+ * one row per kelabo and this runs on a 15-minute timer, so the cost is small
+ * and bounded; `endsWith` is done here because DynamoDB has no such operator.
+ */
+async function kelabosByStatus(c, status) {
   const tenant = c.config.tenantId;
   if (tenant) {
-    const out = await c.db.send(
-      new QueryCommand({
-        TableName: kelabosTable(c),
-        IndexName: "status-index",
-        KeyConditionExpression: "tenantStatus = :ts",
-        ExpressionAttributeValues: { ":ts": `${tenant}#active` },
-      })
-    );
+    const out = await c.db
+      .send(
+        new QueryCommand({
+          TableName: kelabosTable(c),
+          IndexName: "status-index",
+          KeyConditionExpression: "tenantStatus = :ts",
+          ExpressionAttributeValues: { ":ts": `${tenant}#${status}` },
+        })
+      )
+      .catch(() => ({ Items: [] }));
     return out.Items ?? [];
   }
-  const out = await c.db.send(
-    new QueryCommand({
-      TableName: kelabosTable(c),
-      IndexName: "status-index",
-      KeyConditionExpression: "tenantStatus = :ts",
-      ExpressionAttributeValues: { ":ts": "#active" },
-    })
-  ).catch(() => ({ Items: [] }));
-  return out.Items ?? [];
+  const suffix = `#${status}`;
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const out = await c.db
+      .send(
+        new ScanCommand({
+          TableName: kelabosTable(c),
+          IndexName: "status-index",
+          ExclusiveStartKey,
+        })
+      )
+      .catch(() => ({ Items: [] }));
+    for (const i of out.Items ?? []) if (String(i.tenantStatus ?? "").endsWith(suffix)) items.push(i);
+    ExclusiveStartKey = out.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
+}
+
+export async function queryActiveKelabos(c) {
+  return kelabosByStatus(c, "active");
 }
 
 export async function findActiveKelaboHostedBy(c, identity, tenant) {
@@ -341,6 +397,29 @@ export async function isAgentTokenRevoked(c, jti) {
 
 export async function putHistoryRow(c, row) {
   await c.db.send(new PutCommand({ TableName: historyTable(c), Item: row }));
+}
+
+/**
+ * Mark a record as deliberately having no minutes.
+ *
+ * The difference between "not written yet" and "never going to be" is invisible
+ * from `hasMinutes: false` alone, and the record page rendered the first — a
+ * spinner and "they'll appear here shortly" — for a kelabo whose assistant was
+ * switched off and whose minutes nothing was ever going to generate.
+ *
+ * An update rather than a full re-put: the row is already there and complete,
+ * and rebuilding it here would mean a second copy of its shape drifting from
+ * the one that writes it.
+ */
+export async function markHistoryMinutesSkipped(c, archiveId) {
+  await c.db.send(
+    new UpdateCommand({
+      TableName: historyTable(c),
+      Key: { archiveId },
+      UpdateExpression: "SET minutesSkipped = :t",
+      ExpressionAttributeValues: { ":t": true },
+    })
+  );
 }
 
 export async function putParticipantIndex(c, archive, participant, { hasMinutes = false, titleGenerated = false } = {}) {
@@ -420,21 +499,32 @@ export async function putArchiveObject(c, key, archive) {
 
 export async function queryMcpScope(c, scopePk) {
   if (!mcpTable(c)) return [];
-  const out = await c.db.send(
-    new QueryCommand({
-      TableName: mcpTable(c),
-      KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-      ExpressionAttributeValues: { ":pk": scopePk, ":sk": "SERVER#" },
-    })
-  ).catch(() => ({ Items: [] }));
+  const out = await c.db
+    .send(
+      new QueryCommand({
+        TableName: mcpTable(c),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": scopePk, ":sk": "SERVER#" },
+      })
+    )
+    // Failing open — a kelabo still starts, without its tools — but **not
+    // silently**. This used to be a bare `.catch(() => …)`, which made an
+    // unreadable partition indistinguishable from an empty one: the agent
+    // simply had no servers, and there was no error at any level to look at.
+    // That is the same shape as the opencode plugin-spec bug (AGENTS.md), and
+    // it matters more now that a *shared* catalogue can be the missing one.
+    .catch((err) => {
+      c.logError?.("mcp_scope_read_failed", err, { scopePk });
+      return { Items: [] };
+    });
   return out.Items ?? [];
 }
 
-// ---- MCP OAuth ------------------------------------------------------------
+// ---- MCP credentials ------------------------------------------------------
 // The gateway is the only component that sees a 401 from an MCP server mid-call,
 // so it owns the refresh grant and therefore needs WRITE access to TOKEN# items
-// (see gateway-ecs-stack.js). It never touches SERVER# items — those stay
-// rest-api-owned.
+// (see gateway-ecs-stack.js). It never touches SERVER# or SECRET# items — those
+// stay rest-api-owned, and this task only reads them.
 
 export async function getMcpToken(c, scopePk, name) {
   if (!mcpTable(c)) return null;
@@ -451,6 +541,22 @@ export async function putMcpToken(c, scopePk, name, token) {
   await c.db.send(
     new PutCommand({ TableName: mcpTable(c), Item: { PK: scopePk, SK: `TOKEN#${name}`, ...token } })
   );
+}
+
+/**
+ * A host's pasted bearer token for one MCP server.
+ *
+ * Read-only here, like `SERVER#` items: the token is written by rest-api when
+ * the host pastes it and this task only ever presents it. It sits in the same
+ * partition as the server it authenticates, under the same customer-managed
+ * key as the OAuth tokens for servers that use those instead.
+ */
+export async function getMcpSecret(c, scopePk, name) {
+  if (!mcpTable(c)) return null;
+  const out = await c.db
+    .send(new GetCommand({ TableName: mcpTable(c), Key: { PK: scopePk, SK: mcpSecretSk(name) } }))
+    .catch(() => ({ Item: null }));
+  return out.Item?.token ?? null;
 }
 
 /** The deployment-wide dynamic client registration for an authorization server. */

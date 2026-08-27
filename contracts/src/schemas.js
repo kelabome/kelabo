@@ -258,6 +258,12 @@ export const createKelaboBodySchema = z.object({
   // a decision a host has to actually make, and a default that quietly said yes
   // would be making it for them every time.
   historyEnabled: z.boolean().optional(),
+  // Private record (design-registered-tier §7). Set by the owner at creation
+  // and carried onto the history row at archive time: a guest who was in the
+  // room sees everything while it runs and loses the record when it ends.
+  // Live-session behaviour is untouched — this is a record-access rule, not a
+  // room one.
+  private: z.boolean().optional(),
   // Link into one or more existing journeys at creation time (docs 20 §11).
   // No membership check is needed here beyond zod: the caller is about to
   // become this kelabo's host, which already satisfies journeys.linkKelabo's
@@ -414,6 +420,19 @@ export const rtcTrackSchema = z.object({
   kind: z.enum(["audio", "video", "screen"]).default("audio"),
 });
 
+/**
+ * **Screen sharing is video.** Same codecs, same bitrate class, same line on
+ * Cloudflare's bill — so anything that withholds video withholds a screen
+ * share with it, and a policy that named only `"video"` would leave the
+ * cheaper-looking half of the same cost wide open.
+ *
+ * Here rather than in either service, because the SPA hides the controls and
+ * the gateway refuses the publish, and those two must not disagree about what
+ * counts.
+ */
+export const VIDEO_TRACK_KINDS = Object.freeze(["video", "screen"]);
+export const isVideoKind = (kind) => VIDEO_TRACK_KINDS.includes(kind);
+
 const kelaboScoped = { kelaboId: z.string().min(1).max(128) };
 
 export const rtcJoinBodySchema = z.object({ ...kelaboScoped });
@@ -515,7 +534,11 @@ export const rtcPeerSchema = z.object({
 
 // How the gateway authenticates to this MCP server:
 //   none   - no credentials
-//   bearer - a static token the host pasted, held in Secrets Manager (secretRef)
+//   bearer - a static token the host pasted, in the mcp table under
+//            SK=SECRET#<name>. It used to be one Secrets Manager secret per
+//            user per server, pointed at by a `secretRef` on this item — the
+//            same material as the OAuth tokens one row away, in a different
+//            store, and the only thing here that scaled with users x servers.
 //   oauth  - OAuth 2.1 per the MCP authorization spec; tokens live in the mcp
 //            table under SK=TOKEN#<name> and are refreshed by the gateway
 export const mcpAuthTypes = ["none", "bearer", "oauth"];
@@ -537,7 +560,9 @@ export const mcpServerSchema = z.object({
   transport: z.enum(["http", "local"]),
   url: z.string().optional(),
   headers: z.record(z.string()).optional(),
-  secretRef: z.string().optional(),
+  // Whether a bearer token is stored for this server. A flag, not a pointer:
+  // the token's address is derivable from the server's own key.
+  hasSecret: z.boolean().optional(),
   authType: z.enum(["none", "bearer", "oauth"]).optional(),
   oauth: mcpOauthMetaSchema.optional(),
   enabled: z.boolean(),

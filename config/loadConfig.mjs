@@ -74,6 +74,11 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     history: `kelabo-${block.endpoint}-history`,
     mcp: `kelabo-${block.endpoint}-mcp`,
     contacts: `kelabo-${block.endpoint}-contacts`,
+    // Supplier credentials (contracts/src/credentials.js). Its own table, with
+    // its own customer-managed key, so the material can be revoked by retiring
+    // a key rather than by unpicking table grants — and so no reset or export
+    // script that walks the other tables can ever emit a credential.
+    credentials: `kelabo-${block.endpoint}-credentials`,
     journeys: `kelabo-${block.endpoint}-journeys`,
   };
 
@@ -415,6 +420,16 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       // secret absent and never notice it. Shaped like the STT secret — a key
       // per provider — so changing provider does not mean re-entering one.
       mail: block.secrets?.mail ?? `kelabo/${block.endpoint}/mail`,
+      // `stt`, `mail`, `llm` and `cloudflareRealtime` above are no longer where
+      // a supplier key LIVES — those are rows in the credentials table now,
+      // addressed by slot (contracts/src/credentials.js), and nothing at
+      // runtime resolves a name for one.
+      //
+      // They stay derived, and stay named for every environment, because
+      // `rest-api/scripts/migrate-credentials.mjs` is what copies an existing
+      // deployment's keys across and it has to know where they were. Deleting
+      // them here would strand every deployment that predates the table with
+      // no supported way across.
     },
     baseDomain,
     portalDomain,

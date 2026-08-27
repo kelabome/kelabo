@@ -19,7 +19,7 @@ optional is gone:
 | 0 | join + presence + typed messages | gateway only | (never — this is the floor) |
 | 1 | P2P call (mesh) | rung 0 | messages-only room |
 | 2 | SFU conference, TURN | Cloudflare creds | fall back to mesh (capped) |
-| 3 | live transcription | an STT provider key (`kelabo/<env>/stt`, docs 06) | typed messages only |
+| 3 | live transcription | an STT provider key (the `stt` credential slot, docs 06) | typed messages only |
 | 4 | assistant / board | LLM key or dev agent | no board tab, no @kelabo |
 | 5 | minutes, records, history | archive + rung 3 | no record after the kelabo |
 
@@ -80,8 +80,8 @@ The client must never *infer* a capability from a sibling component's failure �
 that is how a Deepgram error became a frozen mic. The decision has three
 inputs, and all three live server-side:
 
-1. **Deployment config** — is the secret present, is the feature compiled in
-   (`rtcMode`, `mcpEnabled`, …).
+1. **Deployment config** — is the credential slot filled, is the feature
+   compiled in (`rtcMode`, `mcpEnabled`, …).
 2. **Policy** — what this tier/room/participant is allowed
    (`guestTranscriptAccess`, guest rooms with no assistant, quotas).
 3. **Runtime health** — the token mint failed, the provider is down.
@@ -90,11 +90,19 @@ The kelabo META response carries this as `capabilities`, a map of
 `{ name: { on, … } }` computed by the REST API (`rest-api/src/kelabos.js`) —
 `stt` carries `{ on, provider }` (which STT provider will transcribe, so the
 client can pick its defaults before minting anything), `rtc` carries `mode`:
-`stt`, `assistant` and `rtc` from provider-secret **existence** (DescribeSecret
-only — the API can state that the LLM key exists without being able to read
-it; `rest-api/src/secrets.js secretExists`), `video` from deployment config.
-Anything short of a definitive "the secret does not exist" answers `on` — a
-probe hiccup must never switch a working feature off. New capabilities join
+`stt`, `assistant` and `rtc` from the **existence of the supplier's credential
+row** (`rest-api/src/credentials.js exists`, `providerOn` in
+`rest-api/src/kelabos.js`), `video` from deployment config.
+Anything short of a definitive "no such item" answers `on` — a
+probe hiccup must never switch a working feature off.
+
+That probe reads the row through a **projection that cannot contain the
+credential** (`CREDENTIAL_STATUS_ATTRS`, docs 08 §6c), and for `assistant` and
+`rtc` that is the only read the control plane's IAM role is permitted at all —
+so "is this configured?" is answerable here without the LLM key or the
+Cloudflare app secret being readable here (docs 02 §6, docs 20 §6.1). The
+question a capability map asks is deliberately smaller than the permission to
+read the answer. New capabilities join
 this map rather than inventing parallel booleans; `transcriptAccess` (a
 per-participant *policy*, not a deployment capability) stays on
 `/caption/history` beside the data it governs.
@@ -109,6 +117,20 @@ rooms as `assistant: off`. If a hosted-tier behaviour needs a UI fork or a new
 code path rather than a config value, the mechanism is missing here — add it
 here first, then configure it there. (Precedent: the Messages/Transcript tab
 split, built here, consumed there as one config default.)
+
+## 4.1 Quantity, time and lifecycle
+
+A capability here is a boolean decided once, at `GET /kelabos/:id`. A hosted
+tier needs two more dimensions — *how much* is left and *until when* — and
+four moments rather than one: what may be switched on at creation, what this
+call may do once it starts, what changed while it ran, and what it cost.
+
+That extension is designed in `docs/saas/design-entitlements.md` on the saas
+branch, as an **optional `allowance` and `until` on an existing capability
+entry** rather than a parallel structure — per §3's rule that new
+capabilities join this map. The mechanism belongs here, on master, with
+permissive defaults: a deployment that sets no allowance is unlimited and
+behaves exactly as it does today.
 
 ## 5. Checklist for touching a provider integration
 

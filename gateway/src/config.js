@@ -28,6 +28,9 @@ function fromEnv() {
       mcp: e.KELABO_TABLE_MCP,
       refresh: e.KELABO_TABLE_REFRESH,
       contacts: e.KELABO_TABLE_CONTACTS,
+      // Supplier credentials, one item per slot. IAM lets this task read
+      // `CRED#llm` and `CRED#rtc` and nothing else.
+      credentials: e.KELABO_TABLE_CREDENTIALS,
       // Read: context for a journey report (docs 20 §6). Write: the report
       // itself, and the contributor rollup counters — both land here because
       // the Gateway is the one place the LLM credential is readable at all.
@@ -42,11 +45,10 @@ function fromEnv() {
     guestTranscriptAccess: e.KELABO_GUEST_TRANSCRIPT_ACCESS !== "false",
     archiveBucket: e.KELABO_ARCHIVE_BUCKET,
     archiveKeyPrefix: e.KELABO_ARCHIVE_KEY_PREFIX || "archives",
+    // The cookie key is the only thing this task still reads from Secrets
+    // Manager; supplier credentials are rows in the credentials table.
     secrets: {
-      llm: e.KELABO_SECRET_LLM,
       cookieSigningKey: e.KELABO_SECRET_COOKIE_KEY,
-      mcpPrefix: e.KELABO_SECRET_MCP_PREFIX || "",
-      cloudflareRealtime: e.KELABO_SECRET_CLOUDFLARE_RTC || "",
     },
     rtcApiBase: e.KELABO_RTC_API_BASE || "https://rtc.live.cloudflare.com/v1",
     rtc: {
@@ -62,6 +64,11 @@ function fromEnv() {
       smallModel: e.KELABO_LLM_SMALL_MODEL || "",
     },
     openaiBaseUrl: e.KELABO_OPENAI_BASE_URL || "https://api.openai.com/v1",
+    // Bootstrap only, and deliberately not under `secrets` — it is a key, not a
+    // Secrets Manager name. It fills the `llm` credential slot for a deployment
+    // whose credentials table is still empty; see `bootstrapCredential` in
+    // container.js for why that fallback exists and why a stored row wins.
+    bootstrapLlmApiKey: e.KELABO_LLM_API_KEY || "",
     gateway: {
       agent: {
         maxConcurrentRuns: num(e.KELABO_AGENT_MAX_CONCURRENT_RUNS, 4),
@@ -94,6 +101,7 @@ function fromBase(base) {
       mcp: base.tableNames.mcp,
       refresh: base.tableNames.refresh,
       contacts: base.tableNames.contacts,
+      credentials: base.tableNames.credentials,
       journeys: base.tableNames.journeys,
     },
     contacts: { external: !!base.contacts?.external },
@@ -101,10 +109,7 @@ function fromBase(base) {
     archiveBucket: base.archiveBucket,
     archiveKeyPrefix: base.archiveKeyPrefix || "archives",
     secrets: {
-      llm: base.secrets.llm,
       cookieSigningKey: base.secrets.cookieSigningKey,
-      mcpPrefix: base.secrets.mcpPrefix || "",
-      cloudflareRealtime: base.secrets.cloudflareRealtime || "",
     },
     rtcApiBase: base.rtcApiBase,
     rtc: { ...base.rtc },
@@ -117,6 +122,7 @@ function fromBase(base) {
     // override still wins for local experiments. deepseek/other providers route
     // through the OpenAI-compatible client, so this is the endpoint it hits.
     openaiBaseUrl: process.env.KELABO_OPENAI_BASE_URL || base.llm.baseUrl || "https://api.openai.com/v1",
+    bootstrapLlmApiKey: process.env.KELABO_LLM_API_KEY || "",
     gateway: { agent: { ...base.gateway.agent } },
     retentionDays: base.retentionDays,
   };

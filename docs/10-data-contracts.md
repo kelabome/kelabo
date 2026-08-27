@@ -450,7 +450,7 @@ the history table (see [08-database.md](./08-database.md)).
  * @property {"http"|"local"} transport
  * @property {string} [url]
  * @property {Object} [headers]
- * @property {string} [secretRef]   // Secrets Manager name (server mode)
+ * @property {string} [secretRef]   // `<identity>/<name>` — points at the SECRET# row, never the token
  * @property {boolean} enabled
  */
 /** @typedef {{servers: McpServer[]}} McpConfig */

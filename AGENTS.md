@@ -122,10 +122,27 @@ make deploy env=dev      # docker push -> cdk deploy --all -> force ECS redeploy
 make docker env=dev      # build + push gateway image to ECR
 make restart env=dev     # force-new-deployment only (re-pull :latest)
 make gateway|backend|frontend|infra|synth env=dev
-make secrets env=dev STT_PROVIDER=... STT_API_KEY=... LLM_API_KEY=...
-make mail-secret env=dev provider=mailersend key=...   # only if not sending via SES
-make rtc-secrets env=dev CF_SFU_APP_ID=... CF_SFU_APP_SECRET=... CF_TURN_KEY_ID=... CF_TURN_KEY_TOKEN=...
+make secrets env=dev     # the only Secrets Manager entries left: cookie key + origin secret
 ```
+
+Supplier credentials (LLM/STT/RTC/mail) are **not** secrets any more — they are
+rows in the credentials table (`CRED#<slot>`, docs 08 §6c), under their own
+customer-managed key.
+
+```
+make credential-set env=dev slot=llm            # what the slot takes
+make credential-set env=dev slot=llm fields="apiKey=…" write=1
+make credentials-migrate env=dev write=1        # or copy them out of Secrets Manager
+make credentials-show env=dev                   # which slots are set, never the values
+```
+
+`credential-set` is the first-run path (`rest-api/scripts/put-credential.mjs`):
+it merges the named fields into the slot, refuses a field name the slot does not
+define, and is dry until `write=1`. Fields can equally come from
+`KELABO_CRED_<SLOT>_<FIELD>` in the environment, which is what to use for a real
+key — an argument is in the shell history and in `ps`. `credentials-migrate` is
+the upgrade path for an environment that still has the keys in Secrets Manager;
+the source secrets are left in place.
 
 Order matters and is non-obvious:
 
@@ -241,16 +258,16 @@ Order matters and is non-obvious:
   reach a browser, and always resolves the caller's session id from its own peer
   record, never from the request body. Presence is in-process
   (`state.rtcRooms`); the durable half is `rtcMode` on the kelabo META.
-  `make rtc-secrets` is separate from `make secrets` because the feature degrades
-  cleanly (`rtc_unavailable`) without it.
+  Conference audio degrades cleanly (`rtc_unavailable`) until the `rtc`
+  credential slot is filled — a table row now, like every supplier key.
 - **Outbound mail** (`rest-api/src/mail/`): `messages.js` says what a mail
   contains, a transport (`ses.js`, `mailersend.js`) says how it travels, and
   `index.js` picks one per send. `mail.provider` in config selects it — SES is
-  the default and needs no key (IAM role), everything else reads
-  `kelabo/<env>/mail`. The boundary between the two halves is a *message
-  object*, never a MIME string: MIME is an SES workaround for `Simple` content
-  not carrying a part, and MailerSend takes the same inline logo as a JSON
-  attachment. `mime.js` is therefore SES-only. Adding a provider is one file
+  the default and needs no key (IAM role), everything else reads the `mail`
+  credential slot, a supplier key like any other. The boundary between the two
+  halves is a *message object*, never a MIME string: MIME is an SES workaround
+  for `Simple` content not carrying a part, and MailerSend takes the same inline
+  logo as a JSON attachment. `mime.js` is therefore SES-only. Adding a provider is one file
   exporting `{ id, send(message) }` plus a line in `FACTORIES` and in
   `MAIL_PROVIDERS` (restated in `config/loadConfig.mjs`, so a typo fails at
   config load rather than at somebody's sign-in).

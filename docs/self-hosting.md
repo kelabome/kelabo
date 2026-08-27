@@ -96,8 +96,9 @@ through your AWS infrastructure.
 
 ### C2. Speech-to-text: Deepgram or Soniox
 
-Pick one (you can add the other's key later with `make stt-key` and switch
-with one config value). Whichever you use, Kelabo never sends your key to the
+Pick one (the `stt` credential slot holds a key per provider, so you can add
+the other later and switch with one config value). Whichever you use, Kelabo
+never sends your key to the
 browser — it uses it server-side to mint short-lived tokens, and the browser
 streams audio to the provider directly.
 
@@ -112,19 +113,20 @@ error at deploy time — it is transcription failing later with
 gotcha; Kelabo mints temporary keys via Soniox's `/v1/auth/temporary-api-key`
 endpoint. Speaker diarization comes bundled at no extra cost.
 
-That is all — the key goes into Secrets Manager in step D4 and is never
-stored anywhere else.
+That is all — the key goes into the `stt` credential slot in step D4 and is
+never stored anywhere else.
 
 ### C3. DeepSeek
 
-Create an API key at platform.deepseek.com. Same handling: Secrets Manager
-only.
+Create an API key at platform.deepseek.com. Same handling: the `llm`
+credential slot, nowhere else.
 
 ### C4. Cloudflare Realtime (optional, for conference audio/video)
 
 In the Cloudflare dashboard create a **Realtime (Calls) app** — note the app
 ID and secret — and a **TURN key** (ID + token). You can skip this entirely
-at first and add it later with `make rtc-secrets` + `make restart`; rooms
+at first and fill the `rtc` credential slot later (step D4); the gateway
+re-reads a credential every five minutes, so no restart is needed. Rooms
 degrade gracefully until then.
 
 ### C5. MailerSend (only if you are not sending through SES)
@@ -139,9 +141,10 @@ key and no step here — the Lambda authenticates with its own IAM role.
    `mail_not_configured`.
 2. Create an API token with the **Email → full access** permission. Nothing
    else is used.
-3. `make mail-secret env=<env> provider=mailersend key=…` writes it to
-   Secrets Manager (`kelabo/<env>/mail`), then set `mail.provider` in
-   `config/kelabo.json` (§D2) and `make backend env=<env>`.
+3. Put it in the `mail` credential slot's `mailersend` field (step D4),
+   then set `mail.provider` in `config/kelabo.json` (§D2) and
+   `make backend env=<env>` — the provider is a deploy-time value, so that
+   redeploy is what switches the transport and its IAM grant.
 
 Two things that differ from SES and are worth knowing before you debug them:
 
@@ -185,7 +188,7 @@ All configuration is one file. Nothing anywhere else needs editing.
    | `environments.<env>.subdomains.portal` / `gateway` | e.g. `kelabo` and `gw.kelabo` → `kelabo.mycompany.com`, `gw.kelabo.mycompany.com` |
    | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation. The sign-in page names it and fills it in, so people can type just `rico`; it reaches the browser as a build-time `VITE_*` value, so changing it needs `make frontend` as well as `make backend` |
    | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time like the domain, so changing it needs `make frontend` |
-   | `environments.<env>.stt.provider` | `deepgram` (the default) or `soniox` — which speech-to-text provider this environment uses (§C2). The key for it must be in the STT secret (step D4). Changing it needs `make backend` (and `make gateway` to update the room's capability report) |
+   | `environments.<env>.stt.provider` | `deepgram` (the default) or `soniox` — which speech-to-text provider this environment uses (§C2). The key for it must be in the `stt` credential slot (step D4). Changing it needs `make backend` (and `make gateway` to update the room's capability report) |
    | `environments.<env>.stt.providers.<id>` | per-provider tuning (model, token TTL, Soniox endpointing) — the template's values are sensible; leave them unless you know why |
    | `environments.<env>.allowIps` | empty (the default) means anyone can reach the deployment; sign-in is still the access control. A list of CIDRs closes it to those sources only — your corporate egress range while a pilot runs, say. It covers the portal, the API and the Gateway; add IPv6 ranges too if your network has them, or a browser preferring IPv6 is locked out. Manage it with `make allow-ip` / `allow-list` / `allow-rm` rather than by hand |
    | `environments.<env>.api.originSecret` | `off` (default), `send` or `require`. API Gateway also answers on its own `execute-api` URL, which reaches the same Lambda without passing CloudFront or the WAF — so with `allowIps` set and this left `off`, your portal is closed and your entire API is not. `require` makes CloudFront prove itself with a secret header. Roll it out in that order: `make origin-secret`, then `send` + deploy, then `require` + deploy. Going straight to `require` takes the API down for the length of a deploy, because the Lambda stack deploys before CloudFront |
@@ -212,19 +215,59 @@ All configuration is one file. Nothing anywhere else needs editing.
 
    `cdk bootstrap` is once per account+region, ever.
 
-4. **Create the secrets** (names are conventional; the stacks look them up):
+4. **Create the secrets, then fill the supplier credential slots:**
 
    ```bash
-   AWS_PROFILE=myorg make secrets env=dev STT_PROVIDER=deepgram STT_API_KEY=… LLM_API_KEY=…
-   AWS_PROFILE=myorg make rtc-secrets env=dev CF_SFU_APP_ID=… CF_SFU_APP_SECRET=… \
-       CF_TURN_KEY_ID=… CF_TURN_KEY_TOKEN=…      # optional — see C4
+   AWS_PROFILE=myorg make secrets env=dev
    ```
 
-   `STT_PROVIDER` is `deepgram` or `soniox` and must match `stt.provider` in
-   the config (§D2). The STT secret (`kelabo/<env>/stt`) holds one key per
-   provider, so you can hold both and switch by config alone — add or rotate
-   a single provider's key any time with
-   `make stt-key env=<env> provider=soniox key=…`.
+   That creates the only two Secrets Manager entries the deployment still
+   reads: the cookie signing key and the CloudFront→API origin secret —
+   identity and perimeter, both generated, never typed.
+
+   The **supplier** keys are not secrets any more. They are rows in
+   `kelabo-<env>-credentials`, one per slot (`llm`, `stt`, `rtc`, `mail`),
+   under that table's own customer-managed KMS key — docs 08 §6c explains why.
+   The table is created by CDK, so this step comes **after** the first
+   `make deploy` (§E). Write a slot with `make credential-set`:
+
+   ```bash
+   AWS_PROFILE=myorg make credential-set env=dev slot=llm        # what the slot takes
+   KELABO_CRED_LLM_API_KEY=sk-… AWS_PROFILE=myorg \
+     make credential-set env=dev slot=llm write=1
+   ```
+
+   Run with no `write=1` first: it prints which fields it would set and which
+   it would keep, and writes nothing. Every field can equally be passed as an
+   argument (`fields="apiKey=sk-…"`), but the environment form above keeps the
+   key out of your shell history and out of `ps`. Nothing ever prints a
+   credential, or a prefix of one.
+
+   The fields per slot (`contracts/src/credentials.js`, docs 08 §6c —
+   `make credential-set env=dev slot=<slot>` prints the same list, with the
+   env-var name for each):
+
+   | Slot | Fields |
+   |---|---|
+   | `llm` | `apiKey` |
+   | `stt` | `deepgram` and/or `soniox` — one key per provider, so you can hold both and switch by `stt.provider` alone |
+   | `rtc` | `sfuAppId`, `sfuAppSecret`, and the optional `turnKeyId` / `turnKeyApiToken` pair (C4) |
+   | `mail` | `mailersend` — leave the slot empty if you send through SES |
+
+   Setting a field **merges** it into the slot rather than replacing it, which
+   is what lets you fill `rtc` in two goes, or add a second STT provider's key
+   without losing the first. A field name the slot does not define is refused
+   outright rather than stored, so a typo cannot leave you with a credential
+   that looks set and is not.
+
+   `make credentials-show env=dev` lists which slots are set, never the
+   values. A slot you leave empty is not an error: the matching capability
+   reports itself unconfigured and the rest of the product runs (docs 19).
+
+   **Upgrading a deployment that predates the credentials table:**
+   `make credentials-migrate env=dev` prints what it would copy out of
+   Secrets Manager; add `write=1` to commit it. The source secrets are left
+   in place.
 
 ---
 
@@ -272,7 +315,9 @@ When the rehearsal holds up, do the same thing at the real address:
 
 1. Fill in `environments.prod` (same account or a separate one; `subdomains.portal: "kelabo"`).
 2. `cdk bootstrap` if prod lives in a different account/region.
-3. `make secrets env=prod …` (and `rtc-secrets`) — secrets are per environment.
+3. `make secrets env=prod` — secrets and credential slots are both per
+   environment, so the §D4 `make credential-set env=prod …` writes have to be
+   repeated against `kelabo-prod-credentials`.
 4. `AWS_PROFILE=myorg make deploy env=prod`
 5. Confirm SES production access is granted (C1.3) *before* announcing it —
    sandbox mode is the classic "works for me, broken for everyone else".
@@ -283,11 +328,14 @@ environment is also your upgrade rehearsal: deploy there first, click through
 stacks (`kelabo-<env>-*`); tables and the archive bucket are retained on
 delete so data outlives mistakes.
 
-**Upgrading a deployment made before the STT provider seam** (when the secret
-was named `kelabo/<env>/deepgram`): run
-`make stt-adopt env=<env> provider=deepgram` once, *before* `make backend` —
-it copies your existing key into the new `kelabo/<env>/stt` secret and leaves
-the old one in place.
+**Upgrading a deployment made before the credentials table**, when the
+supplier keys were Secrets Manager entries (`kelabo/<env>/stt`,
+`kelabo/<env>/llm`, `kelabo/<env>/cloudflare-realtime`, `kelabo/<env>/mail`):
+deploy first so the table exists, then run
+`make credentials-migrate env=<env>` to see what it would copy and
+`make credentials-migrate env=<env> write=1` to commit. It normalises on the
+way in — an unknown field name is reported and dropped rather than carried
+forward — and the old secrets are left in place so a rollback is possible.
 
 ---
 

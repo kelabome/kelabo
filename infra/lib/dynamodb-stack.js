@@ -125,6 +125,46 @@ export class DynamoDbStack extends Stack {
       timeToLiveAttribute: "ttl",
     });
 
+    // Supplier credentials: the LLM key, the transcription keys, the Cloudflare
+    // Realtime app credentials and the mail provider's token
+    // (contracts/src/credentials.js). One item per slot,
+    // `PK = CRED#<slot>` / `SK = META`.
+    //
+    // Its own key, not the MCP one and not the AWS-owned default. A
+    // customer-managed key here means the material can be made unreadable by
+    // disabling a key, independently of who holds `dynamodb:GetItem` — which is
+    // the property Secrets Manager was giving us and the one thing that had to
+    // survive the move.
+    //
+    // Its own table, not a partition of an existing one, for three reasons that
+    // all point the same way: every other table here is encrypted with the
+    // AWS-owned default key, they are walked by reset and export tooling, and
+    // the gateway already reads several of them. A credential in one would be
+    // one careless Scan away from a log.
+    //
+    // **No TTL attribute.** A credential that expired itself would take a live
+    // capability down with nothing to say why. PITR is on and the policy is
+    // RETAIN, like every other table that cannot be reconstructed.
+    //
+    // What is NOT here: the cookie signing key and the CloudFront origin
+    // secret. They stay in Secrets Manager — identity and perimeter, read once
+    // per cold start, never edited from a console. See credentials.js for the
+    // argument.
+    this.credentialsKey = new kms.Key(this, "CredentialsKey", {
+      alias: `alias/${names.credentials}`,
+      description: "Kelabo supplier credentials (LLM, STT, Cloudflare Realtime, mail)",
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    const credentials = table("CredentialsTable", names.credentials, {
+      partitionKey: { name: "PK", type: S },
+      sortKey: { name: "SK", type: S },
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: this.credentialsKey,
+    });
+
     // Journey (docs 20). One partition per journey, `PK = JOURNEY#<id>`,
     // holding META, a DESC# version chain, ACCESSOR# (private-journey
     // roster), and LINK# (kelabo membership) items by SK prefix. No `ttl` —
@@ -153,7 +193,7 @@ export class DynamoDbStack extends Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts, journeys };
+    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts, credentials, journeys };
 
     this.archiveBucket = new s3.Bucket(this, "ArchiveBucket", {
       bucketName: cfg.archiveBucket.toLowerCase().replace(/[^a-z0-9.-]/g, "-"),

@@ -78,7 +78,7 @@
      max-width is a bug: that is how Settings ended up at 720 and New kelabo
      at 440 while Home sat at 900. */
   --measure: 56.25rem;  /* 900 */
-  --measure-form: 27.5rem; /* 440 */
+  --measure-form: 31rem; /* 496 */
 
   --radius-xs: 0.375rem; /* chips, small buttons, controls inside rows */
   --radius-sm: 0.5rem;
@@ -1021,6 +1021,28 @@ textarea.input {
   resize: vertical;
 }
 
+/* A textarea of an exact number of lines.
+
+   `min-height: 8.5em` above is sized for a note box someone writes paragraphs
+   in — about five and a half lines at this line-height — so it quietly won
+   against any smaller `rows` and made every short field the same tall box.
+   Cancelling it is necessary and was not sufficient: the height then depended
+   on one rule out-specifying another, which is not something to leave to
+   chance in a field whose whole requirement is "exactly four lines".
+
+   So the height is stated, not inferred. Every term the calc needs is declared
+   in this same rule, so it cannot drift out of step with the padding: N lines
+   of text, the padding above and below, and the two borders. `--ta-rows` comes
+   from the component, beside the `rows` attribute it mirrors. */
+textarea.input.input-lines {
+  --ta-line: 1.5em;
+  --ta-pad: var(--space-3);
+  min-height: 0;
+  line-height: 1.5;
+  padding: var(--ta-pad) var(--space-3);
+  height: calc(var(--ta-rows, 4) * var(--ta-line) + 2 * var(--ta-pad) + 2px);
+}
+
 /* The styled dropdown (ui/Select.jsx): an `.input` trigger opening a `.menu`
    listbox, replacing native <select>s whose open list is unstylable OS chrome.
    The wrap inherits `.menu-wrap`'s positioning; the list hangs left-aligned
@@ -1720,6 +1742,19 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 /* app-wide banner rendered above the router, aligned with the page column */
 .global-banner { max-width: var(--measure); margin: 0 auto; padding: var(--space-3) var(--space-5) 0; }
 .global-banner .banner { margin-bottom: 0; }
+/* A banner nobody but the reader can dismiss. The body takes the room and the
+   button sits hard right, so a long sentence wraps against the button rather
+   than under it. */
+.banner-body { flex: 1 1 auto; min-width: 0; }
+.banner-closable { align-items: flex-start; }
+.banner-close {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem; margin: -2px -4px 0 0;
+  padding: 0; border: 0; border-radius: var(--radius-xs);
+  background: transparent; color: inherit; opacity: 0.65; cursor: pointer;
+}
+.banner-close:hover { opacity: 1; background: color-mix(in srgb, currentColor 12%, transparent); }
+.banner-close:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; opacity: 1; }
 .banner-warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 20%, transparent); }
 .banner-danger { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 20%, transparent); }
 .banner-success { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 20%, transparent); }
@@ -2263,7 +2298,19 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    place a guest (who has no Settings page) can pick a scheme. */
 .scheme-swatches-sm { width: 1.125rem; height: 1.125rem; border-radius: var(--radius-xs); }
 .settings-row .sr-main { flex: 1; min-width: 0; }
-/* the control cluster on the right of a settings row */
+/* The control cluster on the right of a settings row.
+   `.input` is `width: 100%`, which as a flex base claims the *whole row* and
+   squeezes `.sr-main` to zero — the label column wrapped one word per line and
+   overflowed under the input. A flexible basis shares the row instead; narrow
+   inputs are still capped by `.input-narrow`. */
+.settings-row > .input { width: auto; flex: 1 1 14rem; }
+/* …and that basis is a WIDTH, which only holds while the row is a row. Stacked,
+   the main axis is vertical and `flex: 1 1 14rem` silently becomes `height:
+   14rem` — 224px, which is what a four-line address box was rendering at while
+   every attempt to fix it went at `min-height` and `rows`, neither of which
+   flex sizing consults. Full width, natural height, and the control's own
+   height declaration gets to mean something. */
+.settings-row-stacked > .input { flex: 0 0 auto; width: 100%; }
 /* a note or preview panel that follows a settings row */
 .settings-note { margin-top: var(--space-4); }
 .mcp-warn { color: var(--warn); }
@@ -2701,3 +2748,10 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   .invite-actions { flex-wrap: wrap; }
   .invite-actions .btn { flex: 1 1 100%; }
 }
+
+/* Secondary text. This had NO rule at all, while `className="muted"` was used
+   across the app — every one of them rendering at full body colour, so the
+   caption under a figure looked exactly as loud as the figure. The about site
+   had defined it since the beginning (about/src/styles.css); the app never
+   did. */
+.muted { color: var(--text-3); }

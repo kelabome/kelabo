@@ -61,7 +61,7 @@ function floatTo16BitPCM(input) {
 // calls getUserMedia itself, so the conference transport and STT capture share
 // exactly one device capture. `micError` carries that hook's failure
 // ('mic_denied' | 'insecure_context') so the Capture pane still reports it.
-export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language = 'en', diarize = false, displayName = '', myIdentity = '', stream = null, micError = null, vad = true, startMuted = false }) {
+export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language = 'en', diarize = false, displayName = '', myIdentity = '', stream = null, micError = null, vad = true, startMuted = false, onPostError = null }) {
   const toast = useToast()
   const clientId = useMemo(() => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())), [])
   const [state, setState] = useState('idle')
@@ -180,6 +180,11 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   const audioStatsRef = useRef({ frames: 0, pipelines: 0, lastLog: 0 })
 
   // --- Compose + Publish + Project, bound together --------------------------
+  // Held in a ref so the publisher, which is built once, always calls the
+  // current handler rather than the one captured on first render.
+  const onPostErrorRef = useRef(onPostError)
+  onPostErrorRef.current = onPostError
+
   const publisherRef = useRef(null)
   if (!publisherRef.current) {
     publisherRef.current = createPublisher({
@@ -190,8 +195,16 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
       // A rejected caption is dropped on purpose, but never silently: the
       // gateway returns the schema issues that rejected it, and without printing
       // them a payload bug is indistinguishable from a flaky network.
-      onError: (payload, err) =>
-        dbg(`caption ${payload.kind} FAILED ${err?.status ?? ''} ${err?.code ?? ''}`, err?.detail ?? err?.message ?? ''),
+      onError: (payload, err) => {
+        dbg(`caption ${payload.kind} FAILED ${err?.status ?? ''} ${err?.code ?? ''}`, err?.detail ?? err?.message ?? '')
+        // **A typed message that did not send must say so.** Speech can lose a
+        // line — the next one heals it — but a person who typed something
+        // watched it appear in their own panel and has no other way to learn
+        // that nobody else got it. It looked exactly like "messaging is
+        // broken", from both sides of the screen, with the only evidence in a
+        // debug drawer nobody had open.
+        if (payload.source === 'typed') onPostErrorRef.current?.(err)
+      },
     })
   }
 

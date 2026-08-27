@@ -153,6 +153,12 @@ export function createRecords({ config, db, s3 }) {
       row.host === identity ||
       (row.participantIdentities || []).includes(identity);
     if (!allowed) throw err(403, "not_a_participant");
+    // A private record (design-registered §7): a link guest was in the room and
+    // saw everything while it ran, and loses it at the end. One clause, here,
+    // rather than a second listing rule — guests have no records list to filter
+    // in the first place. The host is never their own exception: `host` is an
+    // email, and a guest identity cannot be one.
+    if (row.private && String(identity).startsWith("guest:")) throw err(403, "not_a_participant");
 
     let archive = null;
     if (row.s3Key) {
@@ -183,6 +189,11 @@ export function createRecords({ config, db, s3 }) {
       transcript: archive?.transcript ?? [],
       board: archive?.board ?? [],
       ...(archive?.minutes ? { minutes: archive.minutes } : {}),
+      // No minutes, and none coming: the assistant was switched off for this
+      // kelabo, so nothing was ever going to write them. Without this the page
+      // cannot tell "not yet" from "never" and spins on a promise nobody is
+      // keeping.
+      ...(row.minutesSkipped ? { minutesSkipped: true } : {}),
       journeys,
     };
   }

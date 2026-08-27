@@ -204,9 +204,11 @@ effectiveMcp(kelabo) = kelabo.mcpEnabled === false ? ∅ : hostMcp(kelabo.hostId
   (Settings page).
 - **Shape (per server):** `{ name, transport: "http", url, headers?,
   secretRef?, authType, oauth?, enabled }` at `SK=SERVER#<name>`.
-- **`authType: "bearer"`** — a token the host pasted. Written by the REST API to
-  Secrets Manager at `kelabo/<env>/mcp/<identity>/<name>`; the item stores only
-  `secretRef` (`<identity>/<name>`), never the token.
+- **`authType: "bearer"`** — a token the host pasted. Written by the REST API as
+  a `SECRET#<name>` row in the same partition, beside the `SERVER#<name>` it
+  belongs to and under the same customer-managed key; the server item stores
+  only `secretRef` (`<identity>/<name>`), never the token. It used to be one
+  Secrets Manager secret per user per server (docs 08 §6).
 - **`authType: "oauth"`** — the MCP authorization spec (OAuth 2.1 + RFC 9728 /
   8414 / 7591 / 8707). The host clicks **Connect** and signs in at the provider;
   no token is ever pasted. See §7a.
@@ -238,8 +240,9 @@ effectiveMcp(kelabo) = kelabo.mcpEnabled === false ? ∅ : hostMcp(kelabo.hostId
  */
 ```
 
-- Provider + keys come from config/Secrets Manager (server mode); each deployment
-  supplies its own.
+- Provider and model come from the deployment's environment (`LLM_CONFIG` in
+  `contracts/src/credentials.js`); the key is the `llm` credential slot
+  (`make credential-set env=<env> slot=llm`). Each deployment supplies its own.
 - **Current setting:** `deepseek` / `deepseek-v4-flash` for **both** `model` and
   `smallModel` — flash is cheap enough to run the gate on every closed turn and
   the orchestrator on every trigger. The main/sub split is by role, not by which
@@ -254,10 +257,10 @@ effectiveMcp(kelabo) = kelabo.mcpEnabled === false ? ∅ : hostMcp(kelabo.hostId
 
 - **`web_search` is ENABLED, gated per deployment by the Brave key.** The
   switch is `WEB_SEARCH_ENABLED` in `gateway/src/agent/subagents.js` (kept as
-  a kill switch); the capability is only granted when the llm secret carries a
-  `braveApiKey` (`runner.js`), so a keyless deployment behaves exactly as the
-  disabled era did: no capability, no tool offered, the line describing it
-  dropped from the sub-agent prompt.
+  a kill switch); the capability is only granted when the `llm` credential row
+  carries a `braveApiKey` (`runner.js`), so a keyless deployment behaves exactly
+  as the disabled era did: no capability, no tool offered, the line describing
+  it dropped from the sub-agent prompt.
   - History: it was disabled project-wide while dev had no `braveApiKey` — sub-
     agents were left with `web_fetch` alone, guessed URLs, collected 403/404s,
     and returned `status:"empty"`, each failed guess costing a full LLM
@@ -332,7 +335,7 @@ reaches them only by dispatching a brief.
 |------|-----------|----------|
 | Gateway | in (captions) / out (Contributions to SSE hub) | in-process `AgentRunner.run(AgentContext)` |
 | DynamoDB | in (rolling window, host MCP config, prior board, history + journey digests — §4a) | [08-database.md](../08-database.md) |
-| Secrets Manager | in (LLM keys, MCP secrets) | by name |
+| Credentials table | in (the `llm` slot: API key + optional `braveApiKey`) | `CRED#llm`, docs 08 §6c |
 | Web search API | out | `webSearch()` (currently disabled — §7) |
 | Web pages/APIs | out | `webFetch()` |
 | MCP servers | out | resolved `effectiveMcp` (host scope) |

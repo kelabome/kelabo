@@ -1,4 +1,4 @@
-import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_ROSTER, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
+import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_NOTICE, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_ROSTER, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
 import { putContrib } from "./db.js";
 
 const PING_INTERVAL_MS = 25_000;
@@ -255,6 +255,18 @@ export function createSseHub(c) {
 
   // Fan out an LLM debug entry (request messages / raw response) for the
   // in-app debug panel. Ephemeral — never persisted.
+  /**
+   * Something the room needs told about itself. Deliberately not a board
+   * contribution: it is true for a few minutes and belongs to nobody's record
+   * of the kelabo.
+   */
+  function notice(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_NOTICE, payload);
+    c.log("notice_fanned", { kelaboId, ...payload, subscribers: subs.size });
+  }
+
   function debug(kelaboId, payload) {
     const subs = c.state.sseSubscribers.get(kelaboId);
     if (!subs) return;
@@ -322,7 +334,7 @@ export function createSseHub(c) {
     c.log("sse_ended", { kelaboId, subscribers: subs?.size ?? 0 });
   }
 
-  return { subscribe, publish, rename, debug, utterance, rtc, rtcTo, agent, ended, roster: rosterPayload, writeEvent };
+  return { subscribe, publish, rename, notice, debug, utterance, rtc, rtcTo, agent, ended, roster: rosterPayload, writeEvent };
 }
 
 function writeRaw(res, chunk) {

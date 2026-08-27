@@ -422,8 +422,22 @@ export function createRtcRoom(c) {
     }
   }
 
-  /** Kelabo ended: drop the whole room. The `ended` SSE event is sent separately. */
-  function closeKelabo(kelaboId) {
+  /**
+   * Kelabo ended: close every SFU session, then drop the whole room. The
+   * `ended` SSE event is sent separately.
+   *
+   * The SFU teardown is the point. Dropping the roster and the SSE channel
+   * ends *signalling*, but the media plane runs browser↔Cloudflare and does
+   * not stop until the sessions are closed — so a kelabo ended by its host, by
+   * cancellation, or by the call-length budget kept routing media (and being
+   * billed for it) until Cloudflare happened to idle it out. This closes them
+   * the same best-effort way `leave` does one peer's, for all of them at once.
+   *
+   * Unlike `demote`, this one is awaited: nothing is left to run afterwards,
+   * and the caller settling the episode wants the media plane actually stopped
+   * before it prices what it routed.
+   */
+  async function closeKelabo(kelaboId) {
     for (const key of [...disconnectTimers.keys()]) {
       if (key.startsWith(`${kelaboId}\n`)) {
         clearTimeout(disconnectTimers.get(key));
@@ -432,8 +446,21 @@ export function createRtcRoom(c) {
     }
     const r = room(kelaboId);
     if (!r) return;
+    const peers = [...r.peers.values()];
+    // Drop presence first, for the same reason `leave` does: a slow Cloudflare
+    // API must not hold the close hostage to a fact already true.
     c.state.rtcRooms.delete(kelaboId);
-    c.log("rtc_room_closed", { kelaboId, peers: r.peers.size });
+    c.log("rtc_room_closed", { kelaboId, peers: peers.length });
+
+    if (r.mode === "sfu") {
+      await Promise.all(
+        peers
+          // A session with nothing published has nothing to retract, and
+          // asking Cloudflare about it is a round trip for an empty answer.
+          .filter((p) => p.sfuSessionId && Object.keys(p.tracks ?? {}).length)
+          .map((p) => closeSessionTracks(kelaboId, p.participantId, p.sfuSessionId))
+      );
+    }
   }
 
   return {
