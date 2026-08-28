@@ -37,12 +37,13 @@ function kelaboHref(kelaboId, status) {
 }
 
 const TABS = [
-  // First and default (docs 20 §19). A journey is a place people come back to,
-  // and the thing they come back for is what has been said since — the
-  // Overview is what you read once. Its body owns the viewport height, which
-  // is why `.page` becomes a flex column for this tab alone.
-  { id: 'chat', label: 'Threads' },
   { id: 'overview', label: 'Overview' },
+  // Second in the strip but still the tab that opens (docs 20 §19): Overview
+  // is what you read once and threads are what you come back for, so the
+  // order reflects the hierarchy while the default reflects the traffic.
+  // Its body owns the viewport height, which is why `.page` becomes a flex
+  // column for this tab alone.
+  { id: 'chat', label: 'Threads' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'kelabos', label: 'Kelabos' },
   // "Questions" is display vocabulary over an unchanged `reports` mechanism

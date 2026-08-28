@@ -17,7 +17,20 @@ import { annotateDays, fmtFullAt, fmtTime } from '../time'
  * Items are already projected: `{ messageId, at, speakerLabel, mine }`.
  * Neither caller passes its own storage shape in.
  */
-export function MessageList({ items, scroll, empty, history, renderBody, className = 'side-scroll', unreadAfterId = '' }) {
+export function MessageList({
+  items,
+  scroll,
+  empty,
+  history,
+  renderBody,
+  // Per-message controls, rendered on the metadata line beside the timestamp
+  // rather than inside the bubble. Markdown emits block elements, so anything
+  // appended to the body lands on a line of its own underneath the message —
+  // which read as a stray row of icons rather than as that message's controls.
+  renderActions,
+  className = 'side-scroll',
+  unreadAfterId = '',
+}) {
   // Day dividers appear only when the list actually spans days (annotateDays) —
   // a channel that has run for months reads like a chat history, a one-hour
   // kelabo stays exactly as clean as before.
@@ -61,6 +74,7 @@ export function MessageList({ items, scroll, empty, history, renderBody, classNa
               <div className="chat-meta">
                 <SpeakerTag name={m.speakerLabel} />
                 <span className="chat-time" title={fmtFullAt(m.at)}>{fmtTime(m.at)}</span>
+                {renderActions?.(m)}
               </div>
               {/* `mentionsMe` marks the whole bubble rather than only the
                   `@handle` inside it: scanning a channel for "was I asked

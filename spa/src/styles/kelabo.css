@@ -2189,16 +2189,27 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    pushing every other thread down the rail. */
 .thread-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Unread. Green and filled, not a grey pill: this is the one thing on the
+   page somebody is scanning for, and a badge that blends into the row is a
+   badge that does not do its job. `--success` is scheme-independent — it is
+   the same fixed status green the live/RSVP chips already use — so it stays
+   legible against every palette, and white on it clears contrast in both
+   light and dark. */
 .thread-badge {
   flex-shrink: 0;
-  min-width: 1.25rem; padding: 0 5px;
+  min-width: 1.3rem; padding: 0 6px;
   border-radius: 999px;
-  background: var(--surface-3); color: var(--text-2);
-  font-size: var(--text-2xs); font-weight: 600; line-height: 1.25rem; text-align: center;
+  background: var(--success); color: #fff;
+  font-size: var(--text-2xs); font-weight: 700; line-height: 1.3rem; text-align: center;
+  letter-spacing: .01em;
 }
 /* A mention outranks a count — "somebody wants you" and "there is something
    here" are different messages, and only one of them should pull the eye. */
 .thread-badge-mention { background: var(--accent); color: var(--accent-on); }
+
+/* On a list row the badge sits among chips that all have their own margins;
+   without this it crowds the title it belongs to. */
+.row-title .thread-badge { margin-left: var(--space-1); }
 
 @media (max-width: 767px) {
   .threads { flex-direction: column; }
@@ -2306,19 +2317,26 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
 .chat-deleted { color: var(--text-3); font-style: italic; }
 .chat-edited { color: var(--text-3); font-size: var(--text-2xs); }
 
-/* Edit and delete on your own message. Revealed on hover of the bubble — a
-   chat with two permanent buttons on every line is unreadable — but always
-   present for keyboard and touch, where there is no hover to reveal them. */
-.chat-actions { display: inline-flex; gap: var(--space-1); margin-left: var(--space-2); vertical-align: middle; }
+/* Pin, edit and delete. They live on the metadata line beside the timestamp,
+   NOT inside the bubble: Markdown emits block elements, so a control appended
+   to the body is pushed onto a line of its own underneath the message and
+   reads as a stray row of icons rather than as that message's controls.
+
+   Revealed on hover of the message — a chat with three permanent buttons on
+   every line is unreadable — but always present for keyboard and touch, where
+   there is no hover to reveal them. */
+.chat-actions { display: inline-flex; align-items: center; gap: var(--space-1); }
 .chat-action {
   border: 0; background: none; padding: 2px; cursor: pointer;
   color: var(--text-3); line-height: 0; border-radius: var(--radius-xs);
 }
 .chat-action:hover { color: var(--text); background: var(--surface-3); }
+/* Already pinned: a state, not a control, so it never hides on hover-out. */
+.chat-pinned { color: var(--accent); line-height: 0; padding: 2px; }
 @media (hover: hover) and (pointer: fine) {
-  .chat-actions { opacity: 0; transition: opacity .12s ease; }
-  .chat-msg:hover .chat-actions,
-  .chat-actions:focus-within { opacity: 1; }
+  .chat-action { opacity: 0; transition: opacity .12s ease; }
+  .chat-msg:hover .chat-action,
+  .chat-actions:focus-within .chat-action { opacity: 1; }
 }
 
 /* An @mention token inside a message. Deliberately not a link: it resolves to

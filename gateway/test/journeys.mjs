@@ -877,12 +877,28 @@ await test("threads: the default one is fixed-id and safe to create twice", asyn
   assert.notEqual(thread.threadId, DEFAULT_THREAD_ID, "a person's thread gets a uuid");
   assert.equal(thread.messageCount, 0);
 
-  // Most recently active first, so a thread somebody just posted in rises.
+  // General is pinned to the top whatever its activity — it is the thread
+  // every journey has and where a message lands when nobody chose, so a list
+  // where it drifts down is one where the default place to talk is hardest to
+  // find. Everything else is most recently active first.
   await putJourneyMessage(c, journeyId, thread.threadId, { text: "hi", author: "bob@example.com" });
-  assert.deepEqual((await listJourneyThreads(c, journeyId)).map((t) => t.threadId), [thread.threadId, DEFAULT_THREAD_ID]);
+  assert.deepEqual(
+    (await listJourneyThreads(c, journeyId)).map((t) => t.threadId),
+    [DEFAULT_THREAD_ID, thread.threadId],
+    "General stays first even though the other thread is the active one"
+  );
+
+  const { thread: third } = await createJourneyThread(c, journeyId, { title: "Later", identity: "bob@example.com" });
+  await putJourneyMessage(c, journeyId, third.threadId, { text: "newest", author: "bob@example.com" });
+  assert.deepEqual(
+    (await listJourneyThreads(c, journeyId)).map((t) => t.threadId),
+    [DEFAULT_THREAD_ID, third.threadId, thread.threadId],
+    "and the rest sort newest-active first behind it"
+  );
 
   assert.equal((await renameJourneyThread(c, journeyId, thread.threadId, { title: "Rollout plan" })).ok, true);
-  assert.equal((await listJourneyThreads(c, journeyId))[0].title, "Rollout plan");
+  const renamed = (await listJourneyThreads(c, journeyId)).find((t) => t.threadId === thread.threadId);
+  assert.equal(renamed.title, "Rollout plan");
   assert.equal((await renameJourneyThread(c, journeyId, "nope", { title: "x" })).reason, "thread_not_found");
 });
 

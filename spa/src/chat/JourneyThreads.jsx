@@ -256,34 +256,44 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
       <>
         <Markdown text={m.text} hardBreaks />
         {m.edited && <span className="chat-edited" title="This message was edited"> (edited)</span>}
-        {m.pinnedAs && (
-          <span className="chat-edited" title="Pinned to the board">
-            {' '}<Icon name="pin" size={11} />
-          </span>
-        )}
-        {isActive && (
-          <span className="chat-actions">
-            {/* Anyone may pin — the board is the journey's shared surface and
-                the message is already readable by everyone here. Editing and
-                deleting stay with the author. */}
-            {!m.pinnedAs && !m.assistant && (
-              <button className="chat-action" onClick={() => pin(m)} title="Pin to board" aria-label="Pin to board">
-                <Icon name="pin" size={12} />
-              </button>
-            )}
-            {m.mine && (
-              <>
-                <button className="chat-action" onClick={() => edit(m)} title="Edit" aria-label="Edit message">
-                  <Icon name="pencil" size={12} />
-                </button>
-                <button className="chat-action" onClick={() => remove(m)} title="Delete" aria-label="Delete message">
-                  <Icon name="x" size={12} />
-                </button>
-              </>
-            )}
-          </span>
-        )}
       </>
+    )
+  }
+
+  /** Controls sit on the metadata line, after the timestamp — not in the
+   *  bubble. Markdown emits block elements, so anything appended to the body
+   *  is pushed onto a line of its own beneath the message. */
+  const renderActions = m => {
+    if (m.deleted) return null
+    const canPin = isActive && !m.pinnedAs && !m.assistant
+    const canEdit = isActive && m.mine
+    if (!m.pinnedAs && !canPin && !canEdit) return null
+    return (
+      <span className="chat-actions">
+        {m.pinnedAs && (
+          <span className="chat-pinned" title="Pinned to the board">
+            <Icon name="pin" size={11} />
+          </span>
+        )}
+        {/* Anyone may pin — the board is the journey's shared surface and the
+            message is already readable by everyone here. Editing and deleting
+            stay with the author. */}
+        {canPin && (
+          <button className="chat-action" onClick={() => pin(m)} title="Pin to board" aria-label="Pin to board">
+            <Icon name="pin" size={12} />
+          </button>
+        )}
+        {canEdit && (
+          <>
+            <button className="chat-action" onClick={() => edit(m)} title="Edit" aria-label="Edit message">
+              <Icon name="pencil" size={12} />
+            </button>
+            <button className="chat-action" onClick={() => remove(m)} title="Delete" aria-label="Delete message">
+              <Icon name="x" size={12} />
+            </button>
+          </>
+        )}
+      </span>
     )
   }
 
@@ -341,6 +351,7 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
             empty={`No messages in “${current?.title || 'this thread'}” yet. Threads stay here between kelabos — start the conversation.`}
             history={{ hasMore: channel.hasMore, loading: loadingEarlier, onLoadEarlier: loadEarlier }}
             renderBody={renderBody}
+            renderActions={renderActions}
           />
         )}
 

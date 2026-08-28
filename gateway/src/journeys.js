@@ -783,11 +783,20 @@ export async function getJourneyThread(c, journeyId, threadId) {
 
 export async function listJourneyThreads(c, journeyId) {
   const rows = await queryJourneyItems(c, journeyId, "THREAD#");
-  // Most recently active first. A thread nobody has posted in yet sorts by
-  // when it was made, so a freshly created one appears at the top rather than
-  // at the bottom of a long list.
+  // General is pinned to the top, whatever its activity. It is the thread
+  // every journey has and the one a message lands in when nobody chose, so a
+  // list where it drifts to the bottom of a busy journey is a list where the
+  // default place to talk is the hardest to find.
+  //
+  // Everything else is most recently active first. A thread nobody has posted
+  // in yet sorts by when it was made, so a freshly created one appears near
+  // the top rather than at the very bottom.
   return rows
-    .sort((a, b) => (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0))
+    .sort((a, b) => {
+      if (a.threadId === DEFAULT_THREAD_ID) return -1;
+      if (b.threadId === DEFAULT_THREAD_ID) return 1;
+      return (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0);
+    })
     .map(toWireThread);
 }
 
