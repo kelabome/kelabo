@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../auth'
@@ -17,6 +17,7 @@ import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
 import { JourneyThreads } from '../chat/JourneyThreads'
+import { journeyChat } from '../api'
 import { JourneyHealthChip } from './Journeys'
 import { JourneyHelmExtra } from '../variant'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
@@ -62,6 +63,13 @@ const TABS = [
 // vocabulary the rest of the journey already speaks — Full Steam / Shoal
 // Waters / Anchored, and the Lead who is at it.
 const HELM_TAB = { id: 'helm', label: 'Helm' }
+
+// The thread list is polled here so the Threads tab can carry a badge while
+// another tab is open. Same cadence as the journey list's own poll: unread is
+// not something anyone watches by the second, and this is several rows per
+// journey. Replaced by a push over the presence stream when that lands
+// (docs 20 §19.9).
+const THREADS_POLL_MS = 20000
 
 const TIMELINE_TYPES = [
   { id: '', label: 'All' },
@@ -1194,13 +1202,47 @@ export default function JourneyDetail() {
   const reload = () => api.getJourney(id).then(setJourney).catch(e => setError(e.status === 403 || e.status === 401 ? 'forbidden' : e.status === 404 ? 'not_found' : 'error'))
   useEffect(() => { reload() }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (journey?.visibility === 'private') api.listJourneyAccessors(id).then(d => setAccessors(d.accessors || [])).catch(() => setAccessors([]))
-  }, [id, journey?.visibility])
-
+  // Declared before the thread poll below, which reads `isMember` in its
+  // dependency array — a `const` referenced above its declaration is a
+  // temporal-dead-zone throw during render, not an undefined.
   const isOwner = journey?.myRole === 'owner'
   const isMember = !!journey?.myRole
   const isActive = journey?.status === 'active'
+
+  // The thread list lives here rather than in the Threads tab, because the
+  // tab needs a badge while you are looking at a *different* one (docs 20
+  // §19.3) — a list fetched by that component would only exist once you had
+  // already navigated to it, which is exactly too late to tell you to.
+  //
+  // It also means one poll per journey page instead of one per tab visit.
+  const [threads, setThreads] = useState(null)
+  const reloadThreads = useCallback(
+    () => journeyChat.threads(id).then(d => { setThreads(d.threads || []); return d.threads || [] }),
+    [id]
+  )
+  useEffect(() => {
+    if (!isMember) return undefined
+    const load = () => { if (!document.hidden) reloadThreads().catch(() => {}) }
+    load()
+    const t = setInterval(load, THREADS_POLL_MS)
+    document.addEventListener('visibilitychange', load)
+    return () => {
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', load)
+    }
+  }, [reloadThreads, isMember]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const threadUnread = useMemo(
+    () => (threads || []).reduce(
+      (acc, t) => ({ unread: acc.unread + (t.unread || 0), mentions: acc.mentions + (t.mentions || 0) }),
+      { unread: 0, mentions: 0 }
+    ),
+    [threads]
+  )
+
+  useEffect(() => {
+    if (journey?.visibility === 'private') api.listJourneyAccessors(id).then(d => setAccessors(d.accessors || [])).catch(() => setAccessors([]))
+  }, [id, journey?.visibility])
 
   const complete = async () => {
     const ok = await confirm({ title: 'Mark this journey complete?', body: 'No further edits, kelabo links, board messages or documents until it is reopened.', confirmLabel: 'Mark complete', danger: false })
@@ -1285,12 +1327,24 @@ export default function JourneyDetail() {
           )}
 
           <Tabs
-            tabs={isOwner ? [...TABS, HELM_TAB] : TABS}
+            tabs={(isOwner ? [...TABS, HELM_TAB] : TABS).map(t =>
+              t.id === 'chat'
+                ? { ...t, badge: threadUnread.mentions || threadUnread.unread, mention: threadUnread.mentions > 0 }
+                : t
+            )}
             active={tab}
             onChange={setTab}
           />
 
-          {tab === 'chat' && <JourneyThreads journeyId={id} isMember={isMember} isActive={isActive} />}
+          {tab === 'chat' && (
+            <JourneyThreads
+              journeyId={id}
+              isMember={isMember}
+              isActive={isActive}
+              threads={threads}
+              reloadThreads={reloadThreads}
+            />
+          )}
           {tab === 'overview' && <OverviewTab journey={journey} isOwner={isOwner} isMember={isMember} reload={reload} />}
           {tab === 'timeline' && <TimelineTab journeyId={id} isMember={isMember} onOpenDocument={openDocument} />}
           {tab === 'kelabos' && <KelabosTab journeyId={id} isMember={isMember} isActive={isActive} />}

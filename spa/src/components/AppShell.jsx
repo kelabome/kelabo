@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { api, logout } from '../api'
 import { SETTINGS_SYNCED_EVENT } from '../settings'
@@ -32,11 +32,13 @@ import { useConfirm } from './ConfirmDialog'
 
 const SIDEBAR_KEY = 'kelabo-sidebar-collapsed'
 
-/** Kelabos + records, fetched once here rather than per-route. */
+/** Kelabos + records + journeys, fetched once here rather than per-route. */
 const AppDataContext = createContext({
   kelabos: null,
   records: null,
   scheduled: null,
+  journeys: null,
+  journeyUnread: { unread: 0, mentions: 0 },
   kelabosError: false,
   recordsError: false,
   pendingArchive: new Set(),
@@ -86,6 +88,8 @@ export function AppShell({ children }) {
   const [records, setRecords] = useState(null)
   const [recordsError, setRecordsError] = useState(false)
   const [scheduled, setScheduled] = useState(null)
+  const [journeys, setJourneys] = useState(null)
+  const [journeysError, setJourneysError] = useState(false)
   // Kelabos ended from here whose record has not landed yet. The server drops
   // a kelabo from the active list the moment it ends and the archive arrives
   // seconds later — without this set the row vanishes from Live now on the
@@ -107,6 +111,41 @@ export function AppShell({ children }) {
   // The name the user chose in Settings wins over the identity-derived one —
   // the same precedence every join flow uses.
   const name = localStorage.getItem('kelabo-name') || displayName(identity)
+
+  // Journeys are here rather than in the Journeys route because the rail
+  // needs their unread count on every page (docs 20 §19.3) — a badge that
+  // only exists while you are looking at the list is a badge that never tells
+  // you anything. Owning the fetch here also means the route below and this
+  // rail share one poll instead of racing two.
+  //
+  // 20s, not the kelabo list's 8s: the call rolls up unread across every
+  // journey's threads, and nobody watches an unread count by the second.
+  // Skipped while the tab is hidden, and refreshed the moment it comes back.
+  useEffect(() => {
+    if (!identity) return undefined
+    let cancelled = false
+    const load = () => {
+      if (document.hidden) return
+      api.listJourneys()
+        .then(d => {
+          if (cancelled) return
+          setJourneys(d)
+          setJourneysError(false)
+        })
+        // A failed poll keeps what is on screen. The list is already
+        // rendered, and replacing it with an error because one refresh missed
+        // is worse than counts a few seconds stale.
+        .catch(() => { if (!cancelled) setJourneys(prev => { if (!prev) setJourneysError(true); return prev }) })
+    }
+    load()
+    const t = setInterval(load, 20000)
+    document.addEventListener('visibilitychange', load)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', load)
+    }
+  }, [identity])
 
   // Active kelabos drive the rail's live badges, so they poll; records only
   // change when a kelabo ends, so they reload on navigation instead.
@@ -183,6 +222,17 @@ export function AppShell({ children }) {
       })
       .catch(() => setRecordsError(true))
   }, [identity, location.pathname])
+
+  // Unread across every journey the person can reach. Summed rather than
+  // stored, for the same reason a journey's own badge sums its threads: a
+  // total nobody maintains cannot drift from the parts it is made of.
+  const journeyUnread = useMemo(() => {
+    const all = [...(journeys?.mine || []), ...(journeys?.accessible || []), ...(journeys?.public || [])]
+    return all.reduce(
+      (acc, j) => ({ unread: acc.unread + (j.unread || 0), mentions: acc.mentions + (j.mentions || 0) }),
+      { unread: 0, mentions: 0 }
+    )
+  }, [journeys])
 
   // A tap on a rail link should dismiss the mobile drawer it was tapped in.
   useEffect(() => { setMobileOpen(false) }, [location.pathname])
@@ -353,7 +403,7 @@ export function AppShell({ children }) {
   const recents = (records || []).slice(0, 8)
 
   return (
-    <AppDataContext.Provider value={{ kelabos, records, scheduled, kelabosError, recordsError, pendingArchive, removeRecord, endLiveKelabo, respondToInvite, cancelScheduled }}>
+    <AppDataContext.Provider value={{ kelabos, records, scheduled, journeys, journeyUnread, kelabosError, recordsError, journeysError, pendingArchive, removeRecord, endLiveKelabo, respondToInvite, cancelScheduled }}>
       <div className={'shell' + (collapsed ? ' shell-collapsed' : '')}>
         <div
           className={'sidebar-veil' + (mobileOpen ? ' open' : '')}
@@ -444,6 +494,15 @@ export function AppShell({ children }) {
             <NavLink to="/journeys" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')} title="Journeys">
               <Icon name="book-open" />
               <span className="sidebar-label">Journeys</span>
+              {/* The outermost rung of the badge (docs 20 §19.3). It shows
+                  wherever you are, including on the Journeys page itself —
+                  hiding it there would mean the count vanishes at the moment
+                  you navigate to look at it. A mention outranks a count. */}
+              {journeyUnread.mentions > 0 ? (
+                <span className="sidebar-badge sidebar-badge-mention">@{journeyUnread.mentions}</span>
+              ) : journeyUnread.unread > 0 ? (
+                <span className="sidebar-badge">{journeyUnread.unread}</span>
+              ) : null}
             </NavLink>
             <NavLink to="/contacts" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')} title="Contacts">
               <Icon name="users" />

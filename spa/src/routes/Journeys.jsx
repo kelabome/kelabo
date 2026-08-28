@@ -1,7 +1,5 @@
-import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api } from '../api'
-import { useAuth } from '../auth'
+import { useAppData } from '../components/AppShell'
 import { SkeletonRows } from '../components/ui/Skeleton'
 import { Banner } from '../components/ui/Banner'
 import { Icon } from '../components/ui/Icon'
@@ -12,12 +10,6 @@ import { timeAgo } from '../timeAgo'
  *  no new colour vocabulary, the same fixed success/warn/danger tokens.
  *  Labels are the journey metaphor's own vocabulary — the stored value
  *  (`green`/`yellow`/`red`, the API contract, docs 20 §5) is unchanged. */
-// Unread has to arrive without a reload, and until threads are pushed over the
-// presence stream (docs 20 §19.9) that means polling. 20s rather than the
-// rail's 8s: this call rolls up unread across every journey's threads, and a
-// badge is not something anyone watches by the second.
-const POLL_MS = 20000
-
 const HEALTH_CHIP = { green: 'chip-live', yellow: 'chip-warn', red: 'chip-danger' }
 const HEALTH_LABEL = { green: 'Full Steam', yellow: 'Shoal Waters', red: 'Anchored' }
 
@@ -60,45 +52,11 @@ function JourneyRow({ j, delay }) {
 }
 
 export default function Journeys() {
-  const { identity } = useAuth()
-  const [data, setData] = useState(null)
-  const [error, setError] = useState(false)
-
-  useEffect(() => {
-    if (!identity) return undefined
-    let live = true
-    const load = () => {
-      // Not while the tab is in the background: this call rolls up unread
-      // across every journey's threads, and paying for that on a page nobody
-      // is looking at is the definition of waste.
-      if (document.hidden) return
-      api
-        .listJourneys()
-        .then(d => {
-          if (!live) return
-          setData(d)
-          setError(false)
-        })
-        // A failed refresh keeps whatever is on screen: the list is already
-        // rendered, and replacing it with an error because one poll missed
-        // would be worse than showing counts a few seconds stale.
-        .catch(() => live && setData(prev => (prev ? prev : (setError(true), prev))))
-    }
-    load()
-    // Until threads are pushed over the presence stream (docs 20 §19.9), a
-    // badge that only appears on reload is a badge nobody sees. Slower than
-    // the rail's 8s kelabo poll because this one is several queries per
-    // journey, and unread is not a thing anyone watches by the second.
-    const t = setInterval(load, POLL_MS)
-    // A tab coming back to the front should be current immediately rather
-    // than up to POLL_MS stale.
-    document.addEventListener('visibilitychange', load)
-    return () => {
-      live = false
-      clearInterval(t)
-      document.removeEventListener('visibilitychange', load)
-    }
-  }, [identity])
+  // The list and the rail's badge come from one fetch, owned by AppShell —
+  // which polls it (docs 20 §19.3). Fetching here as well would mean two
+  // timers asking the same question and disagreeing for a few seconds at a
+  // time, on the one page where the answer is the whole point.
+  const { journeys: data, journeysError: error } = useAppData()
 
   const mine = data?.mine || []
   const accessible = data?.accessible || []

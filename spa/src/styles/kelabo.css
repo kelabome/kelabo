@@ -799,6 +799,26 @@ button.sidebar-item {
 .sidebar-item:hover { background: var(--surface-3); color: var(--text); text-decoration: none; }
 .sidebar-item.active { background: var(--surface-3); color: var(--text); font-weight: 600; }
 
+/* Unread on a rail item — the outermost rung of the journey badge cascade
+   (docs 20 §19.3). `margin-left: auto` pushes it to the far edge past the
+   label's own flex gap. */
+.sidebar-badge {
+  margin-left: auto; flex-shrink: 0;
+  min-width: 1.3rem; padding: 0 6px; border-radius: 999px;
+  background: var(--success); color: #fff;
+  font-size: var(--text-2xs); font-weight: 700; line-height: 1.3rem; text-align: center;
+}
+.sidebar-badge-mention { background: var(--accent); color: var(--accent-on); }
+/* Collapsed to an icon rail there is no room for a number, and the row is
+   centred on its glyph — so the count becomes a dot pinned to the corner,
+   which still answers "is there anything new". */
+.shell-collapsed .sidebar-badge {
+  position: absolute; top: 4px; right: 4px;
+  min-width: 8px; height: 8px; padding: 0;
+  font-size: 0; line-height: 0; overflow: hidden;
+}
+.shell-collapsed .sidebar-nav .sidebar-item { position: relative; }
+
 /* Recents/live list. Scrolls independently so the account block stays pinned. */
 .sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; margin-top: var(--space-3); }
 .sidebar-section {
@@ -1786,6 +1806,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .tabs button:hover { color: var(--text); }
 .tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+/* A count beside a tab label — the middle rung of the journey badge cascade
+   (docs 20 §19.3), for when the thing with unread is a tab you are not on.
+   The button is not a flex container, so the badge is aligned by hand. */
+.tabs button .thread-badge { display: inline-block; margin-left: 6px; vertical-align: 1px; }
 
 /* bounded scroll list (e.g. inside a panel-inset preview) */
 .scroll-list {

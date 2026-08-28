@@ -37,14 +37,13 @@ const POLL_MS = 5000
 // frame.
 const READ_DEBOUNCE_MS = 1200
 
-export function JourneyThreads({ journeyId, isMember, isActive }) {
+export function JourneyThreads({ journeyId, isMember, isActive, threads, reloadThreads }) {
   const { identity } = useAuth()
   const me = identity?.email
   const confirm = useConfirm()
   const prompt = usePrompt()
   const toast = useToast()
 
-  const [threads, setThreads] = useState(null)
   const [threadId, setThreadId] = useState('')
   const [channel, setChannel] = useState(emptyChannel)
   const [loading, setLoading] = useState(true)
@@ -66,35 +65,25 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
   const scroll = useFollowingScroll(channel.messages, true)
 
   // --- threads ---------------------------------------------------------------
-
-  const loadThreads = useCallback(async () => {
-    const d = await journeyChat.threads(journeyId)
-    setThreads(d.threads || [])
-    return d.threads || []
-  }, [journeyId])
+  //
+  // The list itself is owned by JourneyDetail, which polls it whichever tab is
+  // open — the Threads tab needs a badge while you are looking at Overview
+  // (docs 20 §19.3), and a list fetched by this component would only exist
+  // once you were already here.
 
   useEffect(() => {
-    let live = true
-    setError(null)
-    loadThreads()
-      .then(list => {
-        if (!live) return
-        // Land on the first thread with something unread, else the most
-        // recently active — which is what the list is already sorted by.
-        setThreadId(prev => prev || (list.find(t => t.unread > 0) || list[0])?.threadId || '')
-      })
-      .catch(e => live && setError(e))
-    return () => {
-      live = false
-    }
-  }, [loadThreads])
+    if (!threads?.length) return
+    // Land on the first thread with something unread, else the most recently
+    // active — which is the order the list already arrives in, General first.
+    setThreadId(prev => (prev && threads.some(t => t.threadId === prev) ? prev : (threads.find(t => t.unread > 0) || threads[0]).threadId))
+  }, [threads])
 
   const newThread = async () => {
     const title = await prompt({ title: 'New thread', placeholder: 'What is it about?', confirmLabel: 'Create' })
     if (!title?.trim()) return
     try {
       const { thread } = await journeyChat.createThread(journeyId, title.trim())
-      await loadThreads()
+      await reloadThreads()
       setThreadId(thread.threadId)
     } catch {
       toast('Could not create that thread.')
@@ -106,7 +95,7 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
     if (!title?.trim() || title.trim() === t.title) return
     try {
       await journeyChat.renameThread(journeyId, t.threadId, title.trim())
-      await loadThreads()
+      await reloadThreads()
     } catch {
       toast('Could not rename that thread.')
     }
@@ -148,7 +137,7 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
           setChannel(prev => applyPage(prev, page))
           // An assistant reply, or anyone else's message, changes the other
           // threads' counts too.
-          loadThreads().catch(() => {})
+          reloadThreads().catch(() => {})
         }
       } catch {
         // A failed poll is not worth a banner: the next one is 5s away, and
@@ -157,7 +146,7 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
     }
     const t = setInterval(tick, POLL_MS)
     return () => clearInterval(t)
-  }, [journeyId, threadId, isMember, loadThreads])
+  }, [journeyId, threadId, isMember, reloadThreads])
 
   // --- read cursor -----------------------------------------------------------
 
@@ -168,13 +157,13 @@ export function JourneyThreads({ journeyId, isMember, isActive }) {
     lastMarked.current = newest.at
     journeyChat
       .markRead(journeyId, threadId, { at: newest.at, msgId: newest.msgId })
-      .then(() => loadThreads().catch(() => {}))
+      .then(() => reloadThreads().catch(() => {}))
       .catch(() => {
         // The cursor is monotonic server-side and re-sent on the next message;
         // a lost write costs a stale badge for a moment, never correctness.
         lastMarked.current = 0
       })
-  }, [journeyId, threadId, channel.messages, loadThreads])
+  }, [journeyId, threadId, channel.messages, reloadThreads])
 
   useEffect(() => {
     // Only while actually looking at it — marking a thread read in a
