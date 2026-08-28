@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Children, cloneElement, Fragment } from 'react'
 import { MENTION_SOURCE } from '../chat/mentions.js'
 
 // Inline tokens, in precedence order: code wins over bold wins over italic,
@@ -99,7 +99,24 @@ function normalize(src) {
 // person's line breaks are meaningful, so callers rendering raw pasted text
 // pass `hardBreaks` to keep every `\n` as a visible break instead of
 // collapsing the whole paragraph onto one line.
-export function Markdown({ text, hardBreaks = false }) {
+/**
+ * `trailing`: something to sit at the **end of the last line of the text**,
+ * not underneath it — a chat message's `(edited)` mark, and anything that
+ * joins it.
+ *
+ * It has to be a prop rather than a sibling the caller appends, because every
+ * block this renders is a block: a `<span>` placed after the output lands in
+ * an anonymous block box of its own, one line down, however inline it is
+ * declared to be. There is no stylesheet that undoes that from outside. So
+ * the node is handed in and folded into the final paragraph's own children,
+ * where it is genuinely part of the last line and wraps with it.
+ *
+ * When the message does not end in a paragraph — a list, a table, a fenced
+ * block — there is no last line to join and it is appended after, on its own
+ * line. That is the honest outcome: a mark tucked into the final cell of a
+ * table would read as data.
+ */
+export function Markdown({ text, hardBreaks = false, trailing = null }) {
   const src = normalize(String(text || ''))
   // Split on fenced code blocks first (odd segments are code).
   const segments = src.split('```')
@@ -115,7 +132,24 @@ export function Markdown({ text, hardBreaks = false }) {
     parseBlocks(segment, nodes, () => key++, hardBreaks)
   })
 
-  if (nodes.length === 0) return null
+  if (nodes.length === 0) {
+    // An empty message that carries a mark still has to show it. A bare `<p>`
+    // so it inherits the same line box the text would have had.
+    return trailing ? <p style={{ margin: 0 }}>{trailing}</p> : null
+  }
+
+  if (trailing) {
+    const last = nodes[nodes.length - 1]
+    if (last?.type === 'p') {
+      nodes[nodes.length - 1] = cloneElement(last, undefined, [
+        ...Children.toArray(last.props.children),
+        <Fragment key="md-trailing">{trailing}</Fragment>,
+      ])
+    } else {
+      nodes.push(<Fragment key="md-trailing">{trailing}</Fragment>)
+    }
+  }
+
   return <>{nodes}</>
 }
 

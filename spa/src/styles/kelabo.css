@@ -2369,6 +2369,18 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
 /* A tombstone keeps its place in the conversation so the replies around it
    still read, and says plainly what it is. */
 .chat-deleted { color: var(--text-3); font-style: italic; }
+
+/* Marks about a message — what was done to it, not what it says — trailing the
+   last line of the text, and all of them on that same line.
+
+   Inline, and inside the final paragraph (`Markdown`'s `trailing` prop): a
+   mark on a line of its own turns a two-word message into a three-line block
+   and makes a footnote the loudest thing in the bubble. `nowrap` keeps a mark
+   whole — "(edited)" breaking across two lines is worse than it moving to the
+   next one intact — while still letting it wrap as a unit when the text fills
+   the width. */
+.chat-marks { margin-left: var(--space-1); white-space: nowrap; }
+.chat-marks > * + * { margin-left: var(--space-1); }
 .chat-edited { color: var(--text-3); font-size: var(--text-2xs); }
 
 /* Pin, edit and delete. They live on the metadata line beside the timestamp,

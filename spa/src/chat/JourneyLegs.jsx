@@ -301,12 +301,19 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
 
   const renderBody = m => {
     if (m.deleted) return <span className="chat-deleted">Message deleted</span>
-    return (
-      <>
-        <Markdown text={m.text} hardBreaks />
-        {m.edited && <span className="chat-edited" title="This message was edited"> (edited)</span>}
-      </>
-    )
+    // Marks about the message — what was done to it, not what it says — run on
+    // at the end of the last line of the text, and all of them share that line
+    // rather than each taking one. They go *through* Markdown rather than
+    // after it: every block it emits is a block, so a span appended alongside
+    // lands one line down in an anonymous block box no matter what it is
+    // styled as. `trailing` folds them into the final paragraph, where they
+    // are part of the last line and wrap with it.
+    const marks = m.edited ? (
+      <span className="chat-marks">
+        <span className="chat-edited" title="This message was edited">(edited)</span>
+      </span>
+    ) : null
+    return <Markdown text={m.text} hardBreaks trailing={marks} />
   }
 
   /** Controls sit on the metadata line, after the timestamp — not in the
