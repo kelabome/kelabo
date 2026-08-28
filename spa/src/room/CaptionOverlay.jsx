@@ -11,7 +11,7 @@ import { messageParts } from '../transcript/transcriptStore'
  * when nobody has said anything for a moment.
  *
  * Each line keeps the transcript's own split between settled words and the
- * unconfirmed tail Deepgram may still revise; only the tail is dimmed, so a
+ * unconfirmed tail the provider may still revise; only the tail is dimmed, so a
  * caption never looks provisional after it has stopped changing.
  */
 

@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react'
  * The microphone stays open when you switch tabs, which is what people expect
  * right up until it is not: whatever you switched away to do — the call in the
  * other tab, the keyboard, the room you are now walking through — goes into the
- * kelabo, and every second of it is streamed to Deepgram and billed. Switching
+ * kelabo, and every second of it is streamed to the transcriber and billed. Switching
  * away is also the one moment nobody is looking at the mute button.
  *
  * It is a toggle rather than a behavior because the opposite is just as

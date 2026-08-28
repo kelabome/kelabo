@@ -489,7 +489,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
 
   // --- publish local media --------------------------------------------------
   // Runs once the transport is up and the device has been granted. The same
-  // audio track the Deepgram pipeline analyses is what peers hear, so there is
+  // audio track the capture pipeline analyses is what peers hear, so there is
   // exactly one device capture (see useMicStream).
   useEffect(() => {
     const transport = transportRef.current

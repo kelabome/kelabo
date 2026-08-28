@@ -14,6 +14,22 @@ const here = dirname(fileURLToPath(import.meta.url));
 const MAIL_PROVIDERS = ["ses", "mailersend"];
 
 /**
+ * Speech-to-text providers the SPA can stream to (`spa/src/stt/`, and the
+ * mint's own registry in `rest-api/src/stt/interface.js`). Restated here for
+ * the same reason as `MAIL_PROVIDERS`: this file is loaded by CDK and by the
+ * Lambda alike and must not reach into either one's source.
+ *
+ * It exists because `stt.provider` was the one supplier choice nothing checked.
+ * `rest-api/src/config.js` defaults it to "deepgram" in two places, so a typo
+ * — or an omission — did not fail here where it can be read, and did not fail
+ * loudly anywhere else either: the deployment came up minting grants for a
+ * provider whose key it did not hold, and the first person to unmute got
+ * `stt_unavailable`. Both lists must stay in step with their registries; a
+ * provider missing from here cannot be selected at all.
+ */
+const STT_PROVIDERS = ["deepgram", "soniox"];
+
+/**
  * Load the single source-of-truth config and derive every env-specific value
  * (domains, URLs, table names, bucket, ECR image). No value may be hard-coded
  * elsewhere; secrets are referenced by name only.
@@ -190,6 +206,27 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   if (!MAIL_PROVIDERS.includes(mailProvider)) {
     throw new Error(
       `kelabo config: env "${env}" sets mail.provider "${mailProvider}"; known providers are ${MAIL_PROVIDERS.join(", ")}`,
+    );
+  }
+
+  // Which service hears the audio. Unlike mail there is no defensible default
+  // — both providers need a key, so "whichever one we assume" is only ever
+  // right by luck — but a deployment that says nothing has to get something,
+  // and the REST API has defaulted to deepgram since before soniox existed.
+  // Stated here so it is stated once, and checked here so a name nothing can
+  // dispatch on is caught while the file that names it is still in hand.
+  const sttProvider = block.stt?.provider || "deepgram";
+  if (!STT_PROVIDERS.includes(sttProvider)) {
+    throw new Error(
+      `kelabo config: env "${env}" sets stt.provider "${sttProvider}"; known providers are ${STT_PROVIDERS.join(", ")}`,
+    );
+  }
+  // A provider selected but not configured is the failure this cannot catch —
+  // the key lives in the credentials table, not in this file — so say at least
+  // that its settings block is missing, which is the half that is visible here.
+  if (block.stt && !block.stt.providers?.[sttProvider]) {
+    console.warn(
+      `kelabo config: env "${env}" selects stt.provider "${sttProvider}" but has no stt.providers.${sttProvider} settings block`,
     );
   }
 
@@ -378,6 +415,11 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...block,
     env,
     organizationName,
+    // Resolved, not passed through: the default belongs to the one file that
+    // owns env-specific values, so a deployment that omits the block and one
+    // that names deepgram explicitly are the same thing by the time anyone
+    // downstream reads it.
+    stt: { ...(block.stt ?? {}), provider: sttProvider },
     api,
     app: raw.app,
     rtcApiBase,

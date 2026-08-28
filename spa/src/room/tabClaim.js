@@ -4,7 +4,7 @@
  * A second tab on the same kelabo is not a harmless duplicate. It takes a
  * SECOND `getUserMedia` on a device the room is documented to hold exactly once
  * (AGENTS.md), which costs echo cancellation and posts every utterance to
- * Deepgram twice under the same identity. Worse, the conference seat is keyed by
+ * the transcriber twice under the same identity. Worse, the conference seat is keyed by
  * identity, so the Gateway treats the new tab as a *rejoin* of the existing seat
  * (`gateway/src/rtc/room.js`) and the first tab's call goes dead with nothing on
  * screen to say why. And the SSE hub deliberately tolerates two streams for one

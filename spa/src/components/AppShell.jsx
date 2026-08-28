@@ -244,7 +244,7 @@ export function AppShell({ children }) {
    * Ending used to require being in the room, which is the wrong place to need
    * to be: the kelabo that gets left running is the one everybody already
    * walked away from, and rejoining it — microphone, camera, conference audio,
-   * a Deepgram socket — purely to press one button is a lot of machinery for a
+   * a transcription socket — purely to press one button is a lot of machinery for a
    * decision already made. Same endpoint, same host-only check on the server.
    *
    * Always confirmed, never Shift-skippable, unlike removing a record: this one

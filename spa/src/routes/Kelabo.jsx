@@ -32,7 +32,7 @@ import { playEventSound, rosterDiff, shouldChimeUtterance } from '../sounds'
 /**
  * The kelabo route: everything the room needs, and nothing about how it looks.
  *
- * This file owns the four live connections — microphone, Deepgram capture,
+ * This file owns the four live connections — microphone, transcription capture,
  * conference transport and the kelabo's single SSE stream — plus the kelabo
  * record itself. `RoomShell` owns the entire presentation. The split matters
  * more than it looks: the room can now rearrange itself as much as it likes
@@ -43,7 +43,7 @@ import { playEventSound, rosterDiff, shouldChimeUtterance } from '../sounds'
 /**
  * The one-tab gate, and the reason it is a separate component.
  *
- * `KelaboRoom` opens the microphone, the Deepgram capture, the conference
+ * `KelaboRoom` opens the microphone, the transcription capture, the conference
  * transport and the SSE stream — each from a hook, on mount. So a second tab
  * cannot merely be told it is a duplicate: it must not mount the room at all,
  * or it has already taken a second `getUserMedia` and stolen the conference
@@ -167,7 +167,7 @@ function KelaboRoom() {
 
   const micEnabled = !boardOnly && !ended && !!kelabo
   const onCall = !boardOnly && !ended
-  // One getUserMedia for the whole kelabo, shared by the Deepgram pipeline and
+  // One getUserMedia for the whole kelabo, shared by the capture pipeline and
   // the conference transport (see spa/src/rtc/useMicStream.js). Echo
   // cancellation is never turned off here: without it every remote voice coming
   // out of the speakers is picked up again by this mic and transcribed a second

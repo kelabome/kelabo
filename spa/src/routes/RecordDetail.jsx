@@ -283,7 +283,9 @@ export default function RecordDetail() {
                         {u.at ? fmtTime(u.at) : fmtClock(u.tStart)}
                       </span>
                       {/* Same marker as the live panel: a typed line is something
-                          somebody wrote, not Deepgram's hearing of them. */}
+                          somebody wrote, not a transcriber's hearing of them.
+                          Which transcriber that was is not recorded — `source`
+                          is speech-or-typed and nothing else. */}
                       {u.source === 'typed' && (
                         <Icon name="pencil" size={11} className="chat-typed line-typed" label="Typed" />
                       )}

@@ -1061,7 +1061,7 @@
   text-align: center;
 }
 
-/* --- connection status (Kelabo / Deepgram / SFU) -------------------------- */
+/* --- connection status (Kelabo / transcription / SFU) --------------------- */
 /* Read-only, so nothing here has a hover, a pointer or a pressed state — the
    difference between this group and the buttons beside it has to survive a
    glance. Icon and colour only: the three labelled pills this replaces were

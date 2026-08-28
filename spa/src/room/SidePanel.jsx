@@ -176,7 +176,7 @@ function MessagesTab({ capture, ended, assistantOn, history }) {
 /** What was spoken, as it was transcribed. Read-only: writing belongs to the
  *  Messages tab, where everyone — transcript-entitled or not — can see it. */
 function TranscriptTab({ capture, diarize, kelaboId, boardOnly, history }) {
-  const { state, messages, renameSpeaker } = capture
+  const { state, messages, renameSpeaker, provider } = capture
   const spoken = useMemo(() => messages.filter(m => m.source !== 'typed'), [messages])
   const scroll = useFollowingScroll(spoken, true)
   const prompt = usePrompt()
@@ -233,11 +233,19 @@ function TranscriptTab({ capture, diarize, kelaboId, boardOnly, history }) {
         history={history}
       />
 
+      {/* Name whoever is actually transcribing. This read "Deepgram" flat, from
+          back when Deepgram was the only provider there was, and survived the
+          refactor that made the choice a deployment's own — so a Soniox
+          deployment credited Deepgram for every line above it, while the
+          connection light two panes away correctly said Soniox. `provider` is
+          the label the server minted this session under (useCapture), which is
+          the same source ConnStatus reads, and the same fallback when there is
+          no session yet. */}
       <div className="side-foot">
         {boardOnly
           ? 'watch-only · type in the Messages tab to say something'
           : state === 'live'
-            ? 'your device · Deepgram direct stream · only finals are posted'
+            ? `your device · ${provider?.label || 'transcription'} direct stream · only finals are posted`
             : `capture: ${state}`}
       </div>
     </>

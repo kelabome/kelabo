@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 // Single owner of the microphone for the whole kelabo.
 //
-// Two consumers need the same MediaStream: the Deepgram capture pipeline
+// Two consumers need the same MediaStream: the transcription capture pipeline
 // (spa/src/capture/useCapture.js) and the conference transport
 // (spa/src/rtc/useRtc.js). Calling getUserMedia twice would hand back two
 // independent captures of one device — Chrome and Safari then apply echo
