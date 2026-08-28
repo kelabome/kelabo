@@ -441,6 +441,57 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
     return "Posted to the leg.";
   }
 
+  async function legCreate({ title, journeyId } = {}) {
+    if (!title || !title.trim()) throw new Error("A leg needs a title.");
+    const kelaboId = journeyScope();
+    const res = await tunnel.createLeg(kelaboId, { journeyId, title: title.trim() });
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    if (res.resolved === "journey_completed") {
+      return "This journey is completed, so no new legs can be started on it.";
+    }
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    return `Started the leg "${res.title}" (id: ${res.legId}). Post into it with kelabo_leg_post(legId).`;
+  }
+
+  async function legEdit({ legId, msgId, text, journeyId } = {}) {
+    if (!legId) throw new Error("legId is required — list them with kelabo_journey_legs.");
+    if (!msgId) throw new Error("msgId is required — read the leg with kelabo_leg_messages to find it.");
+    if (!text || !text.trim()) throw new Error("Nothing to replace it with. To retract a message, say so in a new one.");
+    const kelaboId = journeyScope();
+    const res = await tunnel.editLegMessage(kelaboId, { journeyId, legId, msgId, text: text.trim() });
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    if (res.resolved === "leg_not_found") return "There is no leg with that id on this journey.";
+    if (res.resolved === "journey_completed") {
+      return "This journey is completed, so its legs are read-only. Nothing was changed.";
+    }
+    if (res.resolved === "message_not_found") return "There is no message with that id in that leg.";
+    if (res.resolved === "message_deleted") return "That message was deleted, and a deleted message cannot be edited.";
+    // The one refusal worth spelling out, because the obvious next move —
+    // trying again — cannot work, and the second-most obvious one, posting a
+    // correction as a new message, can.
+    if (res.resolved === "not_message_author") {
+      return "That message is not yours to edit. You can only correct messages you posted; anything else needs a new message saying so.";
+    }
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    return "Message updated. It now shows as edited.";
+  }
+
+  async function journeyDocumentAdd({ title, content, journeyId } = {}) {
+    if (!title || !title.trim()) throw new Error("A document needs a title.");
+    if (!content || !content.trim()) throw new Error("Nothing to add.");
+    const kelaboId = journeyScope();
+    const res = await tunnel.addJourneyDocument(kelaboId, { journeyId, title: title.trim(), content });
+    if (!res) throw new Error("Kelabo did not answer. Try again.");
+    if (res.resolved === "journey_completed") {
+      return "This journey is completed, so nothing more can be added to it.";
+    }
+    const explained = explainJourneyResolution(res);
+    if (explained) return explained;
+    return `Added "${title.trim()}" to the journey's documents (${res.sizeBytes} bytes). It can be removed later, but never edited.`;
+  }
+
   async function journeyBoard({ journeyId } = {}) {
     const kelaboId = journeyScope();
     const res = await tunnel.requestJourneyBoard(kelaboId, journeyId);
@@ -665,7 +716,8 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
 
   return {
     join, post, working, kelabo, board, history, minutes, leave, sweep, briefing: () => briefing,
-    journeyInfo, journeyTimeline, journeyBoard, journeyLegs, legMessages, legPost, journeyReportSubmit, journeyPost,
-    journeyJoin, journeyLeave, journeyContext, journeyKelabos, journeyDocuments, journeyReports,
+    journeyInfo, journeyTimeline, journeyBoard, journeyLegs, legMessages, legPost, legCreate, legEdit,
+    journeyReportSubmit, journeyPost, journeyJoin, journeyLeave, journeyContext, journeyKelabos,
+    journeyDocuments, journeyDocumentAdd, journeyReports,
   };
 }

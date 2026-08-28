@@ -1600,13 +1600,29 @@ The author on an assistant message is `kelabo`, not an email. It can therefore
 never equal a session identity, so `editJourneyMessage` refuses every editor,
 and `journeyPeople` never offers it as a mentionable person.
 
-**For a dev agent** there are three MCP tools — `kelabo_journey_legs`,
-`kelabo_leg_messages`, `kelabo_leg_post` — all *agent-initiated*.
-`leg_post` is **not** gated by `aiCanPost`: that flag guards the board, a
-curated surface edited unsupervised, while a leg is the conversation, where
-an attached agent is a participant. Leg messages arrive inside a
-`<kelabo-leg untrusted="true">` envelope, like every other multi-contributor
-surface.
+**For a dev agent** there are five MCP tools — `kelabo_journey_legs`,
+`kelabo_leg_messages`, `kelabo_leg_post`, `kelabo_leg_create`,
+`kelabo_leg_edit` — all *agent-initiated*. None is gated by `aiCanPost`: that
+flag guards the board, a curated surface edited unsupervised, while a leg is
+the conversation, where an attached agent is a participant. Leg messages
+arrive inside a `<kelabo-leg untrusted="true">` envelope, like every other
+multi-contributor surface.
+
+`kelabo_leg_edit` needs no permission check of its own, and deliberately has
+none. The Gateway edits as `conn.identity`, `editJourneyMessage` is
+author-only, and `onLegPost` wrote that same identity — so the set of messages
+an agent can reach is exactly the set it wrote. Restating the rule in the
+tunnel handler would be a second copy of it, free to drift from the one the
+HTTP surface obeys. A consequence follows from the paragraph above: an agent
+cannot edit the *assistant's* replies either, because those are authored
+`kelabo`.
+
+`kelabo_journey_document_add` (§8) is the sixth write and the only one outside
+legs. It writes the same `DOC#` item the web form does, as the attached
+identity, so removal stays with `addedBy` or the lead. It is **not** file
+upload and does not move §8's position: what it adds is a writer whose text
+came off a developer's disk rather than their clipboard, which is the one
+paste a person cannot conveniently do.
 
 ### 19.11 Not built yet
 

@@ -275,6 +275,65 @@ export const frameLegPostSchema = z.object({
   text: z.string().min(1).max(4000),
 });
 
+/** Start a new leg. Any member may, over HTTP or over this tunnel — the
+ *  narrowing that exists on legs is on *messages* (author-only edit), not on
+ *  the container, and an agent asked to "open a thread for the migration" is
+ *  doing what any participant would.
+ *
+ *  No `aiCanPost`, for `leg_post`'s reason: that flag guards the curated
+ *  board. A leg is the conversation, and an empty leg says nothing until
+ *  somebody writes in it. */
+export const frameLegCreateSchema = z.object({
+  type: z.literal("leg_create"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  title: z.string().min(1).max(80),
+});
+
+/** Correct a message already posted into a leg.
+ *
+ *  Deliberately has no author field. The Gateway edits as `conn.identity` and
+ *  the store is author-only (`editJourneyMessage`), so this reaches exactly
+ *  the messages this agent posted and nothing else — the rule that a lead may
+ *  remove somebody's message but never put words in their mouth applies to an
+ *  agent unchanged, and gets there by having nothing to relax rather than by
+ *  a second check that could drift.
+ *
+ *  `text` replaces the message whole rather than patching it: a diff would
+ *  need a base version to apply against, and a leg message has no version
+ *  chain (unlike a board message) precisely because it is a chat line. */
+export const frameLegEditSchema = z.object({
+  type: z.literal("leg_edit"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  legId: z.string().min(1),
+  msgId: z.string().min(1),
+  text: z.string().min(1).max(4000),
+});
+
+/** Add a document to the journey.
+ *
+ *  Pasted text, the same `DOC#` item every human-added document uses — there
+ *  is no file upload anywhere in this product (docs 20 §8) and this does not
+ *  introduce one. What it introduces is the one writer of that item shape
+ *  that reads its content from a developer's own machine: an agent that has
+ *  just been asked to "put the migration plan in the journey" has the file
+ *  open and would otherwise have to paste it through a human.
+ *
+ *  200,000 chars, matching `journeyDocumentBodySchema` exactly. The cap has
+ *  to be the same number on both writers or a document that the web form
+ *  accepts is refused over the tunnel, which reads as the tool being broken. */
+export const frameJourneyDocumentAddSchema = z.object({
+  type: z.literal("journey_document_add"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  title: z.string().min(1).max(160),
+  content: z.string().min(1).max(200_000),
+});
+
 /** The agent's own synthesis, stored directly — no server-side LLM round
  *  trip (docs 20 §12.2's `kelabo_journey_report_submit`, structurally
  *  `kelabo_post`'s fire-and-forget shape with a requestId added: unlike a
@@ -328,6 +387,9 @@ export const upFrameSchema = z.discriminatedUnion("type", [
   frameJourneyLegsRequestSchema,
   frameLegMessagesRequestSchema,
   frameLegPostSchema,
+  frameLegCreateSchema,
+  frameLegEditSchema,
+  frameJourneyDocumentAddSchema,
   frameJourneyReportSubmitSchema,
   frameJourneyPostSchema,
 ]);
@@ -581,6 +643,49 @@ export const frameLegPostedSchema = z.object({
   msgId: z.string().default(""),
 });
 
+export const frameLegCreatedSchema = z.object({
+  type: z.literal("leg_created"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "journey_completed"]),
+  journeys: z.array(journeyRef).default([]),
+  legId: z.string().default(""),
+  title: z.string().default(""),
+});
+
+export const frameLegEditedSchema = z.object({
+  type: z.literal("leg_edited"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  // `not_message_author` is the one that has to be nameable rather than folded
+  // into a generic failure: it is the difference between "that message is
+  // gone" and "that message is somebody else's", and an agent told only that
+  // the edit failed will try again.
+  resolved: z.enum([
+    "ok",
+    "no_journey",
+    "ambiguous",
+    "journey_not_found",
+    "journey_completed",
+    "leg_not_found",
+    "message_not_found",
+    "message_deleted",
+    "not_message_author",
+  ]),
+  journeys: z.array(journeyRef).default([]),
+  msgId: z.string().default(""),
+});
+
+export const frameJourneyDocumentAddedSchema = z.object({
+  type: z.literal("journey_document_added"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "journey_completed"]),
+  journeys: z.array(journeyRef).default([]),
+  docId: z.string().default(""),
+  sizeBytes: z.number().default(0),
+});
+
 export const frameJourneyReportSubmittedSchema = z.object({
   type: z.literal("journey_report_submitted"),
   requestId: z.string().min(1),
@@ -758,6 +863,9 @@ export const downFrameSchema = z.discriminatedUnion("type", [
   frameJourneyLegsSchema,
   frameLegMessagesSchema,
   frameLegPostedSchema,
+  frameLegCreatedSchema,
+  frameLegEditedSchema,
+  frameJourneyDocumentAddedSchema,
   frameJourneyReportSubmittedSchema,
   frameJourneyPostedSchema,
   frameJourneyBriefingSchema,

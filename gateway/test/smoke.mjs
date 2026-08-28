@@ -123,6 +123,18 @@ const db = {
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "META") return { Item: journeyMetaItem };
       if (input.Key.PK === `JOURNEY#${JOURNEY2}` && input.Key.SK === "META") return { Item: journeyMetaItem2 };
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "DOC#d1") return { Item: journeyDocItem };
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "LEG#leg-1") {
+        return { Item: { PK: input.Key.PK, SK: "LEG#leg-1", legId: "leg-1", title: "Trunk", messageCount: 2 } };
+      }
+      // Two messages: one the attached agent wrote, one somebody else did.
+      // The pair is the whole point — author-only edit is the rule, and a
+      // test with only the first message cannot tell it is being enforced.
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "MSG#leg-1#m-mine") {
+        return { Item: { PK: input.Key.PK, SK: input.Key.SK, msgId: "m-mine", legId: "leg-1", at: 10, author: "alice@example.com", text: "Ship on Fridya" } };
+      }
+      if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "MSG#leg-1#m-theirs") {
+        return { Item: { PK: input.Key.PK, SK: input.Key.SK, msgId: "m-theirs", legId: "leg-1", at: 11, author: "bob@example.com", text: "Sounds good" } };
+      }
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "REPORT#rp1") return { Item: journeyReportItem };
       if (input.Key.PK === `JOURNEY#${JOURNEY}` && input.Key.SK === "REPORT#rp2") return { Item: journeyPrivateReportItem };
       return {};
@@ -841,6 +853,69 @@ async function main() {
     const written = calls.puts.find((p) => p.TableName === "t-journeys" && String(p.Item.SK) === `BOARDMSG#${on.msgId}`);
     assert.equal(written.Item.content, "Freeze is Friday");
     console.log("ok: journey_post writes a BOARDMSG# item once aiCanPost is on");
+  }
+
+  {
+    // The three write tools that are NOT the board, and so are deliberately
+    // not behind aiCanPost. That flag guards the curated surface; a leg is the
+    // conversation and a document is additive and never edited.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "leg_create", requestId: "lc1", kelaboId: KELABO, title: "Migration" }));
+    const made = await nextFrame((f) => f.type === "leg_created" && f.requestId === "lc1", 5000, base);
+    assert.equal(made.resolved, "ok", "leg_create is not gated by aiCanPost — it is still off here");
+    assert.ok(made.legId);
+    const legPut = calls.puts.find((p) => p.TableName === "t-journeys" && String(p.Item.SK) === `LEG#${made.legId}`);
+    assert.equal(legPut.Item.title, "Migration");
+    // Created as the person the agent is attached as, so the rail shows their
+    // name and the journey has no notion of a leg nobody owns.
+    assert.equal(legPut.Item.createdBy, "alice@example.com");
+    console.log("ok: leg_create writes a LEG# item owned by the attached identity, ungated");
+  }
+
+  {
+    // Author-only, and it gets there by having nothing to relax: the Gateway
+    // edits as conn.identity and editJourneyMessage compares against the
+    // stored author. Both halves are asserted, because a test of the happy
+    // path alone would pass with the rule deleted.
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "leg_edit", requestId: "le1", kelaboId: KELABO, legId: "leg-1", msgId: "m-mine", text: "Ship on Friday" }));
+    const ok = await nextFrame((f) => f.type === "leg_edited" && f.requestId === "le1", 5000, base);
+    assert.equal(ok.resolved, "ok");
+    const edit = calls.updates.find((u) => String(u.Key?.SK) === "MSG#leg-1#m-mine");
+    assert.equal(edit.ExpressionAttributeValues[":text"], "Ship on Friday");
+    assert.ok(edit.ExpressionAttributeValues[":at"] > 0, "an edit stamps editedAt");
+    console.log("ok: leg_edit corrects the agent's own message");
+
+    const base2 = frames.length;
+    ws.send(JSON.stringify({ type: "leg_edit", requestId: "le2", kelaboId: KELABO, legId: "leg-1", msgId: "m-theirs", text: "I disagree" }));
+    const refused = await nextFrame((f) => f.type === "leg_edited" && f.requestId === "le2", 5000, base2);
+    assert.equal(refused.resolved, "not_message_author");
+    assert.equal(calls.updates.find((u) => String(u.Key?.SK) === "MSG#leg-1#m-theirs"), undefined,
+      "a refused edit must not have written anything");
+    console.log("ok: leg_edit cannot put words in another member's mouth");
+  }
+
+  {
+    // Pasted text, the same DOC# item a person's paste produces — this adds a
+    // writer, not a file-upload path (docs 20 §8).
+    const base = frames.length;
+    const content = "# Plan\nStep one.";
+    ws.send(JSON.stringify({ type: "journey_document_add", requestId: "da1", kelaboId: KELABO, title: " plan.md ", content }));
+    const added = await nextFrame((f) => f.type === "journey_document_added" && f.requestId === "da1", 5000, base);
+    assert.equal(added.resolved, "ok");
+    assert.ok(added.docId);
+    const docPut = calls.puts.find((p) => p.TableName === "t-journeys" && String(p.Item.SK) === `DOC#${added.docId}`);
+    assert.equal(docPut.Item.title, "plan.md", "the title is trimmed, as rest-api's own writer trims it");
+    assert.equal(docPut.Item.content, content);
+    assert.equal(docPut.Item.addedBy, "alice@example.com");
+    assert.equal(docPut.Item.removed, false);
+    // Bytes, not characters: the cap that bites downstream is DynamoDB's
+    // 400KB item, which counts UTF-8.
+    assert.equal(docPut.Item.sizeBytes, Buffer.byteLength(content, "utf8"));
+    assert.equal(added.sizeBytes, docPut.Item.sizeBytes);
+    const tl = calls.puts.find((p) => p.TableName === "t-journeys" && String(p.Item.SK).startsWith("TL#") && p.Item.type === "document");
+    assert.match(tl.Item.summary, /Document added: plan\.md/);
+    console.log("ok: journey_document_add writes the same DOC# item a person's paste would");
   }
 
   {

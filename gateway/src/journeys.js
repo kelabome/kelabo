@@ -558,6 +558,66 @@ export async function submitJourneyReport(c, journeyId, { reportId, question, an
  * *assistant* writing to the board unsupervised, not a person pinning
  * something they can already read.
  */
+/**
+ * Add a pasted-text document (docs 20 §8).
+ *
+ * The Gateway's twin of rest-api's `addDocument`, re-implemented here for the
+ * same cross-package reason as everything else in this file, and deliberately
+ * writing the *identical* item: `docId`, trimmed `title`, `content`,
+ * `sizeBytes`, `addedBy`, `addedAt`, `removed:false`. A document added by an
+ * agent must be indistinguishable from one a person pasted, because
+ * everything downstream — the documents tab, the removal rule (`addedBy` or
+ * the lead), `activeDocuments`, the journey context handed to the next
+ * agent — reads one shape and has no idea a tunnel exists.
+ *
+ * Still not file upload. This writes the same text item the web form does;
+ * what is new is only that its content came off a developer's disk instead of
+ * their clipboard.
+ *
+ * `sizeBytes` is bytes, not characters, and the difference is the point: the
+ * cap that matters downstream is DynamoDB's 400KB item, which counts UTF-8.
+ * A 200,000-character document of CJK or emoji is three or four times that on
+ * the wire, so the number recorded here is the one that would explain a
+ * rejected write rather than the one that passed validation.
+ */
+export async function createJourneyDocument(c, journeyId, { title, content, identity }) {
+  const now = Date.now();
+  const docId = randomUUID();
+  const trimmed = title.trim();
+  const item = {
+    docId,
+    title: trimmed,
+    content,
+    sizeBytes: Buffer.byteLength(content, "utf8"),
+    addedBy: identity || "",
+    addedAt: now,
+    removed: false,
+  };
+  await c.db.send(
+    new PutCommand({
+      TableName: journeysTable(c),
+      Item: { PK: journeyPk(journeyId), SK: `DOC#${docId}`, ...item },
+      ConditionExpression: "attribute_not_exists(SK)",
+    })
+  );
+  await c.db.send(
+    new UpdateCommand({
+      TableName: journeysTable(c),
+      Key: { PK: journeyPk(journeyId), SK: "META" },
+      UpdateExpression: "SET documentCount = if_not_exists(documentCount, :zero) + :one, updatedAt = :now",
+      ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":now": now },
+    })
+  );
+  await putJourneyTimelineRow(c, journeyId, {
+    type: "document",
+    summary: `Document added: ${trimmed}`,
+    actor: identity,
+    at: now,
+    detail: { docId },
+  });
+  return { docId, sizeBytes: item.sizeBytes };
+}
+
 export async function postJourneyBoardMessage(c, journeyId, { content, msgId, identity, by = "the attached agent", extra = {} }) {
   const now = Date.now();
   if (msgId) {

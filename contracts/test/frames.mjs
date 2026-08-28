@@ -449,16 +449,18 @@ test("every declared frame type parses", () => {
   assert.deepEqual([...upTypes].sort(), [
     "archive", "attach", "board_request", "contribution", "detach", "heartbeat", "history_request",
     "journey_attach", "journey_board_request", "journey_context_request", "journey_detach",
-    "journey_documents_request", "journey_info_request", "journey_kelabos_request",
-    "journey_legs_request", "journey_post", "journey_report_submit", "journey_reports_request",
-    "journey_timeline_request", "leg_messages_request", "leg_post",
+    "journey_document_add", "journey_documents_request", "journey_info_request",
+    "journey_kelabos_request", "journey_legs_request", "journey_post", "journey_report_submit",
+    "journey_reports_request", "journey_timeline_request",
+    "leg_create", "leg_edit", "leg_messages_request", "leg_post",
     "register", "rename", "summary",
   ]);
   assert.deepEqual([...downTypes].sort(), [
     "board", "briefing", "history", "journey_board", "journey_briefing", "journey_context",
-    "journey_documents", "journey_info", "journey_kelabos", "journey_legs", "journey_posted",
-    "journey_report_submitted", "journey_reports", "journey_timeline", "kelabo",
-    "leg_messages", "leg_posted", "ping",
+    "journey_document_added", "journey_documents", "journey_info", "journey_kelabos",
+    "journey_legs", "journey_posted", "journey_report_submitted", "journey_reports",
+    "journey_timeline", "kelabo",
+    "leg_created", "leg_edited", "leg_messages", "leg_posted", "ping",
     "registered", "rejected", "request", "transcript",
   ]);
   // No type may appear in both directions: the bridge and the Gateway each

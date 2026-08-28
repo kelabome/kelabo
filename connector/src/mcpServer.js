@@ -174,6 +174,48 @@ const TOOLS = [
     },
   },
   {
+    name: "kelabo_leg_create",
+    description:
+      "Start a new leg — a named thread on this journey, for a topic that deserves its own conversation. Any member may; an empty leg says nothing, so create one when there is something to put in it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "What the leg is about. Short — it is a thread name, not a sentence." },
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "kelabo_leg_edit",
+    description:
+      "Correct a message you posted in a leg. Replaces its text whole and marks it edited. You can only edit your own messages — to correct somebody else's, or the assistant's, post a new message saying so.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        legId: { type: "string", description: "Which leg the message is in." },
+        msgId: { type: "string", description: "Which message, from kelabo_leg_messages." },
+        text: { type: "string", description: "The replacement text." },
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+      },
+      required: ["legId", "msgId", "text"],
+    },
+  },
+  {
+    name: "kelabo_journey_document_add",
+    description:
+      "Add a document to the journey — a spec, a plan, a file's contents. Text only: read the file yourself and pass what it says. A document is added once and never edited, so add it when it is worth keeping, not as a scratchpad.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "What the document is. A filename is a fine title." },
+        content: { type: "string", description: "The text. Up to 200,000 characters." },
+        journeyId: { type: "string", description: "Which journey, if more than one is in scope." },
+      },
+      required: ["title", "content"],
+    },
+  },
+  {
     name: "kelabo_journey_board",
     description: "The journey's pinned board messages — persistent notes, distinct from this kelabo's own board.",
     inputSchema: {
@@ -341,6 +383,10 @@ export function createMcpServer({
 
         case "kelabo_leg_post":
           return ok(await handlers.legPost(args));
+        case "kelabo_leg_create":
+          return ok(await handlers.legCreate(args));
+        case "kelabo_leg_edit":
+          return ok(await handlers.legEdit(args));
 
         case "kelabo_journey_board":
           return ok(await handlers.journeyBoard(args));
@@ -358,6 +404,8 @@ export function createMcpServer({
           return ok(await handlers.journeyKelabos(args));
         case "kelabo_journey_documents":
           return ok(await handlers.journeyDocuments(args));
+        case "kelabo_journey_document_add":
+          return ok(await handlers.journeyDocumentAdd(args));
         case "kelabo_journey_reports":
           return ok(await handlers.journeyReports(args));
         default:

@@ -126,6 +126,9 @@ export function createTunnel({
       case "journey_legs":
       case "leg_messages":
       case "leg_posted":
+      case "leg_created":
+      case "leg_edited":
+      case "journey_document_added":
       case "journey_report_submitted":
       case "journey_posted": {
         // Resolved with the whole frame in every one of these, not a
@@ -278,6 +281,15 @@ export function createTunnel({
   const postLegMessage = (kelaboId, journeyId, legId, text) =>
     requestJourney("leg_post", kelaboId, { legId, text, ...(journeyId ? { journeyId } : {}) });
 
+  const createLeg = (kelaboId, { journeyId, title } = {}) =>
+    requestJourney("leg_create", kelaboId, { title, ...(journeyId ? { journeyId } : {}) });
+
+  const editLegMessage = (kelaboId, { journeyId, legId, msgId, text } = {}) =>
+    requestJourney("leg_edit", kelaboId, { legId, msgId, text, ...(journeyId ? { journeyId } : {}) });
+
+  const addJourneyDocument = (kelaboId, { journeyId, title, content } = {}) =>
+    requestJourney("journey_document_add", kelaboId, { title, content, ...(journeyId ? { journeyId } : {}) });
+
   const requestJourneyContext = (kelaboId, journeyId) =>
     requestJourney("journey_context_request", kelaboId, journeyId ? { journeyId } : {});
 
@@ -325,6 +337,9 @@ export function createTunnel({
     requestJourneyLegs,
     requestLegMessages,
     postLegMessage,
+    createLeg,
+    editLegMessage,
+    addJourneyDocument,
     requestJourneyContext,
     requestJourneyKelabos,
     requestJourneyDocuments,

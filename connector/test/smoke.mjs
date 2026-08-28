@@ -192,6 +192,34 @@ wss.on("connection", (ws) => {
         }));
       }
     }
+    if (frame.type === "leg_create") {
+      ws.send(JSON.stringify({
+        type: "leg_created", requestId: frame.requestId, kelaboId: frame.kelaboId,
+        resolved: frame.title === "frozen" ? "journey_completed" : "ok",
+        journeys: [], legId: "leg-new", title: frame.title,
+      }));
+    }
+    if (frame.type === "leg_edit") {
+      // Each id names one refusal, so the prose for every branch is exercised
+      // rather than only the happy path.
+      const byId = {
+        "not-mine": "not_message_author",
+        "gone": "message_not_found",
+        "tombstone": "message_deleted",
+      };
+      ws.send(JSON.stringify({
+        type: "leg_edited", requestId: frame.requestId, kelaboId: frame.kelaboId,
+        resolved: frame.legId === "nope" ? "leg_not_found" : (byId[frame.msgId] || "ok"),
+        journeys: [], msgId: frame.msgId,
+      }));
+    }
+    if (frame.type === "journey_document_add") {
+      ws.send(JSON.stringify({
+        type: "journey_document_added", requestId: frame.requestId, kelaboId: frame.kelaboId,
+        resolved: frame.title === "frozen" ? "journey_completed" : "ok",
+        journeys: [], docId: "doc-new", sizeBytes: Buffer.byteLength(frame.content, "utf8"),
+      }));
+    }
     if (frame.type === "journey_post") {
       // First ask: the owner has not turned aiCanPost on. Later asks: on,
       // matching the historyAsks toggle above.
@@ -410,6 +438,68 @@ await test("kelabo_journey_post is refused while aiCanPost is off, then succeeds
   // one that already is.
   const archived = await tools.journeyPost({ content: "x", msgId: "archived-msg" });
   assert.match(archived, /is archived and cannot be edited until it is unarchived/);
+});
+
+// --- writing to a journey ---------------------------------------------------
+//
+// The three write tools that are not the board. None of them is gated by
+// aiCanPost — that flag guards the curated board — so what stands between an
+// agent and somebody else's conversation is the author rule, and these assert
+// that the refusals arrive as prose the model can act on rather than as a
+// generic failure it will simply retry.
+
+await test("kelabo_leg_create starts a leg, and refuses a completed journey", async () => {
+  const made = await tools.legCreate({ title: "Migration" });
+  assert.match(made, /Started the leg "Migration" \(id: leg-new\)/);
+  // The id has to come back, or the next call has nothing to post into.
+  assert.match(made, /kelabo_leg_post/);
+
+  const frozen = await tools.legCreate({ title: "frozen" });
+  assert.match(frozen, /completed, so no new legs/);
+
+  await assert.rejects(() => tools.legCreate({ title: "   " }), /needs a title/);
+});
+
+await test("kelabo_leg_edit corrects your own message and says why when it cannot", async () => {
+  const ok = await tools.legEdit({ legId: "leg-1", msgId: "m1", text: "Corrected." });
+  assert.match(ok, /Message updated/);
+
+  // The refusal that matters. Retrying cannot help, so the prose has to say
+  // what will: a new message.
+  const notMine = await tools.legEdit({ legId: "leg-1", msgId: "not-mine", text: "x" });
+  assert.match(notMine, /not yours to edit/);
+  assert.match(notMine, /needs a new message/);
+
+  const gone = await tools.legEdit({ legId: "leg-1", msgId: "gone", text: "x" });
+  assert.match(gone, /no message with that id/);
+
+  const deleted = await tools.legEdit({ legId: "leg-1", msgId: "tombstone", text: "x" });
+  assert.match(deleted, /deleted message cannot be edited/);
+
+  const noLeg = await tools.legEdit({ legId: "nope", msgId: "m1", text: "x" });
+  assert.match(noLeg, /no leg with that id/);
+
+  // Blank text is refused locally rather than sent: an empty edit is a delete
+  // the agent has no tool for, and quietly emptying a message is worse than
+  // saying so.
+  await assert.rejects(() => tools.legEdit({ legId: "leg-1", msgId: "m1", text: " " }), /retract/);
+  await assert.rejects(() => tools.legEdit({ msgId: "m1", text: "x" }), /legId is required/);
+  await assert.rejects(() => tools.legEdit({ legId: "leg-1", text: "x" }), /msgId is required/);
+});
+
+await test("kelabo_journey_document_add stores text and reports what it stored", async () => {
+  const out = await tools.journeyDocumentAdd({ title: "plan.md", content: "# Plan\nStep one." });
+  assert.match(out, /Added "plan\.md" to the journey's documents/);
+  assert.match(out, /16 bytes/, "the size is the server's count, echoed back");
+  // Add-once is a property of the item, and the model has to know it before
+  // it treats documents as a scratchpad.
+  assert.match(out, /removed later, but never edited/);
+
+  const frozen = await tools.journeyDocumentAdd({ title: "frozen", content: "x" });
+  assert.match(frozen, /completed, so nothing more can be added/);
+
+  await assert.rejects(() => tools.journeyDocumentAdd({ content: "x" }), /needs a title/);
+  await assert.rejects(() => tools.journeyDocumentAdd({ title: "t", content: "" }), /Nothing to add/);
 });
 
 await test("kelabo_journey_context renders the whole bundle with record-of-the-past framing", async () => {

@@ -41,8 +41,11 @@ import {
   postJourneyBoardMessage,
   listJourneyLegs,
   getJourneyLeg,
+  createJourneyLeg,
   queryJourneyMessages,
   putJourneyMessage,
+  editJourneyMessage,
+  createJourneyDocument,
   resolveJourneyMentions,
   clip,
 } from "./journeys.js";
@@ -287,6 +290,12 @@ export function createTunnel(c) {
 
       case "leg_post":
         return onLegPost(conn, frame);
+      case "leg_create":
+        return onLegCreate(conn, frame);
+      case "leg_edit":
+        return onLegEdit(conn, frame);
+      case "journey_document_add":
+        return onJourneyDocumentAdd(conn, frame);
       case "journey_report_submit":
         return onJourneyReportSubmit(conn, frame);
       case "journey_post":
@@ -1075,6 +1084,154 @@ export function createTunnel(c) {
     } catch (err) {
       c.logError("leg_post_failed", err, { journeyId, legId });
       reply("leg_not_found");
+    }
+  }
+
+  /**
+   * Open a leg. The same act any member performs over HTTP, through the same
+   * `createJourneyLeg`, with `conn.identity` as `createdBy` — so a leg an
+   * agent opened is owned by the person whose agent it is, and the rail shows
+   * their name on it.
+   *
+   * Not gated by `aiCanPost`, for `leg_post`'s reason: that flag guards the
+   * curated board. A leg is a container, and an empty one asserts nothing.
+   */
+  async function onLegCreate(conn, frame) {
+    const { kelaboId, requestId, title } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("leg_create_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const reply = (resolved, extra = {}) =>
+      sendDown(conn.ws, { type: "leg_created", requestId, kelaboId, resolved, journeys: [], legId: "", title: "", ...extra });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "leg_created", requestId, kelaboId, ...resolution, legId: "", title: "" });
+      return;
+    }
+    const journeyId = resolution.journeyId;
+    const meta = await getJourneyMeta(c, journeyId).catch(() => null);
+    if (!meta) return reply("journey_not_found");
+    // The same freeze every other journey write obeys.
+    if (meta.status === "completed") return reply("journey_completed");
+
+    try {
+      const { leg } = await createJourneyLeg(c, journeyId, { title, identity: conn.identity });
+      c.log("journey_leg_created", { journeyId, legId: leg.legId, by: conn.identity, via: "agent" });
+      reply("ok", { legId: leg.legId, title: leg.title });
+    } catch (err) {
+      c.logError("leg_create_failed", err, { journeyId });
+      reply("journey_not_found");
+    }
+  }
+
+  /**
+   * Correct a message this agent already posted.
+   *
+   * There is no permission check here, and that is the design rather than an
+   * omission: `editJourneyMessage` is author-only, `onLegPost` writes
+   * `author: conn.identity`, and this passes the same identity — so the set of
+   * messages reachable from here is exactly the set this connection wrote.
+   * A second check would be a copy of that rule in a place it could drift
+   * away from, and the rule matters: a lead may remove somebody's message but
+   * must never be able to put words in their mouth.
+   *
+   * It also means an agent cannot edit the *assistant's* own leg replies,
+   * which are authored `kelabo` — correct, and worth knowing before someone
+   * reports it as a bug.
+   */
+  async function onLegEdit(conn, frame) {
+    const { kelaboId, requestId, legId, msgId, text } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("leg_edit_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const reply = (resolved, extra = {}) =>
+      sendDown(conn.ws, { type: "leg_edited", requestId, kelaboId, resolved, journeys: [], msgId: "", ...extra });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "leg_edited", requestId, kelaboId, ...resolution, msgId: "" });
+      return;
+    }
+    const journeyId = resolution.journeyId;
+    const meta = await getJourneyMeta(c, journeyId).catch(() => null);
+    if (!meta) return reply("journey_not_found");
+    if (meta.status === "completed") return reply("journey_completed");
+    const leg = await getJourneyLeg(c, journeyId, legId).catch(() => null);
+    if (!leg) return reply("leg_not_found");
+
+    try {
+      const out = await editJourneyMessage(c, journeyId, legId, msgId, { text, identity: conn.identity });
+      if (!out.ok) {
+        // `journey_message_not_found` is the store's name for it; the wire
+        // says `message_not_found`, matching the board's vocabulary rather
+        // than inventing a second spelling for the same absence.
+        const resolved = out.reason === "journey_message_not_found" ? "message_not_found" : out.reason;
+        c.log("leg_edit_refused", { journeyId, legId, msgId, identity: conn.identity, reason: resolved });
+        return reply(resolved);
+      }
+      c.log("leg_edit_by_agent", { journeyId, legId, msgId, identity: conn.identity, runtime: conn.agent?.runtime });
+      reply("ok", { msgId });
+    } catch (err) {
+      c.logError("leg_edit_failed", err, { journeyId, legId, msgId });
+      reply("message_not_found");
+    }
+  }
+
+  /**
+   * Add a pasted-text document, written as the person the agent is attached
+   * as — so the removal rule (`addedBy` or the lead) lands on them, exactly as
+   * if they had pasted it themselves.
+   *
+   * Not gated by `aiCanPost` either. That flag is about the board being a
+   * curated surface an unsupervised agent should not rewrite; a document is
+   * additive, never edited, and soft-removable by its adder — the shape of a
+   * thing that cannot be quietly changed under anyone.
+   */
+  async function onJourneyDocumentAdd(conn, frame) {
+    const { kelaboId, requestId, title, content } = frame;
+    const resolution = await resolveJourneyRequest(conn, frame);
+    if (!resolution) {
+      c.log("journey_document_add_from_unattached", { kelaboId, identity: conn.identity });
+      return;
+    }
+    const reply = (resolved, extra = {}) =>
+      sendDown(conn.ws, {
+        type: "journey_document_added",
+        requestId,
+        kelaboId,
+        resolved,
+        journeys: [],
+        docId: "",
+        sizeBytes: 0,
+        ...extra,
+      });
+    if (resolution.resolved !== "ok") {
+      sendDown(conn.ws, { type: "journey_document_added", requestId, kelaboId, ...resolution, docId: "", sizeBytes: 0 });
+      return;
+    }
+    const journeyId = resolution.journeyId;
+    const meta = await getJourneyMeta(c, journeyId).catch(() => null);
+    if (!meta) return reply("journey_not_found");
+    if (meta.status === "completed") return reply("journey_completed");
+
+    try {
+      const { docId, sizeBytes } = await createJourneyDocument(c, journeyId, {
+        title,
+        content,
+        identity: conn.identity,
+      });
+      c.log("journey_document_added", {
+        journeyId,
+        docId,
+        sizeBytes,
+        identity: conn.identity,
+        runtime: conn.agent?.runtime,
+      });
+      reply("ok", { docId, sizeBytes });
+    } catch (err) {
+      c.logError("journey_document_add_failed", err, { journeyId });
+      reply("journey_not_found");
     }
   }
 
