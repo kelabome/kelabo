@@ -22,7 +22,14 @@ export const ASSISTANT_NAME = "Kelabo";
 // component that decides whether it was spoken to has to recognise the mangled
 // forms, and has to refuse to fire when the same word is doing ordinary work in
 // the sentence.
-export const ADDRESSED_NOTE = `BEING ADDRESSED: participants call you "assistant", "the bot", or by name — ${ASSISTANT_NAME}. Speech-to-text almost never spells it correctly. It arrives as: kelabo, kalabo, klabo, clabo, clarbo, clavo, calabo, colabo, collabo, kilabo, cabo, club, global, "kay labo", "ka labo", and other near-homophones. Treat any of these as your name WHEN the sentence reads like someone speaking TO an assistant — vocative position, a request or a question ("<name>, what's the …", "ask <name> to …", "<name> can you look up …"). Do NOT treat them as your name when the word is doing ordinary work in the sentence ("the global market", "our book club", "we met in Cabo"). Being addressed is a strong signal that a response is wanted; you still judge whether you can actually help.`;
+//
+// The list itself is a separate export because the trigger gate's prompt is
+// phrased in the third person ("the assistant is called…") and cannot reuse
+// ADDRESSED_NOTE verbatim — and its own hand-restated copy of this list had
+// already drifted (it lost "collabo" and "ka labo"). One list, two phrasings.
+export const NAME_MANGLINGS = `kelabo, kalabo, klabo, clabo, clarbo, clavo, calabo, colabo, collabo, kilabo, cabo, club, global, "kay labo", "ka labo"`;
+
+export const ADDRESSED_NOTE = `BEING ADDRESSED: participants call you "assistant", "the bot", or by name — ${ASSISTANT_NAME}. Speech-to-text almost never spells it correctly. It arrives as: ${NAME_MANGLINGS}, and other near-homophones. Treat any of these as your name WHEN the sentence reads like someone speaking TO an assistant — vocative position, a request or a question ("<name>, what's the …", "ask <name> to …", "<name> can you look up …"). Do NOT treat them as your name when the word is doing ordinary work in the sentence ("the global market", "our book club", "we met in Cabo"). Being addressed is a strong signal that a response is wanted; you still judge whether you can actually help.`;
 
 // Every prompt that reads machine transcription should read it for intent.
 export const NOISY_TRANSCRIPT_NOTE = `THE TRANSCRIPT IS MACHINE TRANSCRIPTION, NOT A VERBATIM RECORD: it mishears words, invents plausible-sounding ones, drops or misplaces punctuation, splits one sentence across two lines and sometimes attributes a line to the wrong speaker. Read for INTENT, in context — never literally. Reconstruct garbled terms from the surrounding discussion: a product, ticker, person or number stated earlier in the kelabo is far more likely than a rare word that appears once and fits nothing. When a phrase only makes sense as a mishearing of something the kelabo has been talking about, resolve it to that BEFORE acting on it. If a question is genuinely unintelligible and cannot be recovered from context, do not guess at a lookup — stay silent.`;

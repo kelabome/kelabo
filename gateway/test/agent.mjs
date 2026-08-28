@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { MainAgent } from "../src/agent/mainAgent.js";
 import { SubAgent, partialAnswer } from "../src/agent/subAgent.js";
-import { createMcpQuery } from "../src/agent/subagents.js";
+import { createMcpQuery, createWebSearch } from "../src/agent/subagents.js";
+import { isTransientLlmError, withLlmRetry } from "../src/agent/llmRetry.js";
 import { loadEffectiveMcp } from "../src/agent/mcp.js";
 import { subAgentSystemPrompt, mainAgentSystemPrompt, summarySystemPrompt } from "../src/agent/persona.js";
 import { TriggerGate, isBackchannel } from "../src/agent/gate.js";
 import { languageName } from "../src/agent/language.js";
 import { normalizeUsage, addUsage, createLlmProvider } from "../src/agent/llm.js";
 import { parseMinutesJson } from "../src/agent/serverAgentRunner.js";
+import { hasCapacity } from "../src/agent/schedule.js";
 
 let passed = 0;
 async function test(name, fn) {
@@ -1272,6 +1274,261 @@ await test("gate and orchestrator both know the transcript is misheard speech", 
     assert.match(prompt, /book club/, `${what} is told not to fire on ordinary uses`);
   }
   assert.match(gateSystem, /Kelabo/, "the gate knows the assistant's actual name");
+});
+
+await test("run scheduling: 0 = unlimited across kelabos, a positive cap still binds", async () => {
+  // The default: no global self-limit. Any number of kelabos research at once;
+  // the only limiter left is the one-turn-per-kelabo rule in worker.js.
+  assert.equal(hasCapacity(0, 0), true, "idle, uncapped");
+  assert.equal(hasCapacity(500, 0), true, "500 concurrent runs, uncapped — never queued globally");
+  assert.equal(hasCapacity(500, -1), true, "negative reads as unlimited too");
+
+  // The opt-in valve for a low-quota provider key.
+  assert.equal(hasCapacity(3, 4), true, "under an explicit cap");
+  assert.equal(hasCapacity(4, 4), false, "at an explicit cap");
+  assert.equal(hasCapacity(5, 4), false, "over an explicit cap");
+
+  // The enqueue-time card message: with no cap, `queued` can only come from the
+  // kelabo's own in-flight turn — "Queued behind another lookup…" always means
+  // *this* kelabo's previous question, never another room's.
+  const runningKelabos = new Set(["kel-busy"]);
+  const queuedMsg = (kelaboId) => !hasCapacity(120, 0) || runningKelabos.has(kelaboId);
+  assert.equal(queuedMsg("kel-idle"), false, "another room's load never queues this one");
+  assert.equal(queuedMsg("kel-busy"), true, "the kelabo's own running turn still queues it");
+});
+
+// ---- transient-failure retry, deadlines, and the other docs-21 fixes --------
+
+await test("isTransientLlmError: 429/5xx and network failures retry, timeouts and 4xx do not", () => {
+  assert.equal(isTransientLlmError(new Error("openai-compatible 429: slow down")), true);
+  assert.equal(isTransientLlmError(new Error("anthropic 529: overloaded")), true);
+  assert.equal(isTransientLlmError(new Error("openai-compatible 500: oops")), true);
+  assert.equal(isTransientLlmError(new Error("fetch failed")), true, "network-level failure: the request may never have arrived");
+  assert.equal(isTransientLlmError(new Error("openai-compatible 400: bad request")), false, "the request is wrong and will be wrong again");
+  assert.equal(isTransientLlmError(new Error("anthropic 401: bad key")), false);
+  const timeout = new Error("aborted");
+  timeout.name = "TimeoutError";
+  assert.equal(isTransientLlmError(timeout), false, "a timed-out call already spent its whole budget");
+  // A status inside the BODY text must not be mistaken for the response status.
+  assert.equal(isTransientLlmError(new Error('openai-compatible 400: {"note":"try again, error 500"}')), false);
+});
+
+await test("withLlmRetry retries a transient failure once and then succeeds", async () => {
+  let calls = 0;
+  const logged = [];
+  const out = await withLlmRetry(
+    async () => {
+      calls++;
+      if (calls === 1) throw new Error("openai-compatible 429: rate");
+      return "ok";
+    },
+    { delayMs: 0, log: (e, f) => logged.push({ e, f }), event: "x_retry" }
+  );
+  assert.equal(out, "ok");
+  assert.equal(calls, 2);
+  assert.equal(logged[0].e, "x_retry", "the retry is visible in the log, not inferred");
+  // A permanent failure is not retried at all.
+  let permCalls = 0;
+  await assert.rejects(
+    withLlmRetry(async () => {
+      permCalls++;
+      throw new Error("openai-compatible 401: bad key");
+    }, { delayMs: 0 })
+  );
+  assert.equal(permCalls, 1);
+});
+
+await test("a rate-limited gate classification is retried, not swallowed as classifier_error", async () => {
+  // The failure this fixes: a transient 429 at the gate became verdict NONE
+  // with reason `classifier_error` — a real spoken question silently eaten.
+  let calls = 0;
+  const gate = new TriggerGate({
+    llm: {
+      async completeRaw() {
+        calls++;
+        if (calls === 1) throw new Error("openai-compatible 429: rate limited");
+        return { text: JSON.stringify({ verdict: "INFO_GAP", confidence: 1, reason: "q", query: "the cache size", language: "English" }), toolCalls: [], raw: { content: [] } };
+      },
+    },
+    smallModel: "flash",
+    knobs: { cooldownSeconds: 0, maxContributionsPerMinute: 9, sensitivity: "medium" },
+    log: () => {},
+  });
+  const r = await gate.decide("m1", { speaker: "a", text: "how big is the cache?", at: Date.now() }, transcript);
+  assert.equal(calls, 2, "one retry");
+  assert.equal(r.verdict, "INFO_GAP", "the question survives the provider's bad moment");
+  assert.equal(r.language, "English", "the gate reports the requester's language for downstream fallback");
+});
+
+await test("a brief the orchestrator dispatched without a language falls back to the gate's", async () => {
+  // Docs 21 §4.2: `language` is required only in the tool's JSON schema — a
+  // hint to the provider — and when a small model omits it, the worker used to
+  // mirror the BRIEF's language: the orchestrator's own prior, not the
+  // participant's. The gate heard the participant, so its language wins.
+  const mainLlm = stubLlm([
+    { text: "", toolCalls: [{ id: "tu1", name: "dispatch_subagent", input: { task_id: "t1", objective: "cache size", to: "all" } }] },
+  ]);
+  let system = "";
+  const strong = {
+    async completeRaw(req) {
+      system = req.system;
+      return { text: JSON.stringify({ task_id: "t1", status: "ok", title: "t", to: "all", answer: "a", confidence: 1, sources: [], gaps: "" }), toolCalls: [], raw: { content: [] } };
+    },
+  };
+  const logged = [];
+  const agent = new MainAgent({
+    llm: mainLlm, smallModel: "flash", subAgentModel: "pro",
+    subAgentDeps: { strong, webSearch: async () => [], webFetch: async () => ({}), makeMcpQuery: () => async () => ({}), capabilities: ["web"], mcp: { servers: [] } },
+    log: (event, data) => logged.push({ event, data }), debug: () => {},
+  });
+  for await (const _ of agent.runTurn({ kelaboId: "m1", query: "q", language: "Japanese", transcript })) void _;
+  assert.match(system, /write `title` and `answer` in Japanese/, "the worker is pinned to the requester's language");
+  assert.ok(logged.some((l) => l.event === "main_dispatch_language_defaulted"), "the defaulting is logged");
+  // A language the orchestrator DID set is never overridden.
+  const mainLlm2 = stubLlm([
+    { text: "", toolCalls: [{ id: "tu1", name: "dispatch_subagent", input: { task_id: "t1", objective: "o", to: "all", language: "Chinese" } }] },
+  ]);
+  const agent2 = new MainAgent({
+    llm: mainLlm2, smallModel: "flash", subAgentModel: "pro",
+    subAgentDeps: { strong, webSearch: async () => [], webFetch: async () => ({}), makeMcpQuery: () => async () => ({}), capabilities: ["web"], mcp: { servers: [] } },
+    log: () => {}, debug: () => {},
+  });
+  for await (const _ of agent2.runTurn({ kelaboId: "m1", query: "q", language: "Japanese", transcript })) void _;
+  assert.match(system, /write `title` and `answer` in Chinese/);
+});
+
+await test("a worker past its deadline stops researching and concludes from what it has", async () => {
+  // Docs 21 §3.2/§4.1: `deadline_ms` was prompt text nothing enforced; the
+  // only bound was 16 LLM round trips. Now the deadline breaks the loop and
+  // force-conclude commits a result from the gathered material.
+  let loopCalls = 0;
+  let concludeCalls = 0;
+  const llm = {
+    async completeRaw(req) {
+      if (req.tools?.length) {
+        loopCalls++;
+        return { text: "", toolCalls: [{ id: "f1", name: "web_fetch", input: { url: "https://x.test" } }], raw: { content: [{ type: "tool_use", id: "f1", name: "web_fetch", input: {} }] } };
+      }
+      concludeCalls++;
+      return { text: JSON.stringify({ task_id: "t1", status: "partial", title: "T", to: "all", answer: "What is known so far.", confidence: 0.4, sources: [], gaps: "ran out of time" }), toolCalls: [], raw: { content: [] } };
+    },
+  };
+  const logged = [];
+  const sub = new SubAgent({
+    llm, model: "pro",
+    webSearch: async () => [], webFetch: async () => ({ url: "https://x.test", text: "data" }), mcpQuery: async () => ({}),
+    capabilities: ["web"], mcp: { servers: [] },
+    deadlineAt: Date.now() - 1, // already expired: not one research iteration runs
+    log: (event, data) => logged.push({ event, data }), debug: () => {},
+  });
+  const r = await sub.run({ task_id: "t1", objective: "x", to: "all" }, "m1");
+  assert.equal(loopCalls, 0, "no research call starts past the deadline");
+  assert.equal(concludeCalls, 1, "force-conclude still runs — a late partial answer beats nothing");
+  assert.equal(r.status, "partial");
+  assert.equal(r.answer, "What is known so far.");
+  assert.ok(logged.some((l) => l.event === "subagent_deadline"), "the deadline is logged");
+});
+
+await test("a mid-loop provider failure concludes from gathered research instead of discarding it", async () => {
+  // Previously an exception mid-loop propagated up and became an error result
+  // carrying none of the research already fetched.
+  let call = 0;
+  let concludeMessages = null;
+  const llm = {
+    async completeRaw(req) {
+      if (!req.tools?.length) {
+        concludeMessages = req.messages;
+        return { text: JSON.stringify({ task_id: "t1", status: "ok", title: "T", to: "all", answer: "From the fetched page.", confidence: 0.7, sources: [], gaps: "" }), toolCalls: [], raw: { content: [] } };
+      }
+      call++;
+      if (call === 1) {
+        return { text: "", toolCalls: [{ id: "f1", name: "web_fetch", input: { url: "https://x.test" } }], raw: { content: [{ type: "tool_use", id: "f1", name: "web_fetch", input: {} }] } };
+      }
+      // Permanent (non-retryable) failure on the second round trip.
+      throw new Error("openai-compatible 400: context too long");
+    },
+  };
+  const sub = new SubAgent({
+    llm, model: "pro",
+    webSearch: async () => [], webFetch: async () => ({ url: "https://x.test", text: "the fetched page body" }), mcpQuery: async () => ({}),
+    capabilities: ["web"], mcp: { servers: [] },
+    log: () => {}, debug: () => {},
+  });
+  const r = await sub.run({ task_id: "t1", objective: "x", to: "all" }, "m1");
+  assert.equal(r.status, "ok");
+  assert.equal(r.answer, "From the fetched page.");
+  const flat = JSON.stringify(concludeMessages);
+  assert.ok(flat.includes("the fetched page body"), "the research gathered before the failure reaches the conclusion");
+});
+
+await test("a failed web search reads as a tool failure, not as 'nothing exists'", async () => {
+  // No key → an {error} object, never [] (an empty list told the model the
+  // web has nothing on the topic, and it fell back to guessing URLs).
+  const noKey = createWebSearch({ log: () => {} });
+  const out = await noKey("anything");
+  assert.equal(Array.isArray(out), false);
+  assert.match(out.error, /search_unavailable/);
+
+  // And the worker survives the {error} shape: no sources, no crash.
+  let call = 0;
+  const llm = {
+    async completeRaw(req) {
+      call++;
+      if (call === 1 && req.tools?.length) {
+        return { text: "", toolCalls: [{ id: "s1", name: "web_search", input: { query: "q" } }], raw: { content: [{ type: "tool_use", id: "s1", name: "web_search", input: { query: "q" } }] } };
+      }
+      return { text: JSON.stringify({ task_id: "t1", status: "empty", title: "T", to: "all", answer: "", confidence: 0, sources: [], gaps: "search unavailable" }), toolCalls: [], raw: { content: [] } };
+    },
+  };
+  const sub = new SubAgent({
+    llm, model: "pro",
+    webSearch: async () => ({ error: "search_failed: brave 500" }), webFetch: async () => ({}), mcpQuery: async () => ({}),
+    capabilities: ["web", "web_search"], mcp: { servers: [] },
+    log: () => {}, debug: () => {},
+  });
+  const r = await sub.run({ task_id: "t1", objective: "x", to: "all" }, "m1");
+  assert.equal(r.status, "empty");
+  assert.deepEqual(r.sources, [], "an error object never contributes sources");
+});
+
+await test("renaming a speaker rewrites the orchestrator's recorded thread, not just future turns", async () => {
+  // The worker fixes its transcript array on rename, but TRANSCRIPT lines
+  // already in the persistent thread kept the old label — the model's memory
+  // and the minutes input disagreed on who said what.
+  const agent = new MainAgent({
+    llm: stubLlm([{ text: "NO_POST: x", toolCalls: [] }]),
+    smallModel: "flash", subAgentModel: "pro",
+    subAgentDeps: { strong: {}, webSearch: async () => [], webFetch: async () => ({}), makeMcpQuery: () => async () => ({}), capabilities: [], mcp: { servers: [] } },
+    log: () => {}, debug: () => {},
+  });
+  for await (const _ of agent.runTurn({ kelaboId: "m1", query: "q", transcript })) void _;
+  const changed = agent.renameSpeaker("alex", "Alex Chen");
+  assert.equal(changed, 2, "both of alex's lines are rewritten");
+  const lines = agent.thread.filter((m) => typeof m.content === "string" && m.content.startsWith("TRANSCRIPT:"));
+  assert.ok(lines.every((m) => m.content.includes("[Alex Chen]")), "the new label is in the thread");
+  assert.ok(lines.every((m) => !m.content.includes("[alex]")), "the old label is gone");
+  // A speaker whose name is a prefix of another must not be clipped.
+  assert.equal(agent.renameSpeaker("Alex", "x"), 0, "prefix of 'Alex Chen' does not match");
+});
+
+await test("the gate's addressed-name list is the shared contracts list, drift included", async () => {
+  let gateSystem = "";
+  const gate = new TriggerGate({
+    llm: {
+      async completeRaw(req) {
+        gateSystem = req.system;
+        return { text: JSON.stringify({ verdict: "NONE", confidence: 1, reason: "x" }), toolCalls: [], raw: { content: [] } };
+      },
+    },
+    smallModel: "flash",
+    knobs: { cooldownSeconds: 0, maxContributionsPerMinute: 9 },
+    log: () => {},
+  });
+  await gate.decide("m1", { speaker: "a", text: "collabo, what's the cache size?", at: Date.now() }, transcript);
+  // These two were missing from the gate's hand-restated copy of the list —
+  // the drift that motivated sharing it (contracts NAME_MANGLINGS).
+  assert.match(gateSystem, /collabo/);
+  assert.match(gateSystem, /"ka labo"/);
 });
 
 console.log(`\n${passed} agent tests passed${process.exitCode ? " (with failures)" : ""}`);

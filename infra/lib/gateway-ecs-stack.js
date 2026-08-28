@@ -159,6 +159,7 @@ export class GatewayEcsStack extends Stack {
           KELABO_AGENT_MAX_CONTRIB_PER_MIN: String(cfg.gateway.agent.maxContributionsPerMinute),
           KELABO_AGENT_COOLDOWN_SECONDS: String(cfg.gateway.agent.cooldownSeconds),
           KELABO_AGENT_ROLLING_WINDOW: String(cfg.gateway.agent.rollingWindowSize),
+          KELABO_AGENT_TURN_DEADLINE_SECONDS: String(cfg.gateway.agent.turnDeadlineSeconds ?? 180),
         },
       },
     });

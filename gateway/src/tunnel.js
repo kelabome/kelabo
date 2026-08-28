@@ -551,8 +551,9 @@ export function createTunnel(c) {
   }
 
   /** Send a request the bridge must answer, and wait for the answer bearing the
-   *  same requestId. Resolves `null` on timeout or with no attached agent. */
-  function ask(kelaboId, kind, timeoutMs) {
+   *  same requestId. Resolves `null` on timeout or with no attached agent.
+   *  `extra` carries optional request fields (frameRequestSchema). */
+  function ask(kelaboId, kind, timeoutMs, extra = {}) {
     const conn = c.state.tunnelByKelabo.get(kelaboId);
     if (!conn || conn.ws.readyState !== 1) return Promise.resolve(null);
     const requestId = randomUUID();
@@ -564,12 +565,16 @@ export function createTunnel(c) {
       }, timeoutMs);
       timer.unref?.();
       pending.set(requestId, { resolve, timer });
-      sendDown(conn.ws, { type: "request", kind, requestId, kelaboId });
+      sendDown(conn.ws, { type: "request", kind, requestId, kelaboId, ...extra });
     });
   }
 
-  const requestDevSummary = (kelaboId, timeoutMs = SUMMARY_WAIT_MS) =>
-    ask(kelaboId, "summary", timeoutMs);
+  // `language` (an English language name, from the host's settings) rides the
+  // summary request so dev-mode minutes follow the same language rule as
+  // server-mode ones — before this the frame carried no hint and the language
+  // of a dev-mode record was whatever the developer's model picked.
+  const requestDevSummary = (kelaboId, { language = "", timeoutMs = SUMMARY_WAIT_MS } = {}) =>
+    ask(kelaboId, "summary", timeoutMs, language ? { language } : {});
 
   const requestDevArchive = (kelaboId, timeoutMs = ARCHIVE_WAIT_MS) =>
     ask(kelaboId, "archive", timeoutMs);

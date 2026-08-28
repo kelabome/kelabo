@@ -15,6 +15,7 @@ import {
   stampKelaboTtl,
 } from "./db.js";
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
+import { languageName } from "./agent/language.js";
 import { settleKelaboJoin, markLinkEnded } from "./journeys.js";
 
 export async function endKelabo(c, kelaboId, { retry = false } = {}) {
@@ -224,7 +225,7 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   // from the persisted transcript, so the buffer is no longer needed.
   c.messageBuffer?.drop(kelaboId);
   if (!minutes) {
-    generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime)
+    generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime, languageName(meta.hostLang) || "")
       .catch((err) => c.logError("async_minutes_failed", err, { kelaboId }))
       .finally(() => {
         c.agentDispatcher.drop(kelaboId);
@@ -240,7 +241,7 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   return { status: 200, body: { ok: true, archived, archiveId: archive.archiveId, s3Key } };
 }
 
-async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime) {
+async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime, minutesLanguage = "") {
   // Every branch here says what it did. This function used to end a kelabo
   // without minutes and without a single line of log to say why: a dev summary
   // that never came back, an agent context that had already gone, a refused or
@@ -250,7 +251,7 @@ async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRun
   let minutes = null;
   let reason = "";
   if (agentRuntime) {
-    const summary = await c.tunnel.requestDevSummary(kelaboId).catch((err) => {
+    const summary = await c.tunnel.requestDevSummary(kelaboId, { language: minutesLanguage }).catch((err) => {
       c.logError("dev_summary_failed", err, { kelaboId });
       return null;
     });

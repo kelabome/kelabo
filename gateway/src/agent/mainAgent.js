@@ -3,9 +3,17 @@ import { tagTranscript } from "@kelabo/contracts";
 import { mainAgentSystemPrompt, summarySystemPrompt } from "./persona.js";
 import { SubAgent } from "./subAgent.js";
 import { addUsage } from "./llm.js";
+import { withLlmRetry } from "./llmRetry.js";
 import { parseMinutesJson } from "./serverAgentRunner.js";
 
 const MAX_DISPATCH_PER_TURN = 3;
+// Wall-clock budget for one turn's research, applied to the workers it
+// dispatches (the orchestrator's own single call is bounded by the provider
+// timeout in llm.js). Default when the knob is absent; 0 disables.
+const DEFAULT_TURN_DEADLINE_MS = 180_000;
+// Minutes stream up to 8192 output tokens over the whole transcript — the one
+// call whose legitimate ceiling is far beyond the default provider timeout.
+const MINUTES_TIMEOUT_MS = 7 * 60_000;
 
 const DISPATCH_TOOL = {
   name: "dispatch_subagent",
@@ -136,12 +144,13 @@ function skipReason(result) {
  * itself — a sub-agent's output is the board post.
  */
 export class MainAgent {
-  constructor({ llm, smallModel, subAgentModel, subAgentDeps, maxDispatchPerTurn, hostLanguage, history, journeys, log, debug }) {
+  constructor({ llm, smallModel, subAgentModel, subAgentDeps, maxDispatchPerTurn, turnDeadlineMs, hostLanguage, history, journeys, log, debug }) {
     this.llm = llm;
     this.smallModel = smallModel;
     this.subAgentModel = subAgentModel;
     this.subAgentDeps = subAgentDeps; // { strong, webSearch, webFetch, makeMcpQuery, capabilities, mcp }
     this.maxDispatchPerTurn = maxDispatchPerTurn ?? MAX_DISPATCH_PER_TURN;
+    this.turnDeadlineMs = turnDeadlineMs ?? DEFAULT_TURN_DEADLINE_MS;
     // The host's language, resolved from their settings when they joined. The
     // minutes are written in it regardless of what the room spoke; board answers
     // are NOT — those follow whoever asked (each brief carries its own language).
@@ -232,6 +241,28 @@ export class MainAgent {
     return inserted;
   }
 
+  /**
+   * A speaker was renamed (an STT diarization label resolved to a person, or a
+   * participant corrected their name). The worker fixes its transcript array,
+   * but TRANSCRIPT lines already pushed into this thread kept the old label —
+   * so the model's memory and the minutes input disagreed on who said what.
+   * Rewriting the prefix costs one prompt-cache miss; renames are rare and a
+   * record that misattributes speech is worse.
+   */
+  renameSpeaker(from, to) {
+    const oldPrefix = `TRANSCRIPT: ${tagTranscript(from, "")}`;
+    const newPrefix = `TRANSCRIPT: ${tagTranscript(to, "")}`;
+    let changed = 0;
+    for (const m of this.thread) {
+      if (m.role !== "user" || typeof m.content !== "string") continue;
+      if (!m.content.startsWith(oldPrefix)) continue;
+      m.content = newPrefix + m.content.slice(oldPrefix.length);
+      changed++;
+    }
+    if (changed) this.log?.("main_thread_renamed", { from, to, lines: changed });
+    return changed;
+  }
+
   /** Sync the persistent thread with the latest transcript (append-only). */
   syncTranscript(transcript) {
     for (let i = this.transcriptLen; i < transcript.length; i++) {
@@ -246,7 +277,7 @@ export class MainAgent {
    * Contributions (built from each sub-agent's output). Sub-agents run in
    * parallel; each is created fresh and discarded after producing its result.
    */
-  async *runTurn({ kelaboId, trigger, query, transcript, turnId: turnIdIn, cardId: cardIdIn }) {
+  async *runTurn({ kelaboId, trigger, query, language: turnLanguage = "", transcript, turnId: turnIdIn, cardId: cardIdIn }) {
     this.repairThread();
     this.syncTranscript(transcript);
     if (query) this.thread.push({ role: "user", content: `TRIGGER: ${query}` });
@@ -272,13 +303,19 @@ export class MainAgent {
       messages: clipMessages(this.thread),
       threadLen: this.thread.length,
     });
-    const res = await this.llm.completeRaw({
-      model: this.smallModel,
-      system: this.system,
-      messages: this.thread,
-      tools: [DISPATCH_TOOL],
-      maxTokens: 1024,
-    });
+    // One retry on a transient provider failure — without it a 429 lost the
+    // whole turn and left the card spinning until the queue's catch landed it.
+    const res = await withLlmRetry(
+      () =>
+        this.llm.completeRaw({
+          model: this.smallModel,
+          system: this.system,
+          messages: this.thread,
+          tools: [DISPATCH_TOOL],
+          maxTokens: 1024,
+        }),
+      { log: this.log, event: "main_llm_retry", fields: { kelaboId, turnId } }
+    );
     // Running token total for this whole turn: the orchestrator call plus every
     // sub-agent it dispatches. Emitted as a `turn_usage` debug entry at the end
     // so the UI can show one figure for the entire search.
@@ -332,9 +369,24 @@ export class MainAgent {
     yield this.clearCard(kelaboId, turnCardId, startedAt);
 
     const at = Date.now();
+    // Research deadline for every worker this turn dispatches. Without it the
+    // only bound was 16 LLM round trips each followed by tool time — minutes
+    // of hold on a queue that admits one turn per kelabo (docs 21 §4.1).
+    const deadlineAt = this.turnDeadlineMs > 0 ? at + this.turnDeadlineMs : Infinity;
     const cards = new Map();
     for (const tc of dispatches) {
-      const brief = tc.input ?? {};
+      // A copy, not tc.input itself: the assistant turn above was recorded
+      // verbatim, and patching the recorded object would rewrite history.
+      const brief = { ...(tc.input ?? {}) };
+      // The orchestrator MUST set `language` per its schema, but a small model
+      // routinely does not, and the worker's fallback then mirrors the BRIEF's
+      // language — the orchestrator's prior, not the participant's (docs 21
+      // §4.2, the "answered in Chinese" bug). The gate read the participants'
+      // actual words, so its language is the trustworthy default.
+      if (!String(brief.language ?? "").trim() && turnLanguage) {
+        brief.language = turnLanguage;
+        this.log?.("main_dispatch_language_defaulted", { kelaboId, taskId: brief.task_id, language: turnLanguage });
+      }
       const cardId = randomUUID();
       const title = briefTitle(brief, query);
       cards.set(tc.id, { cardId, brief, title });
@@ -390,10 +442,12 @@ export class MainAgent {
             mcpQuery: this.subAgentDeps.makeMcpQuery(),
             capabilities: this.subAgentDeps.capabilities,
             mcp: this.subAgentDeps.mcp,
-            // The language the requester used, decided by the orchestrator and
-            // pinned into the worker's system prompt so its sources cannot
-            // drag the answer into another language.
+            // The language the requester used, decided by the orchestrator
+            // (or defaulted from the gate above) and pinned into the worker's
+            // system prompt so its sources cannot drag the answer into
+            // another language.
             language: String(brief.language ?? "").slice(0, 40),
+            deadlineAt,
             log: this.log,
             debug: this.debug,
             turnId, // ties this sub-agent's debug entries back to the parent turn
@@ -622,7 +676,14 @@ export class MainAgent {
     // `completeRaw`, not `complete`: the reply's finish reason is the only
     // thing that can say the budget ran out, and `complete` discards it with
     // the rest of the metadata.
-    const res = await this.llm.completeRaw({ model: this.smallModel, system, messages, maxTokens: 8192 });
+    // `timeoutMs` well above the default provider timeout: this is the one
+    // legitimately long call (the whole transcript in, 8192 tokens out), and
+    // it retries once on a transient failure — a 429 here used to be a record
+    // with no minutes and one log line.
+    const res = await withLlmRetry(
+      () => this.llm.completeRaw({ model: this.smallModel, system, messages, maxTokens: 8192, timeoutMs: MINUTES_TIMEOUT_MS }),
+      { log: this.log, event: "minutes_llm_retry", fields: { kelaboId } }
+    );
     const text = res.text;
     this.debug?.(kelaboId, { kind: "minutes", phase: "response", model: this.smallModel, raw: text });
     // Say so when the budget ran out. The reply is then a fragment, and

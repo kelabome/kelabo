@@ -215,6 +215,18 @@ test("request kind is a closed set and carries a requestId", () => {
   assert.equal(down({ type: "request", kind: "minutes", requestId: "r", kelaboId: "m" }).ok, false);
 });
 
+test("a summary request may carry the minutes language, and may omit it", () => {
+  // The Gateway resolves the host's language and rides it on the frame so
+  // dev-mode minutes follow the same rule as server-mode ones. Optional:
+  // absent means "the transcript's dominant language" on the bridge side.
+  const withLang = down({ type: "request", kind: "summary", requestId: "r", kelaboId: "m", language: "Chinese" });
+  assert.equal(withLang.ok, true);
+  assert.equal(withLang.frame.language, "Chinese");
+  const without = down({ type: "request", kind: "summary", requestId: "r", kelaboId: "m" });
+  assert.equal(without.ok, true);
+  assert.equal(without.frame.language, undefined);
+});
+
 test("history is requestId-correlated and distinguishes off from empty", () => {
   assert.equal(up({ type: "history_request", requestId: "r", kelaboId: "m" }).ok, true);
   assert.equal(up({ type: "history_request", kelaboId: "m" }).ok, false);

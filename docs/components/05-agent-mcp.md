@@ -1,5 +1,12 @@
 # Component: LLM / MCP / Agent layer
 
+> **Design here, behaviour in [21-agent-behaviour.md](../21-agent-behaviour.md).**
+> This doc and [14](./14-agent-orchestration.md) say how the agent is *meant* to
+> work. Doc 21 says what it *does*: the exact path a question takes, which of
+> these rules are enforced in code versus stated in a prompt, and the known
+> failure modes. Read it before diagnosing "it searched and posted nothing" or
+> "it answered in the wrong language".
+
 This is the "brain." It exists in **two execution topologies** behind one contract:
 
 - **Server-agent mode** (typical user, no developer present): runs **inside the

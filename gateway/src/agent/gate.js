@@ -1,5 +1,6 @@
-import { tagTranscript } from "@kelabo/contracts";
+import { tagTranscript, NAME_MANGLINGS } from "@kelabo/contracts";
 import { ASSISTANT_NAME } from "./persona.js";
+import { withLlmRetry } from "./llmRetry.js";
 
 const SENSITIVITY_THRESHOLD = { low: 0.8, medium: 0.5, high: 0.2 };
 
@@ -38,11 +39,11 @@ Verdicts:
 
 THE TRANSCRIPT IS MACHINE TRANSCRIPTION, NOT A VERBATIM RECORD: words are misheard, punctuation is dropped, one sentence is split across lines and speakers are sometimes confused. Judge INTENT from context, not the literal string. A line that reads as nonsense is usually a mishearing of something the kelabo has already been discussing — resolve it against that context before deciding. A question does not need a question mark to be a question.
 
-BEING ADDRESSED BY NAME: the assistant is called "${ASSISTANT_NAME}", which speech-to-text renders as kelabo, kalabo, klabo, clabo, clarbo, clavo, calabo, colabo, kilabo, cabo, club, global, "kay labo" and similar. When one of these appears in vocative position alongside a request or question ("<name>, what's …", "ask <name> to …", "<name> can you check …"), the assistant IS being addressed: that is a strong INFO_GAP/CODE_QUESTION signal even if the question is vague — raise confidence rather than lowering it. But when the same word is doing ordinary work in the sentence ("the global market", "our book club", "we met in Cabo"), it is not a trigger. "Assistant", "the bot" and "hey bot" count the same way.
+BEING ADDRESSED BY NAME: the assistant is called "${ASSISTANT_NAME}", which speech-to-text renders as ${NAME_MANGLINGS} and similar. When one of these appears in vocative position alongside a request or question ("<name>, what's …", "ask <name> to …", "<name> can you check …"), the assistant IS being addressed: that is a strong INFO_GAP/CODE_QUESTION signal even if the question is vague — raise confidence rather than lowering it. But when the same word is doing ordinary work in the sentence ("the global market", "our book club", "we met in Cabo"), it is not a trigger. "Assistant", "the bot" and "hey bot" count the same way.
 
 Reply with ONLY a JSON object: {"verdict":"INFO_GAP"|"CODE_QUESTION"|"NONE","confidence":0..1,"reason":"short"}. Be conservative: when in doubt, NONE — except when the assistant was directly addressed, where the participants have asked for an answer.
 
-When the verdict is not NONE, also include "query": a short standalone lookup title for the assistant, resolving references from context so it makes sense on its own (e.g. "latest Windows version 2026", not "the newest one" or a repeat of the last line). Correct obvious mistranscriptions in it — write the term the speaker meant, spelled properly. Write "query" in the SAME language the participants used (a Chinese question → a Chinese query); do not translate it to English.`;
+When the verdict is not NONE, also include "query": a short standalone lookup title for the assistant, resolving references from context so it makes sense on its own (e.g. "latest Windows version 2026", not "the newest one" or a repeat of the last line). Correct obvious mistranscriptions in it — write the term the speaker meant, spelled properly. Write "query" in the SAME language the participants used (a Chinese question → a Chinese query); do not translate it to English. Also include "language": the English name of that language ("English", "Chinese", "Japanese") — the language of the triggering request itself, not the kelabo's majority language.`;
 
 export class TriggerGate {
   constructor({ llm, smallModel, knobs, log, debug }) {
@@ -120,23 +121,30 @@ export class TriggerGate {
     let confidence = 0;
     let reason = "classifier_error";
     let query = "";
+    let language = "";
     let raw = "";
     let usage = null;
     try {
       // completeRaw so the gate's own tokens are counted — it runs on every
       // closed caption, so it is often the largest single line item.
-      const res = await this.llm.completeRaw({
-        model: this.smallModel,
-        system: GATE_SYSTEM,
-        messages: [{ role: "user", content: user }],
-        maxTokens: 1024,
-        temperature: 0,
-        // JSON mode: the reply is one JSON object and nothing else (the
-        // prompt already says so — providers require the word to appear).
-        // Beyond parse reliability, this reins in reasoning-model
-        // narration, which is where the gate's seconds actually go.
-        responseFormat: "json",
-      });
+      // Retried once on a transient provider failure: a 429 here used to
+      // silently swallow a real spoken question as `classifier_error`.
+      const res = await withLlmRetry(
+        () =>
+          this.llm.completeRaw({
+            model: this.smallModel,
+            system: GATE_SYSTEM,
+            messages: [{ role: "user", content: user }],
+            maxTokens: 1024,
+            temperature: 0,
+            // JSON mode: the reply is one JSON object and nothing else (the
+            // prompt already says so — providers require the word to appear).
+            // Beyond parse reliability, this reins in reasoning-model
+            // narration, which is where the gate's seconds actually go.
+            responseFormat: "json",
+          }),
+        { log: this.log, event: "gate_llm_retry", fields: { kelaboId } }
+      );
       raw = res.text;
       usage = res.usage ?? null;
       const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim().match(/\{[\s\S]*\}/)?.[0] ?? "{}");
@@ -144,6 +152,11 @@ export class TriggerGate {
       confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0;
       reason = String(parsed.reason ?? "").slice(0, 200);
       query = String(parsed.query ?? "").trim().slice(0, 140);
+      // The requester's language, used downstream as the fallback when the
+      // orchestrator forgets to set one on a brief (docs 21 §4.2): the gate
+      // has actually read the participants' words, the orchestrator's own
+      // prior has not.
+      language = String(parsed.language ?? "").trim().slice(0, 40);
     } catch (err) {
       reason = `classifier_error: ${err.message}`;
     } finally {
@@ -159,6 +172,7 @@ export class TriggerGate {
       confidence,
       reason,
       query,
+      language,
       usage,
     });
 
@@ -176,11 +190,11 @@ export class TriggerGate {
       st.lastFireAt = settledAt;
       st.fireTimes.push(settledAt);
     }
-    return this.record(kelaboId, at, verdict, reason, verdict !== "NONE" ? query : "");
+    return this.record(kelaboId, at, verdict, reason, verdict !== "NONE" ? query : "", verdict !== "NONE" ? language : "");
   }
 
-  record(kelaboId, at, verdict, reason, query = "") {
-    this.log("gate_decision", { kelaboId, at, verdict, reason, ...(query ? { query } : {}) });
-    return { verdict, reason, query };
+  record(kelaboId, at, verdict, reason, query = "", language = "") {
+    this.log("gate_decision", { kelaboId, at, verdict, reason, ...(query ? { query } : {}), ...(language ? { language } : {}) });
+    return { verdict, reason, query, language };
   }
 }

@@ -1,5 +1,6 @@
 import { getMeta, updateMeta, putMinutes } from "./db.js";
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
+import { languageName } from "./agent/language.js";
 
 export async function generateMinutes(c, kelaboId) {
   const meta = await getMeta(c, kelaboId);
@@ -9,7 +10,9 @@ export async function generateMinutes(c, kelaboId) {
 
   let minutes = null;
   if (runtime) {
-    const summary = await c.tunnel.requestDevSummary(kelaboId);
+    // Same language resolution as server mode (runner.js): the host's, or
+    // nothing — the bridge then falls back to the transcript's dominant one.
+    const summary = await c.tunnel.requestDevSummary(kelaboId, { language: languageName(meta?.hostLang) || "" });
     // `generatedBy` names the runtime that wrote them, so a reader can tell
     // minutes from a developer's local agent apart from the server agent's — and
     // which agent, now that it may be any of several.

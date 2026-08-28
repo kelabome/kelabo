@@ -78,7 +78,10 @@ function fromEnv() {
     bootstrapLlmApiKey: e.KELABO_LLM_API_KEY || "",
     gateway: {
       agent: {
-        maxConcurrentRuns: num(e.KELABO_AGENT_MAX_CONCURRENT_RUNS, 4),
+        // 0 = unlimited (default). Concurrency is bounded per kelabo (one turn
+        // each), not globally; set a positive value only to protect a
+        // low-quota provider key.
+        maxConcurrentRuns: num(e.KELABO_AGENT_MAX_CONCURRENT_RUNS, 0),
         // How many research tasks one trigger may fan out in parallel. The
         // orchestrator dispatches them together and each gets its own board
         // card; this is the ceiling on that fan-out, not on total concurrency.
@@ -88,6 +91,10 @@ function fromEnv() {
         cooldownSeconds: num(e.KELABO_AGENT_COOLDOWN_SECONDS, 45),
         rollingWindowSize: num(e.KELABO_AGENT_ROLLING_WINDOW, 60),
         turnTimeoutSeconds: num(e.KELABO_AGENT_TURN_TIMEOUT_SECONDS, 1),
+        // Wall-clock research budget per orchestration turn, enforced on the
+        // dispatched workers (subAgent.js). 0 disables. Not the same thing as
+        // turnTimeoutSeconds above, which is message composition.
+        turnDeadlineSeconds: num(e.KELABO_AGENT_TURN_DEADLINE_SECONDS, 180),
       },
     },
     retentionDays: num(e.KELABO_RETENTION_DAYS, 30),

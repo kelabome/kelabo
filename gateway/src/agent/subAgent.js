@@ -1,7 +1,12 @@
 import { subAgentSystemPrompt } from "./persona.js";
-import { addUsage } from "./llm.js";
+import { addUsage, LLM_TIMEOUT_MS } from "./llm.js";
+import { withLlmRetry } from "./llmRetry.js";
 
 const MAX_TOOL_ITERATIONS = 16;
+// The force-conclude call runs even when the deadline has passed — it is the
+// difference between a late partial answer and nothing — so it gets its own
+// small, fixed budget rather than the (exhausted) remainder of the deadline.
+const CONCLUDE_BUDGET_MS = 45_000;
 
 // Extracts the last balanced JSON object from a model reply (tolerates prose or
 // reasoning text before/after it).
@@ -32,7 +37,8 @@ function extractJsonObject(text) {
 const TOOLS = [
   {
     name: "web_search",
-    description: "Search the public web. Returns [{title,url,snippet}].",
+    description:
+      "Search the public web. Returns [{title,url,snippet}], or {error} when the search itself failed — an error means the TOOL failed, not that no results exist.",
     input_schema: {
       type: "object",
       properties: { query: { type: "string", description: "The search query" } },
@@ -123,7 +129,7 @@ export function partialAnswer(text) {
  * is never reused — the caller keeps only the returned result.
  */
 export class SubAgent {
-  constructor({ llm, model, webSearch, webFetch, mcpQuery, capabilities, mcp, language, log, debug, turnId, onProgress }) {
+  constructor({ llm, model, webSearch, webFetch, mcpQuery, capabilities, mcp, language, deadlineAt, log, debug, turnId, onProgress }) {
     this.llm = llm;
     this.model = model;
     this.webSearch = webSearch;
@@ -136,6 +142,12 @@ export class SubAgent {
     // The language the ANSWER must be written in — the requester's, not the
     // sources'. Empty falls back to mirroring the brief's own language.
     this.language = language ?? "";
+    // Wall-clock deadline (epoch ms) for this worker's research. Before it,
+    // `deadline_ms` was only prompt text nothing enforced (docs 21 §3.2) and
+    // the sole bound was 16 LLM round trips — a pathological worker ran for
+    // minutes while its kelabo's queue sat behind it. Past the deadline the
+    // loop stops and force-concludes from what was gathered.
+    this.deadlineAt = Number.isFinite(deadlineAt) ? deadlineAt : Infinity;
     this.log = log;
     this.debug = debug;
     this.turnId = turnId; // parent orchestration turn (for grouping in the debug UI)
@@ -188,6 +200,12 @@ export class SubAgent {
     });
   }
 
+  /** ms left before this worker's deadline, floored so a call started just
+   *  inside the deadline still has something to work with. */
+  remainingMs(floor = 15_000) {
+    return this.deadlineAt === Infinity ? LLM_TIMEOUT_MS : Math.max(this.deadlineAt - Date.now(), floor);
+  }
+
   /** @param {object} brief - the dispatch_subagent brief */
   async run(brief, kelaboId) {
     const system = subAgentSystemPrompt({ capabilities: this.capabilities, mcpServers: this.mcpServers, language: this.language });
@@ -197,6 +215,15 @@ export class SubAgent {
     let text = "";
     let concluded = false; // the model produced a final (no-tool) turn on its own
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+      if (Date.now() >= this.deadlineAt) {
+        // Out of time is a conclusion trigger, not a failure: whatever was
+        // gathered so far goes to forceConclude, which demands a committed
+        // result from it. A late partial answer beats a spinner that ends in
+        // "nothing was posted".
+        this.log?.("subagent_deadline", { kelaboId, taskId: brief.task_id, iteration: i });
+        this.progress("Out of time — concluding from what was gathered…");
+        break;
+      }
       this.progress(i === 0 ? "Planning the lookup…" : "Reading what came back…");
       this.debug?.(kelaboId, {
         kind: "subagent",
@@ -209,14 +236,30 @@ export class SubAgent {
         messages: clipMessages(messages),
         iteration: i + 1,
       });
-      const res = await this.llm.completeRaw({
-        model: this.model,
-        system,
-        messages,
-        tools,
-        maxTokens: 2048,
-        onDelta: (t) => this.streamDelta(t),
-      });
+      let res;
+      try {
+        // One retry on a transient provider failure; a failure that survives
+        // it breaks OUT of the loop rather than throwing — everything already
+        // gathered still reaches forceConclude instead of being discarded as
+        // an error result with none of the research in it.
+        res = await withLlmRetry(
+          () =>
+            this.llm.completeRaw({
+              model: this.model,
+              system,
+              messages,
+              tools,
+              maxTokens: 2048,
+              timeoutMs: Math.min(LLM_TIMEOUT_MS, this.remainingMs()),
+              onDelta: (t) => this.streamDelta(t),
+            }),
+          { log: this.log, event: "subagent_llm_retry", fields: { kelaboId, taskId: brief.task_id, iteration: i + 1 } }
+        );
+      } catch (err) {
+        this.log?.("subagent_llm_failed", { kelaboId, taskId: brief.task_id, iteration: i + 1, error: err.message });
+        this.debug?.(kelaboId, { kind: "subagent", phase: "loop_error", turnId: this.turnId, taskId: brief.task_id, raw: err.message, iteration: i + 1 });
+        break;
+      }
       text = res.text;
       this.usage = addUsage(this.usage, res.usage);
       this.debug?.(kelaboId, {
@@ -284,6 +327,10 @@ export class SubAgent {
         system,
         messages: convo,
         maxTokens: 1024,
+        // Fixed small budget, deliberately NOT the deadline remainder: this
+        // call runs precisely when the deadline is spent, and it is the last
+        // chance to turn gathered research into an answer.
+        timeoutMs: CONCLUDE_BUDGET_MS,
         // The reply is one JSON object by instruction; JSON mode makes the
         // provider enforce it, so this second round trip stops failing to
         // parse — which is what used to turn one extra call into a lost turn.
@@ -305,7 +352,11 @@ export class SubAgent {
     try {
       if (toolCall.name === "web_search") {
         const results = await this.webSearch(String(toolCall.input?.query ?? ""));
-        for (const r of results ?? []) if (r.url) this.sources.push({ title: r.title || r.url, url: r.url });
+        // A failed search now comes back as {error}, not [] — only a real
+        // result list contributes sources.
+        if (Array.isArray(results)) {
+          for (const r of results) if (r.url) this.sources.push({ title: r.title || r.url, url: r.url });
+        }
         return JSON.stringify(results);
       }
       if (toolCall.name === "web_fetch") {

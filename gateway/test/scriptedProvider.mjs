@@ -38,7 +38,10 @@ function respond(req) {
   }
 
   // ---- MINUTES (summary system prompt) -----------------------------------
-  if (system.includes("end-of-kelabo minutes")) {
+  // Matched on the prompt's opening line; the old marker ("end-of-kelabo
+  // minutes") was a phrase the persona no longer contains, so the harness fell
+  // through to the default reply and printed `null` minutes.
+  if (system.includes("writing the minutes of the kelabo")) {
     return {
       text: JSON.stringify({
         title: "Planning sync",

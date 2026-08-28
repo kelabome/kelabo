@@ -371,6 +371,13 @@ export const frameRequestSchema = z.object({
   kind: z.enum(["summary", "archive"]),
   requestId: z.string().min(1),
   kelaboId: z.string().min(1),
+  // On `summary`: the language the minutes should be written in, as an English
+  // language name ("Chinese"), resolved from the host's settings by the
+  // Gateway. Absent when unknown — the bridge then asks for the transcript's
+  // dominant language, mirroring the server agent's own fallback. Without this
+  // the dev-mode minutes language was undefined behaviour: whatever language
+  // the developer's model happened to pick (docs 21 §4.3).
+  language: z.string().optional(),
 });
 
 export const frameBoardSchema = z.object({

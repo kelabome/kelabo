@@ -1,5 +1,12 @@
 # Component: Main-agent / Sub-agent orchestration
 
+> **Design here, behaviour in [21-agent-behaviour.md](../21-agent-behaviour.md).**
+> Several rules specified below — `constraints.deadline_ms`,
+> `constraints.max_tool_calls`, the required `language` field, "re-dispatch once
+> with a sharper brief" — are stated in a system prompt and **not enforced by
+> any code**. Doc 21 §3 lists which is which; §4 traces the failures that
+> follow.
+
 Design for the two-tier agent used in **server-agent mode** (the worker inside the
 Gateway ECS task; see [05-agent-mcp.md](./05-agent-mcp.md)). It replaces the earlier
 "single strong model that also calls tools and re-judges silence" design.

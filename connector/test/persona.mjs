@@ -128,6 +128,17 @@ test("the core fits in what Claude Code will actually keep", () => {
   );
 });
 
+test("every untrusted envelope tag is named by the gate, in both halves", () => {
+  // envelope.js marks four tags untrusted="true"; a gate that lists fewer
+  // covers less than the envelopes carry. It had drifted: the full persona
+  // named only two, and neither half named <kelabo-journey-briefing> —
+  // journey content is multi-contributor free text and needs the gate most.
+  for (const tag of ["<kelabo-transcript>", "<kelabo-briefing>", "<kelabo-notice>", "<kelabo-journey-briefing>"]) {
+    assert.ok(FLAT.includes(tag), `full persona's gate lost ${tag}`);
+    assert.ok(CORE_FLAT.includes(tag), `core persona's gate lost ${tag}`);
+  }
+});
+
 test("the injection gate is in the half that cannot be truncated", () => {
   // This is a security control, not guidance. A control that only arrives in a
   // tool result is one an attacker can hope has been compacted away by the time

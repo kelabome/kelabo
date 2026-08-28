@@ -88,11 +88,18 @@ export function createBinding({ tunnel, adapter, maxBacklog, log = () => {}, now
     timer.unref?.();
     awaitingMinutes = { requestId: frame.requestId, kelaboId: frame.kelaboId, timer };
 
+    // The Gateway resolves the minutes language (the host's, when known) and
+    // sends it on the request frame — the same rule server-mode minutes
+    // follow. Without the sentence, the language of a dev-mode record was
+    // whatever the developer's own model happened to pick.
+    const languageRule = frame.language
+      ? `Write every string value in ${frame.language} — the host's language — translating what was said as you write; proper nouns, code and figures keep their original form.`
+      : "Write in the dominant language of the transcript.";
     // A real turn, not a silent one: producing the minutes is the work.
     await inject(
       noticeEnvelope(
         frame.kelaboId,
-        "The kelabo has ended. Write the minutes now and pass them to kelabo_minutes as a single JSON object. Do not call kelabo_post."
+        `The kelabo has ended. Write the minutes now and pass them to kelabo_minutes as a single JSON object. ${languageRule} Do not call kelabo_post.`
       ),
       { silent: false, kelaboId: frame.kelaboId }
     );

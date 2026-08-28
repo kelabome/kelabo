@@ -13,11 +13,17 @@ const FETCH_MAX_BYTES = 64_000;
 const FETCH_MAX_CHARS = 8_000;
 const MCP_BUDGET_MS = 20_000;
 
+// A failed search must not look like an empty one. Returning `[]` on error
+// read to the model as "nothing exists on the web about this", which sent it
+// guessing URLs for web_fetch — each 403/404 costing a full LLM iteration.
+// An `{error}` object (the same shape web_fetch already uses) tells it the
+// TOOL failed, which it handles sensibly: retries differently or reports the
+// gap instead of concluding the fact does not exist.
 export function createWebSearch({ apiKey, log } = {}) {
   if (!apiKey) {
     return async function webSearch() {
       log?.("web_search_unavailable", { reason: "no_api_key" });
-      return [];
+      return { error: "search_unavailable: no search API key is configured" };
     };
   }
   return async function webSearch(query) {
@@ -38,7 +44,7 @@ export function createWebSearch({ apiKey, log } = {}) {
       }));
     } catch (err) {
       log?.("web_search_failed", { error: err.message });
-      return [];
+      return { error: `search_failed: ${err.message}` };
     } finally {
       clearTimeout(timer);
     }

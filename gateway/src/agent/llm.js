@@ -1,6 +1,19 @@
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
+// Every provider call gets a wall-clock bound, here rather than at each call
+// site. `req.signal` was always forwarded to fetch, but no caller ever set
+// one — so a stalled provider connection held its turn open until the socket
+// died, and (one turn per kelabo) held every later question in that kelabo
+// behind it. Callers with a longer legitimate ceiling (the minutes, at 8192
+// output tokens) pass `timeoutMs`; a caller-supplied `signal` wins outright.
+// The timeout covers the whole call including streaming, not just connect.
+export const LLM_TIMEOUT_MS = 120_000;
+
+function callSignal(req) {
+  return req.signal ?? AbortSignal.timeout(req.timeoutMs ?? LLM_TIMEOUT_MS);
+}
+
 // Dump the exact request/response bodies exchanged with the provider. Gated
 // behind KELABO_LLM_WIRE_LOG=1 because raw prompts are large and may contain
 // kelabo content — opt-in only. Logs go through the same structured logger as
@@ -137,7 +150,7 @@ function anthropicProvider(modelConfig, apiKey, log) {
           "anthropic-version": ANTHROPIC_VERSION,
         },
         body: JSON.stringify(body),
-        signal: req.signal,
+        signal: callSignal(req),
       });
     } catch (err) {
       wire?.error(wireCtx, err);
@@ -341,7 +354,7 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
           ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
         },
         body: JSON.stringify(body),
-        signal: req.signal,
+        signal: callSignal(req),
       });
     } catch (err) {
       wire?.error(wireCtx, err);

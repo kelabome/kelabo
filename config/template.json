@@ -78,13 +78,14 @@
         "desiredCount": 1,
         "imageTag": "latest",
         "agent": {
-          "maxConcurrentRuns": 4,
+          "maxConcurrentRuns": 0,
           "maxDispatchPerTurn": 3,
           "sensitivity": "medium",
           "maxContributionsPerMinute": 3,
           "cooldownSeconds": 45,
           "rollingWindowSize": 60,
-          "turnTimeoutSeconds": 1
+          "turnTimeoutSeconds": 1,
+          "turnDeadlineSeconds": 180
         }
       },
       "otp": {
@@ -168,13 +169,14 @@
         "desiredCount": 1,
         "imageTag": "latest",
         "agent": {
-          "maxConcurrentRuns": 4,
+          "maxConcurrentRuns": 0,
           "maxDispatchPerTurn": 3,
           "sensitivity": "medium",
           "maxContributionsPerMinute": 3,
           "cooldownSeconds": 45,
           "rollingWindowSize": 60,
-          "turnTimeoutSeconds": 1
+          "turnTimeoutSeconds": 1,
+          "turnDeadlineSeconds": 180
         }
       },
       "otp": {
@@ -259,13 +261,14 @@
         "desiredCount": 1,
         "imageTag": "latest",
         "agent": {
-          "maxConcurrentRuns": 8,
+          "maxConcurrentRuns": 0,
           "maxDispatchPerTurn": 3,
           "sensitivity": "medium",
           "maxContributionsPerMinute": 3,
           "cooldownSeconds": 45,
           "rollingWindowSize": 60,
-          "turnTimeoutSeconds": 1
+          "turnTimeoutSeconds": 1,
+          "turnDeadlineSeconds": 180
         }
       },
       "otp": {

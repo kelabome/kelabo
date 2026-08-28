@@ -519,10 +519,13 @@ await test("progress updates keep one card rather than stacking new ones", async
 
 await test("a summary request asks for a turn, and kelabo_minutes answers it", async () => {
   const before = injected.length;
-  send({ type: "request", kind: "summary", requestId: "r-1", kelaboId: KELABO });
+  send({ type: "request", kind: "summary", requestId: "r-1", kelaboId: KELABO, language: "Japanese" });
   const ask = await waitFor(() => injected.slice(before).find((i) => i.text.includes("kelabo_minutes")));
   // Producing the minutes is the work, so this one is not silent.
   assert.equal(ask.silent, false);
+  // The Gateway resolved the host's language and it reaches the agent as an
+  // instruction — before this, dev-mode minutes language was undefined.
+  assert.match(ask.text, /Write every string value in Japanese/);
 
   const out = await tools.minutes({ minutes: '{"topics":[]}' });
   assert.match(out, /not posted to the board/);

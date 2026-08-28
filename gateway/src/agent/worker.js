@@ -4,6 +4,7 @@ import { createLlmProvider } from "./llm.js";
 import { TriggerGate } from "./gate.js";
 import { MainAgent } from "./mainAgent.js";
 import { createWebSearch, createWebFetch, createMcpQuery } from "./subagents.js";
+import { hasCapacity } from "./schedule.js";
 
 const log = (event, fields) => parentPort.postMessage({ type: "log", event, fields });
 const debug = (kelaboId, entry) => parentPort.postMessage({ type: "debug", kelaboId, entry: { at: Date.now(), ...entry } });
@@ -82,6 +83,10 @@ function onRename(msg) {
   for (const u of ctx.transcript) {
     if (u.speaker === msg.from) u.speaker = msg.to;
   }
+  // The transcript array feeds FUTURE turns; TRANSCRIPT lines already in the
+  // MainAgent's persistent thread carry the old label and must be rewritten
+  // too, or the model's memory and the minutes disagree on who said what.
+  ctx.mainAgent.renameSpeaker(msg.from, msg.to);
 }
 
 function init(msg) {
@@ -97,8 +102,14 @@ function init(msg) {
     gate: new TriggerGate({ llm: small, smallModel: modelConfig.smallModel, knobs, log, debug }),
     webSearch: createWebSearch({ apiKey: webSearchKey, log }),
     webFetch: createWebFetch({ log }),
-    maxConcurrent: knobs.maxConcurrentRuns ?? 4,
+    // 0 (the default) = unlimited across kelabos. The real limiter is the
+    // one-turn-per-kelabo rule below; a positive value is an opt-in valve for
+    // deployments on a low-quota provider key (see schedule.js).
+    maxConcurrent: knobs.maxConcurrentRuns ?? 0,
     maxDispatchPerTurn: knobs.maxDispatchPerTurn ?? 3,
+    // Research deadline per turn (0 disables). Bounds how long one question
+    // can hold its kelabo's one-turn slot — see mainAgent.js.
+    turnDeadlineMs: (knobs.turnDeadlineSeconds ?? 180) * 1000,
   };
   log("agent_worker_ready", { provider: modelConfig.provider, model: modelConfig.model, smallModel: modelConfig.smallModel });
 }
@@ -123,6 +134,7 @@ function makeMainAgent(ctx) {
       mcp: ctx.mcp,
     },
     maxDispatchPerTurn: runtime.maxDispatchPerTurn,
+    turnDeadlineMs: runtime.turnDeadlineMs,
     hostLanguage: ctx.hostLanguage,
     history: ctx.history,
     journeys: ctx.journeys,
@@ -194,6 +206,10 @@ async function onCaption(msg) {
     verdict: decision.verdict,
     // Context-aware standalone lookup query produced by the gate.
     query: decision.query,
+    // The requester's language as the gate heard it — the fallback for briefs
+    // the orchestrator dispatches without setting one (docs 21 §4.2). Empty on
+    // an @kelabo bypass, where no classification ran.
+    language: decision.language || "",
     // Fixed here rather than in the MainAgent so the board can react the instant
     // the gate says yes. The orchestrator's own first call takes a second or
     // two, and a run can sit in the queue behind others — from the room's side
@@ -203,8 +219,15 @@ async function onCaption(msg) {
   });
 }
 
+// How long a queued job stays valid. A job that has waited this long is being
+// answered about a conversation that has moved on: its gate query is stale,
+// and the transcript it would run against is not the one that asked. Landing
+// its card with a reason beats running late and answering the wrong moment.
+const JOB_TTL_MS = 120_000;
+
 function enqueueRun(job) {
-  const queued = activeRuns >= runtime.maxConcurrent || runningKelabos.has(job.kelaboId);
+  job.enqueuedAt = Date.now();
+  const queued = !hasCapacity(activeRuns, runtime.maxConcurrent) || runningKelabos.has(job.kelaboId);
   parentPort.postMessage({
     type: "contribution",
     kelaboId: job.kelaboId,
@@ -236,7 +259,18 @@ function enqueueRun(job) {
 const runningKelabos = new Set();
 
 function pumpQueue() {
-  while (activeRuns < runtime.maxConcurrent && runQueue.length) {
+  // Expire jobs that have waited past usefulness BEFORE picking work, so a
+  // long-held queue drains to its live entries rather than replaying history.
+  const now = Date.now();
+  for (let i = runQueue.length - 1; i >= 0; i--) {
+    const job = runQueue[i];
+    const waitedMs = now - (job.enqueuedAt ?? now);
+    if (waitedMs <= JOB_TTL_MS) continue;
+    runQueue.splice(i, 1);
+    log("agent_run_expired", { kelaboId: job.kelaboId, waitedMs });
+    emitSkipped(job, "This lookup waited too long behind other work and was dropped — ask again if it still matters.");
+  }
+  while (hasCapacity(activeRuns, runtime.maxConcurrent) && runQueue.length) {
     // Skip past jobs whose kelabo is busy rather than blocking the queue head;
     // they run when that kelabo's current turn finishes.
     const i = runQueue.findIndex((j) => !runningKelabos.has(j.kelaboId));
@@ -244,6 +278,9 @@ function pumpQueue() {
     const [job] = runQueue.splice(i, 1);
     runningKelabos.add(job.kelaboId);
     activeRuns++;
+    // How long the queue held this job — the number that says whether the
+    // concurrency valve is actually the binding constraint (docs 21 §1.2).
+    log("agent_run_started", { kelaboId: job.kelaboId, queueWaitMs: Date.now() - (job.enqueuedAt ?? Date.now()) });
     executeRun(job)
       .catch((err) => {
         log("agent_run_failed", { kelaboId: job.kelaboId, error: err.message });
@@ -290,6 +327,7 @@ async function executeRun(job) {
     kelaboId: job.kelaboId,
     trigger: job.trigger,
     query: job.query,
+    language: job.language,
     transcript: [...ctx.transcript],
     turnId: job.turnId,
     cardId: job.cardId,
