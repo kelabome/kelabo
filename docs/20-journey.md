@@ -1409,6 +1409,16 @@ Create, edit and delete all return and fan out **the same message object**,
 and the client upserts by `msgId`. Three events for one row is how a client
 ends up with two copies of a message it already had.
 
+For most of this feature's life only the *return* half was true.
+`fanOutJourneyMessage` was called from `putJourneyMessage` alone, so an edit or
+a delete reached other people only when the 45–60s poll (§19.10) next ran —
+long enough that a correction read as the author having said the wrong thing
+and then said nothing. It was invisible in review because the sentence above
+was already written, and invisible in use because the poll eventually fixed it.
+All three paths fan out now. The reducer needed no change: it was already
+ordering by `deletedAt || editedAt || at` and refusing stale deliveries, which
+is exactly what makes a duplicated or late edit a no-op.
+
 The reducer is `spa/src/chat/messageStore.js` — pure, node-tested
 (`spa/test/journeyLegs.mjs`), for the same reason the transcript modules are.
 It sorts by `msgId` rather than `at` (a total order versus a partial one) and

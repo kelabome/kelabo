@@ -1198,7 +1198,21 @@ export async function editJourneyMessage(c, journeyId, legId, msgId, { text, ide
       ExpressionAttributeValues: { ":text": text, ":at": editedAt },
     })
   );
-  return { ok: true, message: toWireMessage({ ...existing, text, editedAt }) };
+  const message = toWireMessage({ ...existing, text, editedAt });
+  // Fanned like a new message, and for the same reason. Docs 20 §19.9 has
+  // always said create, edit and delete "return and fan out the same message
+  // object"; only the return half was true, so a correction sat invisible to
+  // everyone else until the 45-60s poll caught it. The reducer on the other
+  // end was already built for this — `apply` upserts by `msgId` and orders by
+  // `deletedAt || editedAt || at`, so a late or duplicate delivery of an edit
+  // is a no-op rather than a message that flickers back to its old text.
+  //
+  // Same placement as the create path: last, outside the write, and never in
+  // its path.
+  fanOutJourneyMessage(c, journeyId, message).catch((err) =>
+    c.logError("journey_message_fanout_failed", err, { journeyId, legId, msgId, action: "edit" })
+  );
+  return { ok: true, message };
 }
 
 /**
@@ -1229,7 +1243,11 @@ export async function deleteJourneyMessage(c, journeyId, legId, msgId, { identit
       ExpressionAttributeValues: { ":at": deletedAt, ":by": identity },
     })
   );
-  return { ok: true, message: toWireMessage({ ...existing, text: "", deletedAt }) };
+  const message = toWireMessage({ ...existing, text: "", deletedAt });
+  fanOutJourneyMessage(c, journeyId, message).catch((err) =>
+    c.logError("journey_message_fanout_failed", err, { journeyId, legId, msgId, action: "delete" })
+  );
+  return { ok: true, message };
 }
 
 /**
