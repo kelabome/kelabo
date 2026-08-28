@@ -54,6 +54,40 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
 
   const current = useMemo(() => legs?.find(t => t.legId === legId) || null, [legs, legId])
 
+  // --- filtering the rail ----------------------------------------------------
+  //
+  // A journey that has run for months has a long list, and the leg somebody
+  // wants is usually one they can name. Purely a view over what is already
+  // loaded: no fetch, no server round trip, instant.
+  //
+  // It filters what is *rendered* and nothing else. The selection effect below
+  // still reads the full `legs`, deliberately — feeding it a filtered list
+  // would make typing into this box silently switch which conversation you
+  // are reading.
+  const [filtering, setFiltering] = useState(false)
+  const [filter, setFilter] = useState('')
+  const filterRef = useRef(null)
+
+  const closeFilter = () => {
+    setFiltering(false)
+    setFilter('')
+  }
+  const toggleFilter = () => (filtering ? closeFilter() : setFiltering(true))
+  useEffect(() => {
+    if (filtering) filterRef.current?.focus()
+  }, [filtering])
+
+  const visibleLegs = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return legs || []
+    // Substring, case-insensitive — the same rule the record and journey
+    // searches use, so "what counts as a match" means one thing in this
+    // product.
+    return (legs || []).filter(t => (t.title || '').toLowerCase().includes(q))
+  }, [legs, filter])
+
+  const hiddenCount = (legs?.length || 0) - visibleLegs.length
+
   // The newest id we hold, as a ref: the poll closure must read it without
   // being torn down and rebuilt on every message.
   const newestRef = useRef('')
@@ -308,15 +342,49 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
       <aside className="leg-rail">
         <div className="leg-rail-head">
           <span className="menu-label">Legs</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            iconOnly
+            onClick={toggleFilter}
+            title={filtering ? 'Close filter' : 'Filter legs'}
+            aria-label={filtering ? 'Close filter' : 'Filter legs'}
+            aria-expanded={filtering}
+          >
+            <Icon name={filtering ? 'x' : 'search'} size={15} />
+          </Button>
           {isActive && (
             <Button variant="ghost" size="sm" iconOnly onClick={newLeg} title="New leg" aria-label="New leg">
               <Icon name="plus" size={15} />
             </Button>
           )}
         </div>
+
+        {filtering && (
+          <div className="leg-filter">
+            <Icon name="search" size={13} />
+            <input
+              ref={filterRef}
+              className="input"
+              value={filter}
+              placeholder="Filter legs…"
+              aria-label="Filter legs by name"
+              onChange={e => setFilter(e.target.value)}
+              // Escape closes and clears, so the list is never left filtered
+              // by a box the reader has already dismissed from their mind.
+              onKeyDown={e => {
+                if (e.key === 'Escape') closeFilter()
+              }}
+            />
+          </div>
+        )}
+
         <div className="leg-rail-list">
           {legs === null && <div className="menu-empty">Loading…</div>}
-          {legs?.map(t => (
+          {legs !== null && visibleLegs.length === 0 && (
+            <div className="menu-empty">{filter.trim() ? 'No leg matches that.' : 'No legs yet.'}</div>
+          )}
+          {visibleLegs.map(t => (
             <button
               type="button"
               key={t.legId}
@@ -335,6 +403,14 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
               ) : null}
             </button>
           ))}
+          {/* Says plainly that the list is a subset. Without it a filtered
+              rail and a journey with three legs look identical, and somebody
+              concludes the rest are gone. */}
+          {hiddenCount > 0 && (
+            <div className="leg-filter-note">
+              {hiddenCount} more hidden by the filter
+            </div>
+          )}
         </div>
       </aside>
 

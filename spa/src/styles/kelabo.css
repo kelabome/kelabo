@@ -2195,8 +2195,38 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.leg-rail-head .menu-label { padding: 0; }
+/* The label takes the slack so the two icon buttons sit together at the far
+   edge, rather than the filter drifting into the middle of the row. */
+.leg-rail-head .menu-label { padding: 0; flex: 1; min-width: 0; }
 .leg-rail-list { flex: 1; overflow-y: auto; padding: var(--space-1); }
+
+/* Filter the rail by leg name. Revealed by the magnifier rather than always
+   present: a journey with three legs does not need a search box, and the rail
+   is 14rem wide. */
+.leg-filter {
+  display: flex; align-items: center; gap: 6px;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.leg-filter .input {
+  flex: 1; min-width: 0;
+  height: 1.75rem; padding: 0 var(--space-1);
+  border: 0; background: none;
+  font-size: var(--text-sm);
+}
+/* The row already reads as an input; a second focus ring inside it is noise. */
+.leg-filter .input:focus { outline: none; box-shadow: none; }
+.leg-filter:focus-within { color: var(--text-2); }
+
+/* Says the list is a subset. Without it a filtered rail and a short journey
+   look identical, and somebody concludes the other legs are gone. */
+.leg-filter-note {
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-3);
+  font-size: var(--text-2xs);
+}
 
 .leg-item {
   width: 100%;
