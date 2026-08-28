@@ -66,6 +66,13 @@ function makeDb(seed) {
         // Only the shapes these handlers actually emit.
         if (/title = :title/.test(expr)) {
           item.title = v[":title"];
+        } else if (/messageCountAtRead = if_not_exists/.test(expr)) {
+          // The author's own message cancelling itself out of their badge.
+          // Listed before the `messageCount` branch would be tempting, but the
+          // two are distinguished by the attribute name, not by order —
+          // `messageCount = ` does not appear in `messageCountAtRead = `.
+          item.messageCountAtRead = (existing.messageCountAtRead || 0) + 1;
+          item.threadId = existing.threadId ?? v[":tid"];
         } else if (/messageCount = if_not_exists/.test(expr)) {
           item.messageCount = (existing.messageCount || 0) + 1;
           item.lastMessageAt = v[":at"];
@@ -272,8 +279,14 @@ async function main() {
   assert.equal(read.status, 200);
   const after = await call(port, "GET", messages, { identity: "alice@example.com" });
   assert.equal(after.body.unreadCount, 0);
-  // Reading is per identity, never shared.
+  // Bob's own count is already 0 — he wrote that message, and your own is
+  // never news to you — so proving the cursor is per identity needs somebody
+  // else to speak. Alice does, and now the two disagree in the right
+  // direction.
+  assert.equal((await call(port, "GET", messages, { identity: "bob@example.com" })).body.unreadCount, 0);
+  await call(port, "POST", messages, { identity: "alice@example.com", body: { text: "and one from me" } });
   assert.equal((await call(port, "GET", messages, { identity: "bob@example.com" })).body.unreadCount, 1);
+  assert.equal((await call(port, "GET", messages, { identity: "alice@example.com" })).body.unreadCount, 0);
   ok("advancing the cursor clears the badge, for that identity alone");
 
   // The id is a path segment — this is why it is hyphen-separated rather
@@ -298,8 +311,8 @@ async function main() {
   assert.equal(gone.status, 200);
   assert.equal(gone.body.message.text, "");
   const afterDelete = await call(port, "GET", messages, { identity: "alice@example.com" });
-  assert.equal(afterDelete.body.messages.length, 1, "the tombstone keeps its place");
-  assert.equal(afterDelete.body.messageCount, 1, "the counter never moves");
+  assert.equal(afterDelete.body.messages.length, 2, "the tombstone keeps its place");
+  assert.equal(afterDelete.body.messageCount, 2, "the counter never moves");
   ok("the lead may delete it, and the row survives as a tombstone");
 
   // Completing a journey freezes the channel and nothing else — this is the
@@ -411,7 +424,9 @@ async function main() {
   const both = await call(port, "GET", threads, { identity: "alice@example.com" });
   const byId = Object.fromEntries(both.body.threads.map(t => [t.threadId, t]));
   assert.equal(byId[second].unread, 1);
-  assert.equal(byId[T].unread, 1, "only what alice has not read since her last mark");
+  // Zero, and worth being precise about why: everything added to the default
+  // thread since Alice last marked it read was written by Alice.
+  assert.equal(byId[T].unread, 0, "her own messages are not unread to her");
   ok("threads are isolated, and unread is counted per thread");
 
   assert.equal((await call(port, "GET", `${threads}/nope/messages`, { identity: "bob@example.com" })).status, 404);
@@ -492,6 +507,34 @@ async function main() {
   ok("the author's own other tabs are told as well");
 
   for (const s of [bobStream, strangerStream, aliceStream]) s.res.destroy();
+
+  {
+    // --- the sender never badges themselves --------------------------------
+
+    const fresh = await call(port, "POST", threads, { identity: "alice@example.com", body: { title: "Quiet" } });
+    const quietId = fresh.body.thread.threadId;
+    const quietPath = `${threads}/${quietId}`;
+
+    await call(port, "POST", `${quietPath}/messages`, { identity: "alice@example.com", body: { text: "just me" } });
+    const mine = await call(port, "GET", `${quietPath}/messages`, { identity: "alice@example.com" });
+    assert.equal(mine.body.unreadCount, 0, "the sender sees no badge for their own message");
+    const theirs = await call(port, "GET", `${quietPath}/messages`, { identity: "bob@example.com" });
+    assert.equal(theirs.body.unreadCount, 1, "everyone else does");
+    // And the thread list agrees with the thread — they are the two places the
+    // same number is rendered, and they are computed by different code.
+    const aliceThreads = await call(port, "GET", threads, { identity: "alice@example.com" });
+    assert.equal(aliceThreads.body.threads.find(t => t.threadId === quietId).unread, 0);
+    ok("posting raises no badge on the sender, at the thread or in the list");
+
+    await call(port, "POST", `${quietPath}/messages`, { identity: "bob@example.com", body: { text: "one" } });
+    await call(port, "POST", `${quietPath}/messages`, { identity: "bob@example.com", body: { text: "two" } });
+    const beforeReply = await call(port, "GET", `${quietPath}/messages`, { identity: "alice@example.com" });
+    assert.equal(beforeReply.body.unreadCount, 2);
+    await call(port, "POST", `${quietPath}/messages`, { identity: "alice@example.com", body: { text: "replying" } });
+    const after = await call(port, "GET", `${quietPath}/messages`, { identity: "alice@example.com" });
+    assert.equal(after.body.unreadCount, 2, "replying does not mark Bob's messages read for her");
+    ok("posting cancels your own message without swallowing anyone else's");
+  }
 
   server.close();
   await c.shutdown?.();

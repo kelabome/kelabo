@@ -1284,6 +1284,20 @@ It only works because **`messageCount` never goes down**: an edit does not
 touch it, and a delete is soft (§19.5). A counter that can decrease cannot be
 differenced against a cursor written before the decrease.
 
+**Your own message never raises your own badge.** Posting bumps the author's
+own `messageCountAtRead` by one, cancelling the message out of their count.
+Without it the sender's badge ticks up the instant they hit send —
+`messageCount` grew and their cursor did not — and clears only if they happen
+to be looking at that thread when the mark-read debounce fires; from anywhere
+else in the app it sits there pointing at something they wrote themselves.
+
+It is an increment, not a snapshot of the new total. Snapping the cursor to
+`messageCount` would also mark as read everything *other* people said while
+the author was away, just because they typed. Moving it by exactly one cancels
+their own message and leaves the rest of their unread alone. Skipped for the
+assistant, whose author is not an identity and would otherwise accrete a
+cursor row nobody reads.
+
 The cursor is monotonic server-side (`attribute_not_exists(SK) OR lastReadAt
 < :at`). Two tabs racing, or a client replaying an older position after
 scrolling up, must never push somebody's unread count back up. A message

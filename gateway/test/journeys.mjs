@@ -30,7 +30,7 @@ import {
 } from "../src/journeys.js";
 import { loadJourneyContext, historyStillApplies } from "../src/agent/journeyContext.js";
 import { mainAgentSystemPrompt } from "../src/agent/persona.js";
-import { journeyUnread, cursorsByThread } from "@kelabo/contracts";
+import { journeyUnread, threadUnread, cursorsByThread } from "@kelabo/contracts";
 
 function makeStore(seed = {}) {
   const items = new Map(Object.entries(seed));
@@ -1085,6 +1085,61 @@ await test("mention counters: per person, never your own, and differenced agains
 
   // Unread mentions is the same O(1) difference the message badge uses.
   assert.equal((cursorOf().mentionCount || 0) - (cursorOf().mentionCountAtRead || 0), 2);
+});
+
+await test("your own message never raises your own badge", async () => {
+  const journeyId = "j-own";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const bob = "bob@example.com";
+  const unreadFor = (who) => {
+    const thread = store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`);
+    const cursor = store.items.get(`${journeyPk(journeyId)}|READ#${who}#${T}`);
+    return threadUnread(thread, cursor).unread;
+  };
+
+  await putJourneyMessage(c, journeyId, T, { text: "mine", author: bob });
+  assert.equal(unreadFor(bob), 0, "the sender's own message is not news to them");
+  assert.equal(unreadFor("alice@example.com"), 1, "…but it is to everyone else");
+
+  await putJourneyMessage(c, journeyId, T, { text: "mine too", author: bob });
+  assert.equal(unreadFor(bob), 0);
+});
+
+await test("posting does not swallow what other people said while you were away", async () => {
+  // The reason the author's cursor moves by exactly one rather than being
+  // snapped to the thread's total: a snapshot would mark every message that
+  // arrived since they last looked as read, just because they typed.
+  const journeyId = "j-own-2";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const bob = "bob@example.com";
+  const unreadForBob = () =>
+    threadUnread(
+      store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`),
+      store.items.get(`${journeyPk(journeyId)}|READ#${bob}#${T}`)
+    ).unread;
+
+  await putJourneyMessage(c, journeyId, T, { text: "one", author: "alice@example.com" });
+  await putJourneyMessage(c, journeyId, T, { text: "two", author: "alice@example.com" });
+  await putJourneyMessage(c, journeyId, T, { text: "three", author: "alice@example.com" });
+  assert.equal(unreadForBob(), 3);
+
+  await putJourneyMessage(c, journeyId, T, { text: "sorry, catching up", author: bob });
+  assert.equal(unreadForBob(), 3, "still three — his own does not add, and does not clear theirs");
+});
+
+await test("the assistant's answer does not accrete a cursor row of its own", async () => {
+  const journeyId = "j-own-3";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  await putJourneyMessage(c, journeyId, T, { text: "an answer", author: "kelabo", kind: "assistant" });
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|READ#kelabo#${T}`), undefined);
+  // And it *is* unread for a real person, like any other message.
+  assert.equal(
+    threadUnread(store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`), null).unread,
+    1
+  );
 });
 
 await test("a cursor row created by a mention can still be advanced", async () => {

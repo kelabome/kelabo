@@ -934,6 +934,34 @@ export async function putJourneyMessage(
     )
     .catch((err) => c.logError("journey_message_count_failed", err, { journeyId, msgId }));
 
+  // Your own message is not news to you. Without this the sender's own badge
+  // ticks up the instant they hit send — `messageCount` grew and their cursor
+  // did not — and only clears if they happen to be looking at that thread
+  // when the mark-read debounce fires. From anywhere else in the app it would
+  // sit there indefinitely, pointing at something they wrote themselves.
+  //
+  // An increment, not a snapshot of the new total: bumping their cursor to
+  // `messageCount` would also silently mark as read everything *other* people
+  // said while they were away. Moving it by exactly one cancels their own
+  // message and leaves the rest of their unread alone.
+  //
+  // Skipped for the assistant, whose author is not an identity and would
+  // otherwise accrete a cursor row nobody reads.
+  if (kind !== "assistant") {
+    await c.db
+      .send(
+        new UpdateCommand({
+          TableName: journeysTable(c),
+          Key: { PK: journeyPk(journeyId), SK: readSk(author, threadId) },
+          UpdateExpression:
+            "SET messageCountAtRead = if_not_exists(messageCountAtRead, :zero) + :one, " +
+            "threadId = if_not_exists(threadId, :tid)",
+          ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":tid": threadId },
+        })
+      )
+      .catch((err) => c.logError("journey_author_cursor_bump_failed", err, { journeyId, threadId, msgId }));
+  }
+
   // One bump per person named, on their own cursor row for this thread
   // (§19.8). Never the author's own: naming yourself must not raise your own
   // badge.
