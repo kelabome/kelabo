@@ -154,6 +154,94 @@ export function createJourneys({ config, db, internal }) {
     return { mine, accessible, public: publicJourneys };
   }
 
+  // --- search (docs 20 §11) ---------------------------------------------------
+  //
+  // Same shape as `/records/search`: a free title pass over what discovery
+  // already returned, then a capped second pass that opens candidates for
+  // their body text.
+  //
+  // With one deliberate difference. Records cache their extracted text
+  // forever, and may, because an archive is immutable once written. A
+  // journey's description and board are **mutable** — that justification does
+  // not transfer, and a cache here would serve a description somebody edited
+  // ten minutes ago. So there is no cache, and the cap is correspondingly
+  // tighter: the body pass is a DynamoDB Query per candidate rather than an S3
+  // GET, which is the cheaper half of the trade.
+  const BODY_SCAN_CAP = 20;
+
+  async function searchJourneys({ identity, q }) {
+    const query = String(q || "").trim().toLowerCase();
+    // Same floor the SPA and `/records/search` use — one character matches
+    // most things and is never what somebody meant.
+    if (query.length < 2) return { results: [], bodyCapped: false };
+
+    const { mine, accessible, public: pub } = await listJourneys({ identity });
+    // De-duplicated by id: `mine` and `accessible` cannot overlap, but a
+    // journey can sit in `accessible` with a stale ACCESSOR# row *and* in
+    // `public` after a visibility flip (§3.2), and offering it twice looks
+    // like two journeys with the same name.
+    const byId = new Map();
+    for (const j of [...mine, ...accessible, ...pub]) if (!byId.has(j.journeyId)) byId.set(j.journeyId, j);
+    const all = [...byId.values()];
+
+    const brief = (j) => ({
+      journeyId: j.journeyId,
+      title: j.title,
+      visibility: j.visibility,
+      status: j.status,
+      avatarVariant: j.avatarVariant,
+      health: j.health,
+      progress: j.progress,
+      kelaboCount: j.kelaboCount,
+      updatedAt: j.updatedAt,
+    });
+
+    const results = [];
+    const titleMissed = [];
+    for (const j of all) {
+      if ((j.title || "").toLowerCase().includes(query)) results.push({ ...brief(j), matched: "title" });
+      else titleMissed.push(j);
+    }
+
+    // Most recently touched first — the journey someone is hunting by content
+    // is far more often the one they were in last week than one from a year ago.
+    const candidates = titleMissed.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, BODY_SCAN_CAP);
+    const hits = await Promise.all(
+      candidates.map(async (j) => {
+        const text = await bodyTextOf(j.journeyId).catch(() => "");
+        const idx = text.toLowerCase().indexOf(query);
+        if (idx === -1) return null;
+        const start = Math.max(0, idx - 40);
+        const end = Math.min(text.length, idx + query.length + 60);
+        const snippet = (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+        return { ...brief(j), matched: "body", snippet };
+      })
+    );
+    results.push(...hits.filter(Boolean));
+    results.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    // Honest about bounded coverage, so the SPA can say so rather than let
+    // somebody conclude the thing they are looking for is not there.
+    return { results, bodyCapped: titleMissed.length > candidates.length };
+  }
+
+  /** A journey's searchable body: its current description plus its live board
+   *  messages. Not the timeline — every timeline row is a restatement of one
+   *  of these, so including it would match twice and snippet the summary
+   *  instead of the thing itself. Not documents either: they are the one
+   *  unbounded field here (200,000 chars, §8) and would dominate every
+   *  snippet. */
+  async function bodyTextOf(journeyId) {
+    const [descVersions, boardHeads] = await Promise.all([
+      db.listJourneyDescriptionVersions(journeyId).catch(() => []),
+      db.listBoardMessageHeads(journeyId).catch(() => []),
+    ]);
+    const current = descVersions.reduce((a, b) => ((a?.version || 0) > (b.version || 0) ? a : b), null);
+    const parts = [];
+    if (current?.markdown) parts.push(current.markdown);
+    for (const m of boardHeads) if (!m.archived && m.content) parts.push(m.content);
+    return parts.join(" · ");
+  }
+
   async function getJourney({ journeyId, identity }) {
     const meta = await requireJourney(journeyId);
     const role = await requireMember(meta, identity);
@@ -877,6 +965,7 @@ export function createJourneys({ config, db, internal }) {
   return {
     createJourney,
     listJourneys,
+    searchJourneys,
     getJourney,
     patchJourney,
     completeJourney,

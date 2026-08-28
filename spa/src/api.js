@@ -146,6 +146,10 @@ export const api = {
   // public-tenant-member / private-accessor) is resolved server-side on every
   // call — nothing here decides who may see or write what.
   listJourneys: () => apiRequest('/journeys'),
+  // Titles, then a capped pass over descriptions and board messages — the same
+  // shape as searchRecords, minus its cache: a journey's body is mutable and
+  // an archive's is not (docs 20 §11).
+  searchJourneys: q => apiRequest(`/journeys/search${qs({ q })}`),
   createJourney: body => apiRequest('/journeys', { method: 'POST', body }),
   getJourney: id => apiRequest(`/journeys/${id}`),
   patchJourney: (id, body) => apiRequest(`/journeys/${id}`, { method: 'PATCH', body }),
@@ -195,6 +199,43 @@ export const api = {
   listJourneyReports: id => apiRequest(`/journeys/${id}/reports`),
   getJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`),
   listJourneyContributors: id => apiRequest(`/journeys/${id}/contributors`),
+}
+
+// The journey channel (docs 20 §19). These go to the GATEWAY, not the API —
+// the only journey calls that do. It is the same split the kelabo makes:
+// captions POST to the gateway while kelabos are created over REST, because
+// this is the per-message path and the control plane is a Lambda.
+// Authenticated by the session cookie, like `/presence/stream`.
+export const journeyChat = {
+  /**
+   * One page, plus this identity's own read position in the same response.
+   *
+   * Two cursors, and they are not interchangeable: `before` walks backwards
+   * through history ("load earlier"), `since` returns everything newer
+   * ("what did I miss"). Both exclude the row they name.
+   */
+  messages: (journeyId, { before, since, limit } = {}) =>
+    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages${qs({ before, since, limit })}`),
+  post: (journeyId, text) =>
+    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages`, { method: 'POST', body: { text } }),
+  edit: (journeyId, msgId, text) =>
+    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages/${encodeURIComponent(msgId)}`, {
+      method: 'PATCH',
+      body: { text },
+    }),
+  remove: (journeyId, msgId) =>
+    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages/${encodeURIComponent(msgId)}`, {
+      method: 'DELETE',
+    }),
+  markRead: (journeyId, { at, msgId }) =>
+    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/read`, { method: 'POST', body: { at, msgId } }),
+  // Promote a channel message onto the journey's board (docs 20 §19.7). One
+  // direction only — a board message is never demoted into chat — and
+  // idempotent, so a double click puts one card up, not two.
+  pin: (journeyId, msgId) =>
+    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages/${encodeURIComponent(msgId)}/pin`, {
+      method: 'POST',
+    }),
 }
 
 // Conference audio (docs 15). All of it lives on the Gateway, next to the SSE

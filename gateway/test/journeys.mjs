@@ -12,6 +12,15 @@ import {
   postJourneyBoardMessage,
   bumpJourneyContributor,
   settleKelaboJoin,
+  resolveJourneyAccess,
+  putJourneyMessage,
+  queryJourneyMessages,
+  editJourneyMessage,
+  deleteJourneyMessage,
+  pinJourneyMessage,
+  resolveJourneyMentions,
+  getJourneyReadCursor,
+  advanceJourneyReadCursor,
 } from "../src/journeys.js";
 import { loadJourneyContext, historyStillApplies } from "../src/agent/journeyContext.js";
 import { mainAgentSystemPrompt } from "../src/agent/persona.js";
@@ -72,7 +81,16 @@ function makeStore(seed = {}) {
         const pk = cmd.input.ExpressionAttributeValues[":pk"];
         const skPrefix = cmd.input.ExpressionAttributeValues[":sk"];
         const before = cmd.input.ExpressionAttributeValues[":before"];
-        let out = before
+        // `BETWEEN :lo AND :hi` — inclusive at both ends, exactly as DynamoDB
+        // is, which is what makes the channel's cursor-exclusion worth
+        // testing rather than assuming (queryJourneyMessages drops the cursor
+        // row itself, and would be silently wrong against a fake that
+        // excluded it here).
+        const lo = cmd.input.ExpressionAttributeValues[":lo"];
+        const hi = cmd.input.ExpressionAttributeValues[":hi"];
+        let out = lo !== undefined
+          ? [...items.values()].filter((i) => i.PK === pk && String(i.SK) >= lo && String(i.SK) <= hi)
+          : before
           ? [...items.values()].filter((i) => i.PK === pk && String(i.SK) < before)
           : [...items.values()].filter((i) => i.PK === pk && String(i.SK).startsWith(skPrefix));
         if (cmd.input.FilterExpression === "#type = :type") {
@@ -88,21 +106,50 @@ function makeStore(seed = {}) {
       if (name === "UpdateCommand") {
         const k = key(cmd.input.Key);
         const existing = items.get(k);
-        if (cmd.input.ConditionExpression === "attribute_exists(PK)" && !existing) {
+        const cond = cmd.input.ConditionExpression;
+        const values = cmd.input.ExpressionAttributeValues;
+        const fail = () => {
           const e = new Error("ConditionalCheckFailedException");
           e.name = "ConditionalCheckFailedException";
           throw e;
+        };
+        if ((cond === "attribute_exists(PK)" || cond === "attribute_exists(SK)") && !existing) fail();
+        // The read cursor's monotonic guard (docs 20 §19.3). Written out
+        // rather than pattern-matched loosely: the whole point of the clause
+        // is that a stale `at` is refused, and a fake that accepted it would
+        // make the test that asserts so pass for the wrong reason.
+        //
+        // The `attribute_not_exists(<attr>)` arm matters as much as the rest.
+        // Being mentioned creates a READ# row carrying only a mentionCount, so
+        // the row can exist while `lastReadAt` does not — and DynamoDB
+        // evaluates `lastReadAt < :at` against a missing attribute as FALSE,
+        // not as "unset, so anything is newer". A fake that ignored the arm
+        // would let that cursor advance here and never in production.
+        const monotonic = cond?.match(
+          /^attribute_not_exists\(SK\)(?: OR attribute_not_exists\((\w+)\))? OR (\w+) < (:\w+)$/
+        );
+        if (monotonic && existing) {
+          const [, orAbsent, attr, valueVar] = monotonic;
+          const present = existing[attr] !== undefined;
+          const passes = (orAbsent && !present) || (present && Number(existing[attr]) < Number(values[valueVar]));
+          if (!passes) fail();
         }
-        // SET-only interpreter: plain `:value` substitution, or the one
-        // atomic-counter shape above — enough for every update in this file.
+        // SET (+ optional trailing REMOVE): plain `:value` substitution, or
+        // the atomic-counter shape above.
         const item = { ...existing };
-        const sets = splitClauses(cmd.input.UpdateExpression.replace(/^SET /, ""));
-        for (const clause of sets) {
+        const [, setExpr = "", removeExpr = ""] =
+          cmd.input.UpdateExpression.match(/^SET (.*?)(?:\s+REMOVE\s+(.*))?$/s) || [];
+        for (const clause of splitClauses(setExpr)) {
           const eq = clause.indexOf(" = ");
+          if (eq < 0) continue;
           const lhs = clause.slice(0, eq).trim();
           const rhs = clause.slice(eq + 3).trim();
           const attr = cmd.input.ExpressionAttributeNames?.[lhs] || lhs;
-          item[attr] = evalRhs(rhs, existing, cmd.input.ExpressionAttributeNames, cmd.input.ExpressionAttributeValues);
+          item[attr] = evalRhs(rhs, existing, cmd.input.ExpressionAttributeNames, values);
+        }
+        for (const raw of removeExpr ? splitClauses(removeExpr) : []) {
+          const name_ = raw.trim();
+          delete item[cmd.input.ExpressionAttributeNames?.[name_] || name_];
         }
         item.PK = cmd.input.Key.PK;
         item.SK = cmd.input.Key.SK;
@@ -655,6 +702,351 @@ await test("KELABO_LLM_API_KEY is a bootstrap for an empty credentials table, an
   credentials.set("llm", { apiKey: "sk-from-the-table" });
   const filled = await make();
   assert.deepEqual(await filled.getCredential("llm"), { apiKey: "sk-from-the-table" });
+});
+
+// --- the journey channel (docs 20 §19) --------------------------------------
+//
+// The chat that outlives any one kelabo. What is worth testing here is the
+// handful of decisions that are invisible until they are wrong: the access
+// rule the tunnel and the HTTP handlers now share, the two paging cursors,
+// and the counter/cursor arithmetic the unread badge is differenced from.
+
+const channelSeed = (journeyId, meta = {}) => ({
+  [`${journeyPk(journeyId)}|META`]: {
+    PK: journeyPk(journeyId),
+    SK: "META",
+    journeyId,
+    title: "Q3 Launch",
+    tenantId: "example.com",
+    ownerIdentity: "alice@example.com",
+    visibility: "private",
+    status: "active",
+    ...meta,
+  },
+});
+
+await test("resolveJourneyAccess: owner, public-by-tenant, private-by-roster, and no cross-tenant read", async () => {
+  const journeyId = "j-access";
+  const seed = channelSeed(journeyId);
+  seed[`${journeyPk(journeyId)}|ACCESSOR#bob@example.com`] = {
+    PK: journeyPk(journeyId),
+    SK: "ACCESSOR#bob@example.com",
+    identity: "bob@example.com",
+  };
+  const c = makeContainer({ store: makeStore(seed) });
+  const meta = seed[`${journeyPk(journeyId)}|META`];
+  const role = (identity, tenant = "example.com") => resolveJourneyAccess(c, meta, { identity, tenant });
+
+  assert.equal(await role("alice@example.com"), "owner");
+  assert.equal(await role("bob@example.com"), "member", "on the roster");
+  assert.equal(await role("carol@example.com"), "none", "private, not on the roster");
+  // The tenant fence comes before everything, so even the owner's own address
+  // presented under another tenant is refused.
+  assert.equal(await role("alice@example.com", "other.com"), "none");
+  assert.equal(await resolveJourneyAccess(c, null, { identity: "alice@example.com" }), "none");
+  assert.equal(await resolveJourneyAccess(c, meta, {}), "none", "no identity, no access");
+
+  // Public is tenant-wide — and deliberately does not consult the roster, so
+  // a stale ACCESSOR# row left by a private->public flip stays inert.
+  const publicMeta = { ...meta, visibility: "public" };
+  assert.equal(await resolveJourneyAccess(c, publicMeta, { identity: "carol@example.com", tenant: "example.com" }), "member");
+  assert.equal(await resolveJourneyAccess(c, publicMeta, { identity: "dave@other.com", tenant: "other.com" }), "none");
+});
+
+await test("putJourneyMessage: append-only, sortable ids, and counters that only grow", async () => {
+  const journeyId = "j-post";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+
+  const first = await putJourneyMessage(c, journeyId, { text: "morning", author: "alice@example.com" });
+  const second = await putJourneyMessage(c, journeyId, { text: "any news?", author: "bob@example.com" });
+
+  // The id IS the sort suffix, so lexical order is chronological order — the
+  // property every cursor in this file depends on.
+  assert.ok(first.msgId < second.msgId, "ids sort chronologically");
+  assert.match(first.msgId, /^\d{13}-\w{6}$/);
+  assert.ok(!first.msgId.includes("#"), "ids travel in a URL path");
+  assert.equal(first.kind, "message");
+
+  const meta = store.items.get(`${journeyPk(journeyId)}|META`);
+  assert.equal(meta.messageCount, 2);
+  assert.equal(meta.lastMessageAt, second.at);
+  // `updatedAt` is the journey list's sort key. Chat must not touch it, or
+  // every message reorders everybody's journey list.
+  assert.equal(meta.updatedAt, undefined, "chat does not reorder the journey list");
+});
+
+await test("queryJourneyMessages: `before` walks back, `since` walks forward, and neither repeats its own cursor", async () => {
+  const journeyId = "j-page";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+
+  const sent = [];
+  for (const text of ["one", "two", "three", "four", "five"]) {
+    sent.push(await putJourneyMessage(c, journeyId, { text, author: "alice@example.com" }));
+  }
+
+  // No cursor: the newest page, but always returned oldest-first so the
+  // client appends in display order whichever direction it read.
+  const newest = await queryJourneyMessages(c, journeyId, { limit: 2 });
+  assert.deepEqual(newest.messages.map((m) => m.text), ["four", "five"]);
+  assert.equal(newest.hasMore, true);
+  assert.equal(newest.nextBefore, sent[3].msgId);
+
+  const earlier = await queryJourneyMessages(c, journeyId, { before: newest.nextBefore, limit: 2 });
+  assert.deepEqual(earlier.messages.map((m) => m.text), ["two", "three"]);
+  assert.ok(!earlier.messages.some((m) => m.msgId === newest.nextBefore), "the cursor row is not served twice");
+
+  // `since` is the reconnect shape: everything newer, oldest-first, and it
+  // takes the OLDEST unseen ones so a client can never end up with a hole in
+  // the middle of its history.
+  const missed = await queryJourneyMessages(c, journeyId, { since: sent[1].msgId, limit: 2 });
+  assert.deepEqual(missed.messages.map((m) => m.text), ["three", "four"]);
+  assert.ok(!missed.messages.some((m) => m.msgId === sent[1].msgId), "the cursor row is not served twice");
+
+  const caughtUp = await queryJourneyMessages(c, journeyId, { since: sent[4].msgId });
+  assert.deepEqual(caughtUp.messages, [], "nothing newer than the newest");
+});
+
+await test("queryJourneyMessages: the range stays inside MSG#, never walking into neighbouring rows", async () => {
+  const journeyId = "j-fence";
+  // Rows that sort either side of the MSG# prefix. An unbounded range walks
+  // straight into them — the failure the timeline's own cursor already had,
+  // where the agent received blank entries built from LINK#/META rows.
+  const seed = channelSeed(journeyId);
+  seed[`${journeyPk(journeyId)}|LINK#k1`] = { PK: journeyPk(journeyId), SK: "LINK#k1", kelaboId: "k1" };
+  seed[`${journeyPk(journeyId)}|REPORT#r1`] = { PK: journeyPk(journeyId), SK: "REPORT#r1", reportId: "r1" };
+  const c = makeContainer({ store: makeStore(seed) });
+
+  const only = await putJourneyMessage(c, journeyId, { text: "hello", author: "alice@example.com" });
+  for (const args of [{}, { before: "9999999999999-zzzzzz" }, { since: "0000000000000-000000" }]) {
+    const page = await queryJourneyMessages(c, journeyId, args);
+    assert.deepEqual(page.messages.map((m) => m.msgId), [only.msgId], JSON.stringify(args));
+  }
+});
+
+await test("editJourneyMessage: author-only, and never resurrects a tombstone", async () => {
+  const journeyId = "j-edit";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const msg = await putJourneyMessage(c, journeyId, { text: "teh plan", author: "alice@example.com" });
+
+  // A lead may delete somebody's message but must never rewrite it — which is
+  // why this is `not_message_author`, not the board's author-or-lead code.
+  const byOwner = await editJourneyMessage(c, journeyId, msg.msgId, { text: "the plan", identity: "bob@example.com" });
+  assert.equal(byOwner.ok, false);
+  assert.equal(byOwner.reason, "not_message_author");
+
+  const ok = await editJourneyMessage(c, journeyId, msg.msgId, { text: "the plan", identity: "alice@example.com" });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.message.text, "the plan");
+  assert.ok(ok.message.editedAt >= msg.at);
+  // An edit is not a new message: the badge must not move for a typo fix.
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|META`).messageCount, 1);
+
+  const missing = await editJourneyMessage(c, journeyId, "0000000000000-nope00", { text: "x", identity: "alice@example.com" });
+  assert.equal(missing.reason, "journey_message_not_found");
+
+  await deleteJourneyMessage(c, journeyId, msg.msgId, { identity: "alice@example.com" });
+  const afterDelete = await editJourneyMessage(c, journeyId, msg.msgId, { text: "back", identity: "alice@example.com" });
+  assert.equal(afterDelete.ok, false);
+  assert.equal(afterDelete.reason, "message_deleted");
+});
+
+await test("deleteJourneyMessage: soft, idempotent, author-or-lead, and the counter never moves", async () => {
+  const journeyId = "j-del";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const mine = await putJourneyMessage(c, journeyId, { text: "oops", author: "bob@example.com" });
+
+  assert.equal((await deleteJourneyMessage(c, journeyId, mine.msgId, { identity: "carol@example.com" })).reason, "not_message_author_or_lead");
+
+  const byLead = await deleteJourneyMessage(c, journeyId, mine.msgId, { identity: "alice@example.com", isLead: true });
+  assert.equal(byLead.ok, true);
+  assert.equal(byLead.message.text, "", "the text is gone");
+  assert.ok(byLead.message.deletedAt);
+
+  // The row stays — a message that vanished from the middle of a conversation
+  // would take its replies' context with it, and `messageCount` is the thing
+  // the unread badge is differenced against.
+  const row = store.items.get(`${journeyPk(journeyId)}|MSG#${mine.msgId}`);
+  assert.ok(row, "the row survives");
+  assert.equal(row.text, undefined, "REMOVEd, not blanked");
+  assert.equal(row.deletedBy, "alice@example.com");
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|META`).messageCount, 1);
+
+  // Deleting twice is success, like every other remove/archive on a journey.
+  assert.equal((await deleteJourneyMessage(c, journeyId, mine.msgId, { identity: "bob@example.com" })).ok, true);
+
+  // A tombstone still occupies its place in the page, text emptied.
+  const page = await queryJourneyMessages(c, journeyId, {});
+  assert.equal(page.messages.length, 1);
+  assert.equal(page.messages[0].text, "");
+  assert.ok(page.messages[0].deletedAt);
+});
+
+await test("advanceJourneyReadCursor: monotonic, and the unread count is a difference of two counters", async () => {
+  const journeyId = "j-read";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const me = "bob@example.com";
+
+  // Never opened: everything is unread, with no row to read.
+  assert.equal(await getJourneyReadCursor(c, journeyId, me), null);
+
+  const a = await putJourneyMessage(c, journeyId, { text: "one", author: "alice@example.com" });
+  await putJourneyMessage(c, journeyId, { text: "two", author: "alice@example.com" });
+  const metaAfterTwo = store.items.get(`${journeyPk(journeyId)}|META`);
+  assert.equal(metaAfterTwo.messageCount - 0, 2, "unread before reading anything");
+
+  const first = await advanceJourneyReadCursor(c, journeyId, me, { at: metaAfterTwo.lastMessageAt, msgId: a.msgId, messageCount: 2 });
+  assert.equal(first.advanced, true);
+  const cursor = await getJourneyReadCursor(c, journeyId, me);
+  assert.equal(cursor.messageCountAtRead, 2);
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|META`).messageCount - cursor.messageCountAtRead, 0);
+
+  // Two tabs racing, or a client replaying an older position after scrolling
+  // up: an unread badge that could go back up on its own is worse than one
+  // that is occasionally a moment stale.
+  const stale = await advanceJourneyReadCursor(c, journeyId, me, { at: cursor.lastReadAt - 5000, messageCount: 0 });
+  assert.equal(stale.advanced, false);
+  const unchanged = await getJourneyReadCursor(c, journeyId, me);
+  assert.equal(unchanged.messageCountAtRead, 2, "a stale write moved nothing");
+
+  await putJourneyMessage(c, journeyId, { text: "three", author: "alice@example.com" });
+  const meta = store.items.get(`${journeyPk(journeyId)}|META`);
+  assert.equal(meta.messageCount - unchanged.messageCountAtRead, 1, "one unread");
+});
+
+// --- mentions and pinning (docs 20 §19.7, §19.8) ----------------------------
+
+await test("resolveJourneyMentions: the journey's people, and nobody else", async () => {
+  const journeyId = "j-mention";
+  const seed = channelSeed(journeyId);
+  seed[`${journeyPk(journeyId)}|ACCESSOR#bob@example.com`] = {
+    PK: journeyPk(journeyId),
+    SK: "ACCESSOR#bob@example.com",
+    identity: "bob@example.com",
+  };
+  const store = makeStore(seed);
+  const c = makeContainer({ store });
+  const meta = seed[`${journeyPk(journeyId)}|META`];
+
+  // The lead and the roster.
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@bob look at this"), ["bob@example.com"]);
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@alice look"), ["alice@example.com"]);
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@nobody look"), []);
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "no mentions here"), []);
+
+  // Somebody who has spoken here is mentionable even without a roster row —
+  // "@" in a conversation means the people in it.
+  await putJourneyMessage(c, journeyId, { text: "hi", author: "carol@example.com" });
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@carol too"), ["carol@example.com"]);
+
+  // An email address written out in prose is not a mention of anyone.
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "mail bob@example.com"), []);
+});
+
+await test("resolveJourneyMentions: a public journey accepts a full same-tenant address", async () => {
+  // A public journey has no ACCESSOR# roster at all (membership is a tenant
+  // match computed at read time) and the Gateway cannot enumerate a tenant, so
+  // a full address is the only handle that can resolve for someone who has not
+  // spoken here yet.
+  const journeyId = "j-public";
+  const seed = channelSeed(journeyId, { visibility: "public" });
+  const c = makeContainer({ store: makeStore(seed) });
+  const meta = seed[`${journeyPk(journeyId)}|META`];
+
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@dave@example.com hi"), ["dave@example.com"]);
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@dave hi"), [], "a bare handle cannot resolve");
+  assert.deepEqual(await resolveJourneyMentions(c, journeyId, meta, "@eve@other.com hi"), [], "another tenant");
+});
+
+await test("mention counters: per person, never your own, and differenced against the cursor", async () => {
+  const journeyId = "j-mcount";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const bob = "bob@example.com";
+  const cursorOf = () => store.items.get(`${journeyPk(journeyId)}|READ#${bob}`);
+
+  await putJourneyMessage(c, journeyId, { text: "@bob one", author: "alice@example.com", mentions: [bob] });
+  assert.equal(cursorOf().mentionCount, 1);
+  await putJourneyMessage(c, journeyId, { text: "@bob two", author: "alice@example.com", mentions: [bob] });
+  assert.equal(cursorOf().mentionCount, 2);
+
+  // Naming yourself must not raise your own badge.
+  await putJourneyMessage(c, journeyId, { text: "note to @bob self", author: bob, mentions: [bob] });
+  assert.equal(cursorOf().mentionCount, 2);
+
+  // Unread mentions is the same O(1) difference the message badge uses.
+  assert.equal((cursorOf().mentionCount || 0) - (cursorOf().mentionCountAtRead || 0), 2);
+});
+
+await test("a cursor row created by a mention can still be advanced", async () => {
+  // The regression this exists for: being mentioned creates the READ# row with
+  // a mentionCount and no lastReadAt. A guard of `attribute_not_exists(SK) OR
+  // lastReadAt < :at` then evaluates a missing attribute — which is false — so
+  // the cursor could never advance and the badge stuck at unread forever, for
+  // exactly the people who had been mentioned.
+  const journeyId = "j-stuck";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const bob = "bob@example.com";
+
+  const m = await putJourneyMessage(c, journeyId, { text: "@bob hi", author: "alice@example.com", mentions: [bob] });
+  const before = await getJourneyReadCursor(c, journeyId, bob);
+  assert.equal(before.mentionCount, 1);
+  assert.equal(before.lastReadAt, undefined, "the row exists but has never been read");
+
+  const advanced = await advanceJourneyReadCursor(c, journeyId, bob, { at: m.at, messageCount: 1, mentionCount: 1 });
+  assert.equal(advanced.advanced, true);
+  const after = await getJourneyReadCursor(c, journeyId, bob);
+  assert.equal(after.lastReadAt, m.at);
+  assert.equal(after.mentionCountAtRead, 1, "the mention badge clears too");
+});
+
+await test("pinJourneyMessage: an ordinary board message, with provenance both ways", async () => {
+  const journeyId = "j-pin";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const m = await putJourneyMessage(c, journeyId, { text: "ship date is fixed", author: "bob@example.com" });
+
+  const pinned = await pinJourneyMessage(c, journeyId, m.msgId, { identity: "alice@example.com" });
+  assert.equal(pinned.ok, true);
+
+  const head = store.items.get(`${journeyPk(journeyId)}|BOARDMSG#${pinned.msgId}`);
+  assert.equal(head.content, "ship date is fixed");
+  assert.equal(head.createdBy, "alice@example.com", "the pinner, not the author");
+  assert.equal(head.version, 1);
+  assert.equal(head.archived, false);
+  assert.equal(head.pinnedFrom, m.msgId, "forward provenance");
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|MSG#${m.msgId}`).pinnedAs, pinned.msgId, "back-reference");
+  // It is a real board message: version chain and counter, like any other.
+  assert.ok(store.items.get(`${journeyPk(journeyId)}|BOARDMSG#${pinned.msgId}#V#000001`));
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|META`).boardMessageCount, 1);
+
+  // Idempotent: pinning twice returns the board message already there rather
+  // than putting the same words on the board a second time.
+  const again = await pinJourneyMessage(c, journeyId, m.msgId, { identity: "alice@example.com" });
+  assert.equal(again.msgId, pinned.msgId);
+  assert.equal(again.already, true);
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|META`).boardMessageCount, 1);
+});
+
+await test("pinJourneyMessage: a tombstone has nothing to pin", async () => {
+  const journeyId = "j-pin-del";
+  const store = makeStore(channelSeed(journeyId));
+  const c = makeContainer({ store });
+  const m = await putJourneyMessage(c, journeyId, { text: "oops", author: "bob@example.com" });
+  await deleteJourneyMessage(c, journeyId, m.msgId, { identity: "bob@example.com" });
+
+  const pinned = await pinJourneyMessage(c, journeyId, m.msgId, { identity: "bob@example.com" });
+  assert.equal(pinned.ok, false);
+  assert.equal(pinned.reason, "message_deleted");
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|META`).boardMessageCount, undefined);
+
+  const missing = await pinJourneyMessage(c, journeyId, "0000000000000-nope00", { identity: "bob@example.com" });
+  assert.equal(missing.reason, "journey_message_not_found");
 });
 
 console.log(`\n${passed} passed`);

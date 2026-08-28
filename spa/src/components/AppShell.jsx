@@ -372,8 +372,8 @@ export function AppShell({ children }) {
                 size="sm"
                 iconOnly
                 onClick={() => setSearchOpen(true)}
-                title="Search contacts and kelabos"
-                aria-label="Search contacts and kelabos"
+                title="Search contacts, kelabos and journeys"
+                aria-label="Search contacts, kelabos and journeys"
               >
                 <Icon name="search" />
               </Button>

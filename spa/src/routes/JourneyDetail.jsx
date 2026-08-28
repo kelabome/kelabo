@@ -16,6 +16,7 @@ import { Skeleton, SkeletonRows } from '../components/ui/Skeleton'
 import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
+import { JourneyChat } from '../chat/JourneyChat'
 import { JourneyHealthChip } from './Journeys'
 import { JourneyHelmExtra } from '../variant'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
@@ -36,6 +37,11 @@ function kelaboHref(kelaboId, status) {
 }
 
 const TABS = [
+  // First and default (docs 20 §19). A journey is a place people come back to,
+  // and the thing they come back for is what has been said since — the
+  // Overview is what you read once. Its body owns the viewport height, which
+  // is why `.page` becomes a flex column for this tab alone.
+  { id: 'chat', label: 'Channel' },
   { id: 'overview', label: 'Overview' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'kelabos', label: 'Kelabos' },
@@ -1169,7 +1175,7 @@ export default function JourneyDetail() {
 
   const [journey, setJourney] = useState(null)
   const [error, setError] = useState(null)
-  const [tab, setTab] = useState('overview')
+  const [tab, setTab] = useState('chat')
   const [accessors, setAccessors] = useState(null)
   // A Timeline "document" entry switches to the Documents tab and opens
   // that document there (documents have no page of their own to link to).
@@ -1234,7 +1240,11 @@ export default function JourneyDetail() {
   }
 
   return (
-    <main className="page">
+    /* The channel is the one tab whose body must fill the remaining height
+       rather than flow: a message list that grows the page scrollbar puts the
+       composer below the fold and the newest message off-screen. Everything
+       else keeps the ordinary block-flow page. */
+    <main className={'page' + (tab === 'chat' ? ' page-channel' : '')}>
       {journey === null && !error && (
         <>
           <Skeleton className="skel-title" />
@@ -1279,6 +1289,7 @@ export default function JourneyDetail() {
             onChange={setTab}
           />
 
+          {tab === 'chat' && <JourneyChat journeyId={id} isMember={isMember} isActive={isActive} />}
           {tab === 'overview' && <OverviewTab journey={journey} isOwner={isOwner} isMember={isMember} reload={reload} />}
           {tab === 'timeline' && <TimelineTab journeyId={id} isMember={isMember} onOpenDocument={openDocument} />}
           {tab === 'kelabos' && <KelabosTab journeyId={id} isMember={isMember} isActive={isActive} />}

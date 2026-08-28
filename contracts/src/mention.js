@@ -49,3 +49,73 @@ export function stripAddress(text) {
     .trim();
   return out || s.trim();
 }
+
+// ---------------------------------------------------------------------------
+// Mentioning a *person* (docs 20 §19.8)
+//
+// Same file because it is the same grammar — `@` followed by a handle — and
+// splitting it would be how the two drift. Deliberately NOT the same function:
+// addressing the assistant is a decision that skips the trigger gate, while
+// mentioning a colleague only raises a badge. A false positive costs a
+// needless LLM call in one case and a needless notification in the other, and
+// those are not the same price.
+// ---------------------------------------------------------------------------
+
+// `@bob` or `@bob@example.com`.
+//
+// The left-hand lookbehind is what stops an ordinary email address in prose
+// ("write to bob@example.com") reading as a mention of `@example.com`. It also
+// excludes a second `@`, so the domain half of a full address is never picked
+// up as a mention of its own.
+//
+// Global and indexed, unlike the two above: those answer a yes/no about the
+// whole message, this one has to enumerate.
+const HANDLE = /(?<![\w@.])@([a-z0-9][a-z0-9._%+-]*(?:@[a-z0-9.-]+\.[a-z]{2,})?)/giu;
+
+/**
+ * Every `@handle` in the text, lowercased and de-duplicated, in order.
+ *
+ * Handles, not identities: resolving one to a person needs a roster, which
+ * this package has no access to. `resolveMentions` below does that half, given
+ * the roster its caller already holds.
+ */
+export function parseMentionHandles(text) {
+  const s = String(text || "");
+  const seen = new Set();
+  for (const m of s.matchAll(HANDLE)) seen.add(m[1].toLowerCase());
+  return [...seen];
+}
+
+/**
+ * Resolve handles against a set of known identities.
+ *
+ * A handle matches either a whole identity (`@bob@example.com`) or its local
+ * part (`@bob`). An ambiguous local part — two people whose addresses differ
+ * only by domain — resolves to **nobody**: notifying both would tell the wrong
+ * person they were named, and picking one would do it silently.
+ *
+ * The assistant's own name is never returned. It is addressed through
+ * `addressesAssistant`, which is a different decision with a different
+ * consequence, and returning it here would put the assistant on a human
+ * mention list.
+ */
+export function resolveMentions(text, identities) {
+  const handles = parseMentionHandles(text);
+  if (!handles.length) return [];
+  const byLocal = new Map();
+  const whole = new Set();
+  for (const id of identities || []) {
+    const lower = String(id).toLowerCase();
+    whole.add(lower);
+    const local = lower.split("@")[0];
+    // `null` marks a local part claimed by more than one identity.
+    byLocal.set(local, byLocal.has(local) && byLocal.get(local) !== lower ? null : lower);
+  }
+  const out = [];
+  for (const handle of handles) {
+    if (handle === NAME) continue;
+    const hit = whole.has(handle) ? handle : byLocal.get(handle);
+    if (hit && !out.includes(hit)) out.push(hit);
+  }
+  return out;
+}

@@ -60,14 +60,36 @@ export function PromptProvider({ children }) {
           </>
         }
       >
-        <input
-          ref={inputRef}
-          className="input modal-input"
-          value={value}
-          placeholder={state?.placeholder}
-          onChange={e => setValue(e.target.value)}
-          aria-label={state?.title}
-        />
+        {/* `multiline` is not cosmetic: an <input> silently strips newlines
+            from its value, so prompting to edit anything that may contain
+            them — a journey channel message, now that the composer is a
+            textarea — would quietly flatten it into one line on save. */}
+        {state?.multiline ? (
+          <textarea
+            ref={inputRef}
+            className="input modal-input"
+            rows={state?.rows || 4}
+            value={value}
+            placeholder={state?.placeholder}
+            onChange={e => setValue(e.target.value)}
+            // Enter inserts a newline here, so the form needs the usual
+            // keyboard escape hatch for submitting without reaching for the
+            // mouse.
+            onKeyDown={e => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit(e)
+            }}
+            aria-label={state?.title}
+          />
+        ) : (
+          <input
+            ref={inputRef}
+            className="input modal-input"
+            value={value}
+            placeholder={state?.placeholder}
+            onChange={e => setValue(e.target.value)}
+            aria-label={state?.title}
+          />
+        )}
       </Modal>
     </PromptContext.Provider>
   )

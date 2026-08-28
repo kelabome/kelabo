@@ -151,6 +151,12 @@ export const ERROR_CODES = [
   // journey's lead may do it.
   "not_document_owner_or_lead",
   "not_message_author_or_lead",
+  // Journey channel (docs 20 §19). Editing is narrower still than the board's
+  // author-or-lead rule: a lead may delete somebody's message but never put
+  // words in their mouth, so edit is author-only and has its own code.
+  "journey_message_not_found",
+  "not_message_author",
+  "message_deleted",
 ];
 
 // Journey visibility (docs 20 §3.2): `public` grants full rights to every
@@ -159,7 +165,17 @@ export const ERROR_CODES = [
 // explicit ACCESSOR# roster instead.
 export const JOURNEY_VISIBILITIES = ["public", "private"];
 // `completed` freezes every write until an owner `reopen`s it (docs 20 §3.1).
+// This is also what makes the journey channel's "as long as it is not ended"
+// contract structural rather than a convention: the channel is writable
+// exactly while the journey is active, and `reopen` restores it.
 export const JOURNEY_STATUSES = ["active", "completed"];
+
+// Journey channel messages (docs 20 §19). `assistant` is a separate kind
+// rather than an `author` sentinel because the two answer different
+// questions — `author` is who to attribute and mention, `kind` is how to
+// render — and conflating them is how an assistant reply ends up counted as
+// a member's contribution.
+export const JOURNEY_MESSAGE_KINDS = ["message", "assistant"];
 
 // A developer's local agent attached or detached. Makes a change that used to
 // be invisible visible: a dropped bridge silently handed the kelabo back to

@@ -10,9 +10,7 @@ attachment + deep context pulls), and the SPA (§13, including the
 "Part of: …" breadcrumb). Not built, and not planned in this document —
 see §17: real file upload, an agent-triggered server-side report (§12.4,
 by design), any wallet/billing scope, and the AI-suggested-status/
-apply-status flow (§5/§6). Also designed below but **not yet built**:
-`GET /journeys/search` and the global-search dialog's journeys tab
-(§11/§13) — the rows are kept in the tables, marked. Component docs
+apply-status flow (§5/§6). Component docs
 (01-spa, 02-rest-api, 03-gateway, 08-database, 09-data-flows,
 10-data-contracts) now include Journey behaviour (updated 2026-08-25).
 
@@ -675,7 +673,7 @@ as `kelabos.js`/`records.js`.
 | GET | `/journeys/:id/reports[/:reportId]` | member | List / one |
 | POST | `/journeys/:id/reports/:reportId/apply-status` | member | Apply a suggested health/progress — §5 *(designed, not built — §17)* |
 | GET | `/journeys/:id/timeline?type=&before=&limit=` | §3.2 | §9.2 |
-| GET | `/journeys/search?q=` | session | Title/description/timeline text search, same "open candidates, cache, cap N" shape as `/records/search` *(designed, not built)* |
+| GET | `/journeys/search?q=` | session | Title pass over discovery, then a capped pass over description + live board messages. Same shape as `/records/search` **minus its cache**: an archive is immutable and a journey's body is not, so caching it would serve a description somebody edited ten minutes ago. Cap is correspondingly tighter (20), and the body pass is a Query rather than an S3 GET. Answers `{results, bodyCapped}` |
 
 Touch-ups to existing endpoints:
 
@@ -1036,10 +1034,13 @@ there than a metaphor the model would have to already know to parse.
   journey — §11), capped at 10 (`journeyIds`, `contracts/src/schemas.js`).
   `historyEnabled` hides and resets to `false` the moment one is picked
   (§12.1's supersession rule) rather than staying offered pointlessly.
-- **Global search:** *(designed, not built — `GET /journeys/search` does
-  not exist yet either)* `SearchDialog.jsx` would gain a third tab,
-  following the exact seam already built for two (`TABS` array, a third
-  `Promise.allSettled` arm, `api.searchJourneys(q)`).
+- **Global search:** `SearchDialog.jsx` has a third tab, through the seam
+  already built for two — one entry in `TABS`, a third `Promise.allSettled`
+  arm, `api.searchJourneys(q)`. The per-tab placeholder moved onto the `TABS`
+  entries on the way: a two-way ternary at the input becomes a chain nobody
+  updates when a fourth tab arrives. Rows are keyed by `journeyId` and drawn
+  with the same identicon the journey list uses, so a journey is recognised
+  the same way everywhere.
 - **Avatar:** the existing generated-identicon component, seeded by
   `journeyId` (`spa/src/components/ui/Avatar.jsx`), re-rolled the same way
   `Settings.jsx`'s `rollAvatar`/`resetAvatar` already do for a personal
@@ -1176,3 +1177,291 @@ MCP tool surface — is now built; see §10, §12.1's own note, and §12.2.
    briefing. §12.4 remains deliberately unbuilt.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.
+7. 🟡 **Channel** — §19. Phases 1 and 4 are built: the `MSG#`/`READ#` rows,
+   the Gateway's HTTP handlers, the shared `src/chat/` components and the
+   Channel tab (§19.2–§19.6); pin-to-board (§19.7), `@person` mentions with
+   their own counter (§19.8), and `GET /journeys/search` with its tab in the
+   search dialog (§11). Phase 2 (live fan-out over the presence stream, rail
+   badges) and phase 3 (the assistant on `@kelabo`) are specified in §19.9 and
+   not built — which is why the mention badge renders inside the channel
+   rather than in the rail, and why the channel still polls.
+
+---
+
+## 19. The channel — persistent chat on a journey
+
+### 19.1 What it is, and why it is here rather than on a kelabo
+
+A kelabo is a meeting: it starts, it ends, it becomes a record. That is the
+right shape for people talking at the same time, and the wrong shape for
+people talking *across* days — where nobody expects an immediate answer and
+the context has to still be there tomorrow.
+
+The obvious move is a long-lived kelabo. It is the wrong one, for reasons
+that are structural rather than aesthetic:
+
+- The agent's trigger gate sends the **entire transcript** to the LLM on
+  every caption (`gateway/src/agent/gate.js`). Cost per message grows with
+  the age of the room; total cost is quadratic.
+- The worker keeps the full transcript in memory and never trims it
+  (`gateway/src/agent/worker.js`), alongside a second unbounded
+  `MainAgent.thread`. Both are freed only by `endKelabo`.
+- `ttl` is written **exclusively** by `endKelabo`
+  (`gateway/src/archive.js`). A kelabo that never ends never gets one.
+
+A journey already is the durable container, and it already has the two
+things a channel needs and a kelabo does not: a membership model that is not
+tied to one meeting (§3.2), and `status: active | completed` — which is
+exactly "not ended", with `reopen` as its inverse. So the channel writes to
+the journey, and none of the above applies: nothing is retained in Gateway
+memory between messages, and the journeys table deliberately has no TTL
+(§14).
+
+**The channel is not the board.** §7's board is a small, curated set of
+pinned messages, read in full, mutable, versioned. A channel is the opposite
+shape — many messages, paged, read from the end, never read in full. They
+are different objects that happen to both contain text, and merging them
+would make the board unusable at chat volume. In channel vocabulary the
+board is "pinned messages", and §19.7 promotes one into the other.
+
+**It is not the kelabo transcript either.** A kelabo's `source: "typed"`
+message is speech somebody typed during a meeting; it belongs to that
+meeting's record. This belongs to the journey and has no meeting.
+
+### 19.2 Items
+
+Both live in the journey's own partition, so `deleteJourneyChildren` (§14)
+reclaims them with everything else.
+
+| SK | Fields |
+|---|---|
+| `MSG#<msgId>` | `msgId, at, author, text, kind, editedAt?, deletedAt?, deletedBy?` |
+| `READ#<identity>` | `lastReadAt, lastReadMsgId, messageCountAtRead, updatedAt` |
+
+META gains `messageCount` and `lastMessageAt`. It deliberately does **not**
+bump `updatedAt`: that is the journey list's sort key, and letting chat drive
+it would reorder everybody's journey list every time anyone typed.
+
+**`msgId` is the sort suffix itself** — `<pad(at,13)>-<rand6>`. One value is
+the identity, the ordering key and the paging cursor, and `SK = MSG#<msgId>`
+makes edit and delete a point read rather than a scan for a uuid. The
+separator is a hyphen, not the `#` every other sort key here uses, because
+this id travels in a URL path where `#` starts a fragment.
+
+`at` comes from a **monotonic clock**, not `Date.now()`
+(`monotonicNow` in `gateway/src/journeys.js`). Two messages sent in the same
+millisecond would otherwise share a timestamp and fall back to the random
+suffix for their order — so pasting two lines could store them, and page them
+back, swapped. Everywhere else that suffix breaks ties between events with no
+inherent order; one person's own consecutive messages very much have one.
+
+There is no `authorName`. The Gateway has no access to the users table and
+never learns display names — the same constraint documented on the presence
+stream (docs 18 §5.4), resolved the same way: the SPA maps identities to
+names itself. A name stored on the row would be a snapshot nobody updates.
+
+### 19.3 Unread
+
+`unreadCount = meta.messageCount − cursor.messageCountAtRead`. O(1), no
+scan, which is the whole reason for the two counters.
+
+It only works because **`messageCount` never goes down**: an edit does not
+touch it, and a delete is soft (§19.5). A counter that can decrease cannot be
+differenced against a cursor written before the decrease.
+
+The cursor is monotonic server-side (`attribute_not_exists(SK) OR lastReadAt
+< :at`). Two tabs racing, or a client replaying an older position after
+scrolling up, must never push somebody's unread count back up. A message
+landing in the same instant as a mark-read is counted as read; that window is
+milliseconds, it self-heals on the next message, and every chat product
+behaves this way.
+
+The "New" line in the UI is frozen at first load rather than recomputed as
+the cursor advances — a boundary that creeps down the screen while you read
+past it is worse than none.
+
+### 19.4 Where it is served, and by what credential
+
+Writes and reads of *messages* are on the **Gateway**; everything else about
+a journey stays in rest-api. This is the same split the kelabo already makes
+— captions POST to the Gateway, kelabos are created over REST — and the
+reason is the same: this is the per-message hot path and the control plane is
+a Lambda. The journey **list**, with its unread arithmetic, stays in rest-api
+because that is where the three-bucket discovery query and its two GSIs
+already are.
+
+| Method | Path (Gateway) |
+|---|---|
+| GET | `/journeys/:id/messages?before=\|since=&limit=` |
+| POST | `/journeys/:id/messages` |
+| PATCH | `/journeys/:id/messages/:msgId` |
+| DELETE | `/journeys/:id/messages/:msgId` |
+| POST | `/journeys/:id/read` |
+
+Authenticated by the browser **SESSION cookie**, like `/presence/stream` and
+unlike everything kelabo-scoped. A journey has no participant cookie, no join
+link and no guests (§3.2) — membership is a property of the identity.
+
+Access is `resolveJourneyAccess` in `gateway/src/journeys.js`, which is now
+the single Gateway-side implementation of journey membership:
+`tunnel.js`'s `mayAttachJourney` is a boolean wrapper over it. An agent over
+`/rig` and a member over HTTP are the same question asked by two credentials,
+and this used to be the only copy of the answer.
+
+**A journey you may not read answers 404, never 403** — `journey_not_found`
+and "not yours" are the same answer, so an id cannot be probed for existence
+by watching which error comes back. Same rule `onJourneyAttach` applies.
+
+**A completed journey is read-only, and its badge can still be cleared.**
+Posting to one is `409 journey_completed`; reading and advancing the read
+cursor both still work. Refusing the cursor would leave a badge nobody could
+ever clear.
+
+### 19.5 Edit and soft delete
+
+Editing is **author-only** (`not_message_author`) — narrower than the board's
+author-or-lead archive rule, deliberately: a lead may remove somebody's
+message but must never be able to put words in their mouth. Deleting is
+author-or-lead, reusing `not_message_author_or_lead`.
+
+There is **no `#V#` version chain**, unlike the board. A pinned board message
+is a decision of record and its history is part of the journey's audit trail;
+a chat message is not, and a chain here would double the write volume on the
+hottest path in the system to preserve typo fixes. For the same reason no
+`TL#` row is written per message — the timeline stays a record of structural
+change.
+
+Delete is soft: the row stays, `text` is REMOVEd and `deletedAt` stamped, so
+the tombstone renders in place. Two reasons, and the first is the load-bearing
+one: `messageCount` must not decrease (§19.3), and a message that vanishes
+from the middle of a conversation takes its replies' context with it.
+
+### 19.6 One wire shape, one merge path
+
+Create, edit and delete all return and fan out **the same message object**,
+and the client upserts by `msgId`. Three events for one row is how a client
+ends up with two copies of a message it already had.
+
+The reducer is `spa/src/chat/messageStore.js` — pure, node-tested
+(`spa/test/journeyChat.mjs`), for the same reason the transcript modules are.
+It sorts by `msgId` rather than `at` (a total order versus a partial one) and
+refuses a delivery staler than the copy it holds, so a page fetched before an
+edit and arriving after it cannot silently revert the message.
+
+`src/chat/` also holds `MessageList`, `useFollowingScroll` and `Composer`,
+lifted out of `room/SidePanel.jsx` when the channel became the second message
+list. The room and the channel are the same list; the only difference is what
+goes inside a bubble (the room has a live unconfirmed tail), which is the
+`renderBody` prop and the only seam between them.
+
+### 19.7 Pinning to the board
+
+The board (§7) is the journey's curated, always-visible surface; the channel is
+its conversation. Pinning is the one bridge, and it runs in **that direction
+only** — a board message is never demoted into chat.
+
+`POST /journeys/:id/messages/:msgId/pin` produces an ordinary board message by
+an ordinary member: head, `#V#000001` version row, `boardMessageCount`,
+timeline row, exactly as `addBoardMessage` does. It carries `pinnedFrom` and
+`pinnedAt`; the channel row is stamped `pinnedAs`.
+
+**Two ids, deliberately not one.** Board message ids are uuids and channel ids
+are `<pad(at,13)>-<rand6>`; reusing one as the other would put a channel id
+into a namespace that assumes uuids.
+
+**Idempotent** — a second pin returns the board message that already exists,
+with `200` rather than a second `201`, so a double click puts one card up.
+A deleted message cannot be pinned: its text is gone and the tombstone would
+be an empty card.
+
+`aiCanPost` does **not** apply. That flag gates the assistant editing a curated
+surface unsupervised; this is a person promoting something they can already
+read. Anyone who may write to the channel may pin — the board is shared, and
+the message is already visible to everyone there. Editing and deleting stay
+with the author (§19.5).
+
+### 19.8 Mentioning a person
+
+`@bob` or `@bob@example.com`, resolved **server-side** against the journey's
+own people and stored on the row as `mentions: [identity]`. Never taken from
+the client: the list is what raises somebody else's badge, so a client that
+supplied it could notify anyone it liked.
+
+The grammar is in `contracts/src/mention.js`, beside the assistant matcher and
+deliberately not the same function as it. Addressing the assistant is a
+decision that skips the trigger gate; mentioning a colleague raises a badge. A
+false positive costs a needless LLM call in one case and a needless
+notification in the other, and those are not the same price.
+
+The left-hand lookbehind is the load-bearing part: without it an ordinary email
+address in prose — "write to bob@example.com" — reads as a mention of
+`@example.com`, and everyone whose local part is "example" gets a badge.
+
+**Who a handle can resolve to** is owner + the `ACCESSOR#` roster + anyone who
+has spoken in the last 200 messages — which is what `@` means in a
+conversation, the people in it. An **ambiguous** local part (two identities
+differing only by domain) resolves to *nobody*: notifying both tells the wrong
+person they were named, and picking one does it silently.
+
+A **public** journey has no roster at all — membership is a `tenantId` match
+computed at read time (§3.2) and the Gateway cannot enumerate a tenant. So on
+one, a bare `@bob` resolves only if Bob is the lead or has already spoken here;
+anyone else must be named by full address, which is accepted on the tenant test
+alone. That asymmetry is a consequence of visibility being derived rather than
+stored, and it fails in the safe direction: an unresolved handle raises no badge
+and tells nobody.
+
+**The counter lives on the `READ#` row**, as `mentionCount`, differenced
+against `mentionCountAtRead` — the same O(1) arithmetic as §19.3 and, again,
+never decremented. It is on that row rather than one of its own because the row
+already exists per identity per journey and already holds the cursor, so the
+badge is one point read instead of two.
+
+> ⚠️ That has a consequence worth stating, because it was a live bug: **being
+> mentioned creates the `READ#` row before its owner has ever opened the
+> channel**, so the row exists while `lastReadAt` does not. DynamoDB evaluates
+> `lastReadAt < :at` against a missing attribute as **false**, not as "unset,
+> so anything is newer" — so the cursor guard must be
+> `attribute_not_exists(SK) OR attribute_not_exists(lastReadAt) OR lastReadAt <
+> :at`. Without the middle clause the cursor can never advance, and the badge
+> sticks at unread permanently, for exactly the people who were mentioned.
+
+The SPA restates the token grammar in `spa/src/chat/mentions.js` — it has no
+dependency on the contracts package, and the exports there are non-global and
+non-indexed, so they answer "is this addressed to the assistant?" rather than
+"where are the mentions?". The restatement is safe in the only direction it can
+fail: that module decides what to **style**, the server decides who was
+**mentioned**. A token highlighted with nobody behind it is a word in a
+different colour. `mentionsMe` is stamped by the server onto each message for
+the same reason — a client re-deriving it would be a second implementation of
+the matching rule that could disagree with the badge it sits beside.
+
+### 19.9 Not built yet
+
+- **Phase 2 — live and unread.** Fan out on the **presence stream** rather
+  than a stream of its own: it is already open on every page, is
+  session-authed, and already carries a non-presence payload (the ring). That
+  gives cross-channel unread badges as push, with no third `EventSource`
+  against the browser's six-per-origin budget. Two obstacles named honestly:
+  its audience is the *presence* audience, so the recipient set must be
+  resolved from journey membership (owner + accessors for private, the tenant
+  for public — **never** the accessor rows for a public journey, which may be
+  stale after a visibility flip); and it has no replay, so reconnect must
+  refetch with `since`. Also: the presence stream has no client-side stall
+  watchdog, unlike `useBoard`, and would need one.
+- **Phase 3 — the assistant, on `@kelabo` only.** No trigger gate: `mention.js`'s
+  `addressesAssistant` is already the strict, typed-only path, and running a
+  classifier over a channel would reintroduce the cost problem §19.1 exists to
+  avoid. Server-side it is `generateJourneyReport` with the answer written as a
+  `MSG#` of `kind: "assistant"` — stateless per request, reusing `buildContext`
+  and the metering seam. For a dev agent it needs `state.journeyTunnels`, the
+  mirror of `tunnelByKelabo` whose absence `tunnel.js` currently documents as
+  deliberate. Replying in-channel is gated by attachment, **not** by
+  `aiCanPost`, which remains the gate on the pinned board alone.
+- **The mention badge in the rail.** The mechanism is built (§19.8) and
+  `unreadMentions` is served on every page fetch; what is missing is a rail to
+  put it on, which is phase 2's surface. Today it renders inside the channel
+  itself, which is where it can actually be seen.
+
+Threads are deliberately absent. `msgId` is the only grouping key, and adding
+a parent would break that invariant for a feature nobody has asked for yet.

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ContributionCard } from '../components/ContributionCard'
 import { Button } from '../components/ui/Button'
 import { Icon } from '../components/ui/Icon'
@@ -7,7 +7,10 @@ import { usePrompt } from '../components/PromptDialog'
 import { useToast } from '../components/Toaster'
 import { renameSpeaker as apiRenameSpeaker } from '../api'
 import { messageParts } from '../transcript/transcriptStore'
-import { annotateDays, fmtFullAt, fmtTime } from '../time'
+import { fmtFullAt, fmtTime } from '../time'
+import { MessageList } from '../chat/MessageList'
+import { useFollowingScroll } from '../chat/useFollowingScroll'
+import { Composer } from '../chat/Composer'
 import { conKey } from './useBoard'
 
 /**
@@ -21,102 +24,20 @@ import { conKey } from './useBoard'
  * ordering and its persistence are one and the same underneath.
  */
 
-// How close to the bottom still counts as "following along". Scrolling back to
-// re-read must not be yanked away by the next thing anyone says.
-const FOLLOW_THRESHOLD_PX = 140
+// The scrolling list, the follow-the-bottom behaviour and the composer are
+// shared with the journey channel (docs 20 §19) and live in `src/chat/`. They
+// were module-locals here while the room was the only message list; the day
+// there were two, one copy of "how close to the bottom counts as following"
+// became the only defensible number of copies.
 
+/** The room's bubble body, and the one thing the channel's does not have: an
+ *  open message carries an unconfirmed live tail behind its settled text. */
 function MessageBody({ message }) {
   const { settled, live } = messageParts(message)
   return (
     <>
       {settled}
       {live && <span className="chat-tail">{live}</span>}
-    </>
-  )
-}
-
-function useFollowingScroll(dep, enabled) {
-  const ref = useRef(null)
-  const [pinned, setPinned] = useState(false)
-
-  const atBottom = () => {
-    const el = ref.current
-    if (!el) return true
-    return el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX
-  }
-
-  useEffect(() => {
-    if (!enabled) return
-    if (atBottom()) {
-      const el = ref.current
-      if (el) el.scrollTop = el.scrollHeight
-      setPinned(false)
-    } else {
-      setPinned(true)
-    }
-  }, [dep, enabled]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const jump = () => {
-    const el = ref.current
-    if (el) el.scrollTop = el.scrollHeight
-    setPinned(false)
-  }
-
-  return { ref, pinned, jump, onScroll: () => { if (pinned && atBottom()) setPinned(false) } }
-}
-
-function MessageList({ items, scroll, empty, history }) {
-  // Day dividers appear only when the list actually spans days (annotateDays) —
-  // a room that has run for a week reads like a chat history, a one-hour
-  // kelabo stays exactly as clean as before.
-  const dated = useMemo(() => annotateDays(items), [items])
-
-  // A button rather than infinite scroll, deliberately: digging days back is
-  // rare, and prepending on a scroll event has to fight the viewport for
-  // position. The prepended page grows the list ABOVE the reader, so the
-  // scroll offset is restored manually to keep what they were looking at
-  // exactly where it was.
-  const loadEarlier = async () => {
-    const el = scroll.ref.current
-    const prevHeight = el?.scrollHeight ?? 0
-    const prevTop = el?.scrollTop ?? 0
-    await history.onLoadEarlier()
-    requestAnimationFrame(() => {
-      const now = scroll.ref.current
-      if (now) now.scrollTop = prevTop + (now.scrollHeight - prevHeight)
-    })
-  }
-
-  return (
-    <>
-      <div className="side-scroll" ref={scroll.ref} onScroll={scroll.onScroll}>
-        {history?.hasMore && (
-          <button className="chip chip-btn load-earlier" disabled={history.loading} onClick={loadEarlier}>
-            {history.loading ? 'Loading…' : 'Load earlier messages'}
-          </button>
-        )}
-        {items.length === 0 && <div className="empty">{empty}</div>}
-        {dated.map(({ item: m, divider }) => (
-          <Fragment key={m.messageId}>
-            {divider && <div className="day-divider" role="separator">{divider}</div>}
-            <div className={'chat-msg' + (m.mine ? ' mine' : '')}>
-              <div className="chat-meta">
-                <SpeakerTag name={m.speakerLabel} />
-                <span className="chat-time" title={fmtFullAt(m.at)}>{fmtTime(m.at)}</span>
-              </div>
-              <div className={'chat-bubble' + (m.state === 'open' ? ' open' : '')}>
-                <MessageBody message={m} />
-              </div>
-            </div>
-          </Fragment>
-        ))}
-      </div>
-
-      {scroll.pinned && (
-        <button className="jump-latest" onClick={scroll.jump}>
-          <Icon name="chevron-down" size={13} /> Jump to latest
-        </button>
-      )}
     </>
   )
 }
@@ -133,13 +54,8 @@ function MessagesTab({ capture, ended, assistantOn, history }) {
   const { messages, sendTyped } = capture
   const typed = useMemo(() => messages.filter(m => m.source === 'typed'), [messages])
   const scroll = useFollowingScroll(typed, true)
-  const inputRef = useRef(null)
 
-  const submit = e => {
-    e.preventDefault()
-    const text = inputRef.current?.value ?? ''
-    if (!text.trim()) return
-    inputRef.current.value = ''
+  const send = text => {
     sendTyped?.(text)
     // Typing lands at the bottom by definition — never leave the reader parked
     // above the thing they just wrote.
@@ -153,21 +69,16 @@ function MessagesTab({ capture, ended, assistantOn, history }) {
         scroll={scroll}
         empty="No messages yet. Type below — everyone in the kelabo sees it."
         history={history}
+        renderBody={m => <MessageBody message={m} />}
       />
 
       {!ended && (
-        <form className="compose" onSubmit={submit}>
-          <input
-            className="input"
-            ref={inputRef}
-            // No assistant on this deployment means no @kelabo to hint at.
-            placeholder={assistantOn ? 'Type a message, or @kelabo to ask…' : 'Type a message…'}
-            aria-label="Type a message to the kelabo"
-          />
-          <Button type="submit" size="sm" iconOnly title="Send" aria-label="Send">
-            <Icon name="send" size={15} />
-          </Button>
-        </form>
+        <Composer
+          onSend={send}
+          // No assistant on this deployment means no @kelabo to hint at.
+          placeholder={assistantOn ? 'Type a message, or @kelabo to ask…' : 'Type a message…'}
+          ariaLabel="Type a message to the kelabo"
+        />
       )}
     </>
   )
@@ -231,6 +142,7 @@ function TranscriptTab({ capture, diarize, kelaboId, boardOnly, history }) {
             : 'Speak — everyone’s words appear here as they are transcribed.'
         }
         history={history}
+        renderBody={m => <MessageBody message={m} />}
       />
 
       {/* Name whoever is actually transcribing. This read "Deepgram" flat, from

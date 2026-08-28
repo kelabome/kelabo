@@ -905,6 +905,20 @@ export function createApp(deps) {
       },
     },
     {
+      // Before /journeys/:id, or "search" would be read as a journey id — the
+      // same ordering /records/search depends on. `route()` returns the first
+      // pattern that matches, in array order.
+      method: "GET",
+      pattern: "/journeys/search",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.searchJourneys({ identity: session.identity, q: req.query?.q || "" }),
+        };
+      },
+    },
+    {
       method: "GET",
       pattern: "/journeys/:id",
       handle: async (req) => {

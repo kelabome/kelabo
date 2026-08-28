@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RTC_MODES, JOURNEY_VISIBILITIES } from "./constants.js";
+import { RTC_MODES, JOURNEY_VISIBILITIES, JOURNEY_MESSAGE_KINDS } from "./constants.js";
 
 export const utteranceSchema = z.object({
   kelaboId: z.string().min(1),
@@ -771,4 +771,62 @@ export const journeyBoardMessageBodySchema = z.object({
 export const journeyDocumentBodySchema = z.object({
   title: z.string().min(1).max(160),
   content: z.string().min(1).max(200_000),
+});
+
+// --- Journey channel (docs 20 §19) -------------------------------------------
+//
+// The persistent chat on a journey: a growing tail of typed messages that
+// outlives any one kelabo, readable and writable for as long as the journey
+// is active. Deliberately NOT the board — the board is a small, curated set
+// of pinned messages (§7), and a channel is the opposite shape: append-mostly,
+// paged, and never read in full.
+//
+// It is also not the kelabo transcript. A kelabo's `source: "typed"` message
+// is speech somebody typed during a meeting and belongs to that meeting's
+// record; this belongs to the journey and has no meeting.
+
+// POST /journeys/:id/messages, PATCH .../messages/:msgId — same body for
+// both, matching journeyBoardMessageBodySchema's own create/edit reuse. 4000
+// matches the board rather than the document cap: a chat message that wants
+// 200KB is a document, and there is a tab for those.
+export const journeyMessageBodySchema = z.object({
+  text: z.string().min(1).max(4000),
+});
+
+// What the Gateway returns from the history endpoint and fans out live. One
+// shape for create, edit and delete — the client upserts by `msgId` — because
+// three wire events for one row is how a client ends up with two copies of a
+// message it already had (the same merge-by-id the kelabo board settled on).
+//
+// A deleted message keeps its row and its place in the order: `text` is
+// emptied and `deletedAt` set, so the tombstone renders in situ instead of
+// silently reflowing everything around it. It also keeps counting toward
+// `messageCount`, which is what makes the O(1) unread arithmetic in §19.3
+// hold — a counter that can go down cannot be differenced against a cursor.
+// `msgId` is the sort suffix itself — `<pad(at,13)>-<rand6>` — so one value
+// is the identity, the ordering key and the paging cursor. The kelabo history
+// endpoint already falls back to a row's sort key as its `messageId` for
+// exactly this reason; here it is the design rather than the fallback.
+// Hyphen-separated, not `#`: this id travels in a URL path.
+//
+// No `authorName`. The Gateway has no access to the users table and never
+// learns display names — the same constraint documented on the presence
+// stream, resolved the same way: the SPA maps identities to names from its
+// own contacts fetch. A name on this row would be a snapshot nobody updates.
+export const journeyMessageSchema = z.object({
+  msgId: z.string().min(1).max(128),
+  at: z.number().int().nonnegative(),
+  author: z.string().min(1).max(254),
+  text: z.string().max(4000),
+  kind: z.enum(JOURNEY_MESSAGE_KINDS).default("message"),
+  editedAt: z.number().int().nonnegative().optional(),
+  deletedAt: z.number().int().nonnegative().optional(),
+});
+
+// POST /journeys/:id/read — advance this identity's read cursor. Monotonic
+// server-side: a client that races two tabs, or replays an older `at` after
+// scrolling up, must never move somebody's unread count backwards.
+export const journeyReadBodySchema = z.object({
+  at: z.number().int().nonnegative(),
+  msgId: z.string().min(1).max(128).optional(),
 });

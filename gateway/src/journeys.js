@@ -20,6 +20,7 @@ import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/li
 import { getMinutes, queryKelaboItems, pad, randSeq } from "./db.js";
 import { createLlmProvider } from "./agent/llm.js";
 import { llmApiKeyFrom } from "@kelabo/contracts/credentials";
+import { parseMentionHandles, resolveMentions } from "@kelabo/contracts";
 
 const journeysTable = (c) => c.config.tableNames.journeys;
 export const journeyPk = (id) => `JOURNEY#${id}`;
@@ -176,6 +177,39 @@ export async function getJourneyAccessor(c, journeyId, identity) {
     new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: `ACCESSOR#${identity}` } })
   );
   return out.Item ?? null;
+}
+
+/**
+ * What this identity may do on this journey: `"owner"`, `"member"` or
+ * `"none"` — the Gateway-side twin of rest-api's `resolveAccess` (docs 20
+ * §3.2), and the single implementation of journey membership on this side of
+ * the wire.
+ *
+ * It arrived as `tunnel.js`'s `mayAttachJourney`, which is now a thin
+ * boolean wrapper over this. It moved here when the journey channel (§19)
+ * became the second caller: an agent attaching over `/rig` and a member
+ * opening the channel over HTTP are the same question asked by two different
+ * credentials, and two copies of an access rule is one copy that gets a fix.
+ *
+ * `tenant` may be absent (a credential that does not carry one); the check is
+ * then skipped rather than failed, matching the behaviour the tunnel has
+ * always had. Every caller here does carry one.
+ */
+export async function resolveJourneyAccess(c, meta, { identity, tenant } = {}) {
+  if (!meta || !identity) return "none";
+  if (meta.tenantId && tenant && meta.tenantId !== tenant) return "none";
+  if (meta.ownerIdentity === identity) return "owner";
+  // Public is tenant-wide, and the tenant check above is what bounds it —
+  // never "anyone signed in". A public journey deliberately does not consult
+  // the ACCESSOR# roster: stale rows left by a private->public flip are inert
+  // for access, and reading them here would quietly resurrect them.
+  if (meta.visibility === "public") return "member";
+  try {
+    return (await getJourneyAccessor(c, meta.journeyId, identity)) ? "member" : "none";
+  } catch (err) {
+    c.logError("journey_access_accessor_lookup_failed", err, { journeyId: meta.journeyId });
+    return "none";
+  }
 }
 
 // The pipeline enforces no size ceiling of its own (docs 20 §6.2) — every
@@ -514,8 +548,16 @@ export async function submitJourneyReport(c, journeyId, { reportId, question, an
  * `aiCanPost` gate itself is checked by the caller (`tunnel.js`), matching
  * where `historyEnabled`'s own gate lives: a call-site policy decision, not
  * something baked into the write itself.
+ *
+ * `by` names the actor in the timeline sentence and `extra` carries any
+ * provenance fields onto the head. Both exist because pinning a channel
+ * message (§19.7) produces an ordinary board message by an ordinary member,
+ * and the only honest differences are who the timeline says did it and where
+ * it came from. `aiCanPost` does not apply to that caller: it gates the
+ * *assistant* writing to the board unsupervised, not a person pinning
+ * something they can already read.
  */
-export async function postJourneyBoardMessage(c, journeyId, { content, msgId, identity }) {
+export async function postJourneyBoardMessage(c, journeyId, { content, msgId, identity, by = "the attached agent", extra = {} }) {
   const now = Date.now();
   if (msgId) {
     const existing = await c.db.send(
@@ -541,7 +583,7 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
     );
     await putJourneyTimelineRow(c, journeyId, {
       type: "board_message",
-      summary: `Message edited: ${clip(content, 80)} (by the attached agent)`,
+      summary: `Message edited: ${clip(content, 80)} (by ${by})`,
       actor: identity,
       at: now,
       detail: { msgId, action: "edited" },
@@ -552,7 +594,7 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
   await c.db.send(
     new PutCommand({
       TableName: journeysTable(c),
-      Item: { PK: journeyPk(journeyId), SK: `BOARDMSG#${newId}`, msgId: newId, content, createdBy: identity, createdAt: now, version: 1, archived: false },
+      Item: { PK: journeyPk(journeyId), SK: `BOARDMSG#${newId}`, msgId: newId, content, createdBy: identity, createdAt: now, version: 1, archived: false, ...extra },
       ConditionExpression: "attribute_not_exists(SK)",
     })
   );
@@ -572,7 +614,7 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
   );
   await putJourneyTimelineRow(c, journeyId, {
     type: "board_message",
-    summary: `Message added: ${clip(content, 80)} (by the attached agent)`,
+    summary: `Message added: ${clip(content, 80)} (by ${by})`,
     actor: identity,
     at: now,
     detail: { msgId: newId, action: "created" },
@@ -611,6 +653,450 @@ export async function settleKelaboJoin(c, journeyId, kelaboId, participantIdenti
   }
   for (const identity of participantIdentities || []) {
     await bumpJourneyContributor(c, journeyId, identity, "kelaboJoinCount").catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The journey channel (docs 20 §19) — the persistent chat that outlives any
+// one kelabo.
+//
+// Writes land here rather than in rest-api for the same reason captions do:
+// this is the per-message hot path, and the control plane is a Lambda. The
+// list of journeys (with its unread arithmetic) stays in rest-api, which
+// already owns the three-bucket discovery query and its two GSIs.
+//
+// The whole feature is one new sort-key prefix plus a per-identity cursor. It
+// is deliberately NOT the board (§7): pinned messages are few, mutable and
+// read in full; channel messages are many, paged, and read from the end.
+// ---------------------------------------------------------------------------
+
+// A rejoin needs the recent tail, not the whole history — the same judgement
+// (and the same number) the kelabo's own history endpoint makes.
+export const MESSAGE_PAGE_LIMIT = 200;
+
+const messageSk = (msgId) => `MSG#${msgId}`;
+// One value above the `MSG#` prefix, byte-exactly: '$' is 0x24 and '#' is
+// 0x23, so every `MSG#…` key sorts strictly below it and nothing else does.
+// This is the upper bound for a forward (`since`) page — the mirror of the
+// `"MSG#"` floor a backward (`before`) page needs, and needed for the same
+// reason the timeline learned the hard way: an unbounded range walks straight
+// out of the prefix into META/LINK#/REPORT# rows.
+const MESSAGE_CEIL = "MSG$";
+
+/**
+ * The id of a channel message IS its sort suffix: `<pad(at,13)>-<rand6>`.
+ *
+ * One value therefore serves as identity, ordering key and paging cursor,
+ * and `SK = MSG#<msgId>` makes edit and delete a point read rather than a
+ * scan for a uuid. The separator is a hyphen, not the `#` used elsewhere in
+ * this partition, because this id travels in a URL path where `#` would be
+ * read as the start of a fragment.
+ */
+export const newMessageId = (at) => `${pad(at, 13)}-${randSeq()}`;
+
+/**
+ * A clock that never returns the same millisecond twice.
+ *
+ * `Date.now()` alone is not enough here, and the difference is visible to
+ * users: two messages sent in the same millisecond would share a timestamp
+ * and fall back to the random suffix for their order, so pasting two lines
+ * could store them — and page them back — in the wrong order. Everywhere
+ * else in this system that suffix breaks ties between events that genuinely
+ * have no order (two people's captions, two board cards); in a chat, one
+ * person's own consecutive messages very much do.
+ *
+ * Process-wide rather than per journey, because ordering only has to hold
+ * within a journey and a global monotonic clock gives that for free. The
+ * Gateway runs at `desiredCount: 1` (docs 22), so this is the whole
+ * deployment; if that ever changes, two tasks could still interleave inside
+ * one millisecond — which is exactly the ambiguity that already exists
+ * between two people typing at once, and no worse.
+ *
+ * Every timestamp the channel writes comes from here, not just message ids:
+ * `Date.now()` for an edit could otherwise land *before* the `at` of the
+ * message being edited, whenever this clock is running the few milliseconds
+ * ahead that a burst of messages puts it. "Edited before it was sent" is not
+ * a state worth leaving reachable to save one function call.
+ */
+let lastIssuedAt = 0;
+function monotonicNow() {
+  const now = Date.now();
+  lastIssuedAt = now > lastIssuedAt ? now : lastIssuedAt + 1;
+  return lastIssuedAt;
+}
+
+/** The stored row as it goes on the wire. A deleted message keeps its place
+ *  and loses its text, so the tombstone renders where the message was. */
+const toWireMessage = (i) => ({
+  msgId: i.msgId,
+  at: i.at,
+  author: i.author,
+  text: i.deletedAt ? "" : i.text || "",
+  kind: i.kind || "message",
+  ...(i.editedAt ? { editedAt: i.editedAt } : {}),
+  ...(i.deletedAt ? { deletedAt: i.deletedAt } : {}),
+  ...(i.mentions?.length ? { mentions: i.mentions } : {}),
+  ...(i.pinnedAs ? { pinnedAs: i.pinnedAs } : {}),
+});
+
+export async function getJourneyMessage(c, journeyId, msgId) {
+  const out = await c.db.send(
+    new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: messageSk(msgId) } })
+  );
+  return out.Item ?? null;
+}
+
+/**
+ * Append a message and bump the journey's counters.
+ *
+ * `messageCount` is an unconditional ADD and only ever grows: edits do not
+ * touch it and deletes leave the row in place. That is not tidiness — it is
+ * what makes the unread arithmetic in `advanceJourneyReadCursor` work, since
+ * a counter that can go down cannot be differenced against a cursor.
+ *
+ * `updatedAt` is deliberately NOT bumped. It is the journey list's sort key,
+ * and letting chat drive it would reorder somebody's whole journey list every
+ * time anyone typed. `lastMessageAt` is the channel's own clock.
+ */
+export async function putJourneyMessage(c, journeyId, { text, author, kind = "message", mentions = [] }) {
+  const at = monotonicNow();
+  const msgId = newMessageId(at);
+  const item = {
+    PK: journeyPk(journeyId),
+    SK: messageSk(msgId),
+    msgId,
+    at,
+    author,
+    text,
+    kind,
+    ...(mentions.length ? { mentions } : {}),
+  };
+  await c.db.send(
+    new PutCommand({ TableName: journeysTable(c), Item: item, ConditionExpression: "attribute_not_exists(SK)" })
+  );
+  await c.db
+    .send(
+      new UpdateCommand({
+        TableName: journeysTable(c),
+        Key: { PK: journeyPk(journeyId), SK: "META" },
+        UpdateExpression:
+          "SET messageCount = if_not_exists(messageCount, :zero) + :one, lastMessageAt = :at",
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":at": at },
+      })
+    )
+    // The message is written and about to be fanned out; a counter that did
+    // not move costs somebody an unread badge, and losing the message to
+    // save the badge is the wrong trade.
+    .catch((err) => c.logError("journey_message_count_failed", err, { journeyId, msgId }));
+
+  // One bump per person named, on their own cursor row (§19.8). Never the
+  // author's own: naming yourself must not raise your own badge.
+  for (const identity of mentions) {
+    if (identity === author) continue;
+    await bumpMentionCount(c, journeyId, identity).catch((err) =>
+      c.logError("journey_mention_bump_failed", err, { journeyId, msgId, identity })
+    );
+  }
+  return toWireMessage(item);
+}
+
+/**
+ * The people a mention may resolve to on this journey.
+ *
+ * Owner, the `ACCESSOR#` roster, and everyone who has spoken in the channel
+ * recently — which is what `@` means in a conversation: the people in it.
+ *
+ * A **public** journey has no roster at all (§3.2: membership is a `tenantId`
+ * match computed at read time), and the Gateway cannot enumerate a tenant. So
+ * on a public journey a bare `@bob` resolves only if Bob is the lead or has
+ * already spoken here; anyone else has to be named by full address, which
+ * `resolveJourneyMentions` accepts on the tenant test alone. That asymmetry is
+ * a consequence of visibility being derived rather than stored, and the
+ * failure is the safe direction: a handle that does not resolve raises no
+ * badge and tells nobody.
+ */
+async function journeyPeople(c, journeyId, meta) {
+  const [accessors, recent] = await Promise.all([
+    queryJourneyItems(c, journeyId, "ACCESSOR#").catch(() => []),
+    queryJourneyMessages(c, journeyId, { limit: MENTION_AUTHOR_LOOKBACK }).catch(() => ({ messages: [] })),
+  ]);
+  const people = new Set();
+  if (meta?.ownerIdentity) people.add(String(meta.ownerIdentity).toLowerCase());
+  for (const a of accessors) if (a.identity) people.add(String(a.identity).toLowerCase());
+  for (const m of recent.messages) if (m.author && m.kind !== "assistant") people.add(String(m.author).toLowerCase());
+  return people;
+}
+
+// How far back "people in this conversation" reaches. A window, not the whole
+// channel: a journey that has run for a year should not make every person who
+// ever posted mentionable by bare first name forever, and paging the entire
+// history on every message to find out would be absurd.
+const MENTION_AUTHOR_LOOKBACK = 200;
+
+/** Identities named in this message, resolved against the journey's people. */
+export async function resolveJourneyMentions(c, journeyId, meta, text) {
+  const handles = parseMentionHandles(text);
+  if (!handles.length) return [];
+  const people = await journeyPeople(c, journeyId, meta);
+  const resolved = resolveMentions(text, people);
+  if (meta?.visibility !== "public" || !meta?.tenantId) return resolved;
+  // On a public journey every same-tenant identity is a member by definition,
+  // so a full address is enough on its own — see `journeyPeople`.
+  const tenant = String(meta.tenantId).toLowerCase();
+  const out = [...resolved];
+  for (const handle of handles) {
+    if (handle.includes("@") && handle.split("@")[1] === tenant && !out.includes(handle)) out.push(handle);
+  }
+  return out;
+}
+
+/**
+ * Raise one person's lifetime mention count on this journey.
+ *
+ * It lives on their `READ#` row rather than a row of its own: that row already
+ * exists per identity per journey and already holds the counter this is
+ * differenced against, so the badge is one point read instead of two.
+ *
+ * Note this can create a `READ#` row for somebody who has never opened the
+ * channel — which is why `advanceJourneyReadCursor`'s guard has to tolerate a
+ * row with no `lastReadAt` on it.
+ */
+async function bumpMentionCount(c, journeyId, identity) {
+  await c.db.send(
+    new UpdateCommand({
+      TableName: journeysTable(c),
+      Key: { PK: journeyPk(journeyId), SK: `READ#${identity}` },
+      UpdateExpression: "SET mentionCount = if_not_exists(mentionCount, :zero) + :one",
+      ExpressionAttributeValues: { ":zero": 0, ":one": 1 },
+    })
+  );
+}
+
+/**
+ * One page of the channel.
+ *
+ * Two cursors, and they are not interchangeable (docs 20 §2 records the
+ * distinction as a precedent rather than a free choice):
+ *
+ *  - `before` walks backwards through history, newest page first. This is
+ *    "load earlier messages", and it is the shape the timeline uses.
+ *  - `since` returns everything newer than a cursor, oldest first. This is
+ *    reconnect backfill — the growing-tail shape — and it is what makes a
+ *    dropped stream recoverable on a transport that has no replay.
+ *
+ * Both are exclusive of the cursor row itself, so a client can pass back the
+ * id it already holds without re-receiving it.
+ */
+export async function queryJourneyMessages(c, journeyId, { before, since, limit = MESSAGE_PAGE_LIMIT } = {}) {
+  const capped = Math.max(1, Math.min(Math.floor(limit) || MESSAGE_PAGE_LIMIT, MESSAGE_PAGE_LIMIT));
+  const forward = !!since && !before;
+  const values = forward
+    ? { ":pk": journeyPk(journeyId), ":lo": messageSk(since), ":hi": MESSAGE_CEIL }
+    : { ":pk": journeyPk(journeyId), ":lo": "MSG#", ":hi": before ? messageSk(before) : MESSAGE_CEIL };
+  const out = await c.db.send(
+    new QueryCommand({
+      TableName: journeysTable(c),
+      KeyConditionExpression: "PK = :pk AND SK BETWEEN :lo AND :hi",
+      ExpressionAttributeValues: values,
+      // Backward paging reads newest-first so `Limit` takes the newest page;
+      // forward paging reads oldest-first so `Limit` takes the oldest
+      // unseen ones and the client never has a hole in the middle.
+      ScanIndexForward: forward,
+      // One extra row detects whether another page exists, and BETWEEN is
+      // inclusive of the cursor row, which is dropped below.
+      Limit: capped + 2,
+    })
+  );
+  let rows = (out.Items ?? []).filter((i) => i.SK !== messageSk(before) && i.SK !== messageSk(since));
+  const hasMore = rows.length > capped;
+  rows = rows.slice(0, capped);
+  // Always oldest-first on the wire, whichever direction it was read: the
+  // client appends in display order and never has to know which cursor it
+  // used.
+  if (!forward) rows.reverse();
+  return {
+    hasMore,
+    // Only meaningful for backward paging; the oldest row on this page is
+    // where the next "load earlier" starts.
+    nextBefore: rows[0]?.msgId || "",
+    messages: rows.map(toWireMessage),
+  };
+}
+
+/**
+ * Edit a message in place. Author-only — narrower than the board's
+ * author-or-lead archive rule, and deliberately so: a lead may remove
+ * somebody's message but must never be able to put words in their mouth,
+ * which is why this has its own error code rather than reusing
+ * `not_message_author_or_lead`.
+ *
+ * No `#V#` version chain, unlike the board. A pinned board message is a
+ * decision of record and its history is part of the journey's audit trail; a
+ * chat message is not, and a chain here would double the write volume on the
+ * hottest path in the system to preserve typo fixes.
+ */
+export async function editJourneyMessage(c, journeyId, msgId, { text, identity }) {
+  const existing = await getJourneyMessage(c, journeyId, msgId);
+  if (!existing) return { ok: false, reason: "journey_message_not_found" };
+  if (existing.deletedAt) return { ok: false, reason: "message_deleted" };
+  if (existing.author !== identity) return { ok: false, reason: "not_message_author" };
+  const editedAt = monotonicNow();
+  await c.db.send(
+    new UpdateCommand({
+      TableName: journeysTable(c),
+      Key: { PK: journeyPk(journeyId), SK: messageSk(msgId) },
+      UpdateExpression: "SET #text = :text, editedAt = :at",
+      // Nothing here may create the row: an edit racing a delete must fail,
+      // not resurrect a tombstone as a bare item with no author.
+      ConditionExpression: "attribute_exists(SK)",
+      ExpressionAttributeNames: { "#text": "text" },
+      ExpressionAttributeValues: { ":text": text, ":at": editedAt },
+    })
+  );
+  return { ok: true, message: toWireMessage({ ...existing, text, editedAt }) };
+}
+
+/**
+ * Soft-delete: the row stays, `text` is cleared and `deletedAt` is stamped.
+ * Author or journey lead, the same rule the board applies to archiving —
+ * and for the same reason, so a lead can clear something that should not be
+ * there without being able to rewrite it.
+ *
+ * The row survives because `messageCount` must not go down (see
+ * `putJourneyMessage`), and because a message that vanishes from the middle
+ * of a conversation takes its replies' context with it.
+ */
+export async function deleteJourneyMessage(c, journeyId, msgId, { identity, isLead = false }) {
+  const existing = await getJourneyMessage(c, journeyId, msgId);
+  if (!existing) return { ok: false, reason: "journey_message_not_found" };
+  if (existing.author !== identity && !isLead) return { ok: false, reason: "not_message_author_or_lead" };
+  // Idempotent: deleting twice is success, matching every other archive/
+  // remove path on a journey.
+  if (existing.deletedAt) return { ok: true, message: toWireMessage(existing) };
+  const deletedAt = monotonicNow();
+  await c.db.send(
+    new UpdateCommand({
+      TableName: journeysTable(c),
+      Key: { PK: journeyPk(journeyId), SK: messageSk(msgId) },
+      UpdateExpression: "SET deletedAt = :at, deletedBy = :by REMOVE #text",
+      ConditionExpression: "attribute_exists(SK)",
+      ExpressionAttributeNames: { "#text": "text" },
+      ExpressionAttributeValues: { ":at": deletedAt, ":by": identity },
+    })
+  );
+  return { ok: true, message: toWireMessage({ ...existing, text: "", deletedAt }) };
+}
+
+/**
+ * Pin a channel message to the journey's board (§19.7).
+ *
+ * The board is the journey's curated, always-visible surface (§7) and the
+ * channel is its conversation; pinning is the one bridge between them, and it
+ * runs in that direction only — a board message is never demoted into chat.
+ *
+ * What lands on the board is an ordinary board message by an ordinary member.
+ * It carries `pinnedFrom` (the channel message's id) and `pinnedAt` for
+ * provenance, and the channel row is stamped `pinnedAs` so the UI can show it
+ * is pinned and refuse a second pin. Two ids, deliberately not one: board
+ * message ids are uuids and channel ids are `<pad(at,13)>-<rand6>`, and
+ * reusing one as the other would put a channel id into a namespace that
+ * assumes uuids.
+ *
+ * A deleted message cannot be pinned — its text is gone, and pinning the
+ * tombstone would put an empty card on the board.
+ */
+export async function pinJourneyMessage(c, journeyId, msgId, { identity }) {
+  const existing = await getJourneyMessage(c, journeyId, msgId);
+  if (!existing) return { ok: false, reason: "journey_message_not_found" };
+  if (existing.deletedAt) return { ok: false, reason: "message_deleted" };
+  if (existing.pinnedAs) return { ok: true, msgId: existing.pinnedAs, already: true };
+
+  const posted = await postJourneyBoardMessage(c, journeyId, {
+    content: existing.text,
+    identity,
+    by: "pinning it from the channel",
+    extra: { pinnedFrom: msgId, pinnedAt: monotonicNow() },
+  });
+  if (!posted.ok) return { ok: false, reason: posted.reason };
+
+  await c.db
+    .send(
+      new UpdateCommand({
+        TableName: journeysTable(c),
+        Key: { PK: journeyPk(journeyId), SK: messageSk(msgId) },
+        UpdateExpression: "SET pinnedAs = :board, pinnedBy = :by",
+        ConditionExpression: "attribute_exists(SK)",
+        ExpressionAttributeValues: { ":board": posted.msgId, ":by": identity },
+      })
+    )
+    // The board message is written and is the thing that matters; a missing
+    // back-reference costs a stale "Pin" button, not the pin.
+    .catch((err) => c.logError("journey_pin_backref_failed", err, { journeyId, msgId }));
+
+  return { ok: true, msgId: posted.msgId };
+}
+
+/** This identity's read cursor on this journey, or null if they have never
+ *  opened the channel — in which case every message is unread. */
+export async function getJourneyReadCursor(c, journeyId, identity) {
+  const out = await c.db.send(
+    new GetCommand({ TableName: journeysTable(c), Key: { PK: journeyPk(journeyId), SK: `READ#${identity}` } })
+  );
+  return out.Item ?? null;
+}
+
+/**
+ * Advance a read cursor. Monotonic: `lastReadAt` only ever moves forward, so
+ * two tabs racing — or a client replaying an older position after scrolling
+ * up — can never push somebody's unread count back up.
+ *
+ * `messageCountAtRead` snapshots META's counter so the badge is
+ * `messageCount - messageCountAtRead`: O(1), no scan, and the reason the
+ * counter is append-only. A message that lands in the same instant as the
+ * mark-read is counted as read; that window is milliseconds wide, it
+ * self-heals on the next message, and every chat product behaves this way.
+ *
+ * The cursor lives in the journey's own partition rather than a per-identity
+ * one so `deleteJourneyChildren` reclaims it with everything else. That costs
+ * the journey list a batched read it would not otherwise need, which is the
+ * right trade against leaving orphans behind a deleted journey.
+ */
+export async function advanceJourneyReadCursor(
+  c,
+  journeyId,
+  identity,
+  { at, msgId, messageCount = 0, mentionCount = 0 }
+) {
+  try {
+    await c.db.send(
+      new UpdateCommand({
+        TableName: journeysTable(c),
+        Key: { PK: journeyPk(journeyId), SK: `READ#${identity}` },
+        UpdateExpression:
+          "SET lastReadAt = :at, messageCountAtRead = :count, mentionCountAtRead = :mentions, updatedAt = :at" +
+          (msgId ? ", lastReadMsgId = :msgId" : ""),
+        // `attribute_not_exists(lastReadAt)` is not redundant with
+        // `attribute_not_exists(SK)`. Being mentioned creates this row with a
+        // `mentionCount` and nothing else (§19.8), so for anyone who was named
+        // before they ever opened the channel the row exists while the
+        // attribute does not — and without this clause DynamoDB evaluates
+        // `lastReadAt < :at` against a missing attribute, which is false, and
+        // their cursor could never advance again. Their badge would be stuck
+        // at "unread" permanently, and only for people who had been mentioned.
+        ConditionExpression:
+          "attribute_not_exists(SK) OR attribute_not_exists(lastReadAt) OR lastReadAt < :at",
+        ExpressionAttributeValues: {
+          ":at": at,
+          ":count": messageCount,
+          ":mentions": mentionCount,
+          ...(msgId ? { ":msgId": msgId } : {}),
+        },
+      })
+    );
+    return { advanced: true };
+  } catch (err) {
+    if (err.name === "ConditionalCheckFailedException") return { advanced: false };
+    throw err;
   }
 }
 

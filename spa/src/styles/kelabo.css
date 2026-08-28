@@ -2144,6 +2144,147 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    message scroll, above the oldest loaded page. */
 .load-earlier { display: block; margin: var(--space-2) auto var(--space-3); }
 
+/* --------------------------------------------------------------------------
+   Journey channel (docs 20 §19)
+
+   The persistent chat on a journey. It reuses the room's own .chat-* bubbles,
+   day dividers and compose box wholesale — the two are the same list, and the
+   components are shared in src/chat/. What is here is only what a chat inside
+   a normal .page needs and a chat inside the room's flex layout got for free:
+   somewhere to put the height.
+   -------------------------------------------------------------------------- */
+
+/* .page is a block column that grows with its content. The channel needs the
+   opposite — a fixed frame with one scrolling child — so this turns the page
+   into a flex column pinned to the viewport for that tab alone. Without it the
+   composer sits below the fold and the newest message is off-screen, which is
+   precisely backwards for a chat. */
+.page-channel {
+  display: flex;
+  flex-direction: column;
+  /* `dvh`, not `vh`: on a phone `vh` is the tallest the viewport ever gets, so
+     the composer would sit permanently under the browser's own chrome.
+     `--shell-chrome` is whatever sits above the page inside the shell — zero on
+     desktop, the sticky mobile bar's height below 768px, where it is set. */
+  height: calc(100dvh - var(--shell-chrome, 0px));
+  min-height: 0;
+  overflow: hidden;
+}
+/* Every element above the tab strip keeps its natural height; only the channel
+   itself flexes. */
+.page-channel > * { flex-shrink: 0; }
+
+.channel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* The room's .side-scroll, minus the room. Same padding, gap and column
+   direction — a bubble must look identical in both places, because they are
+   the same component. */
+.channel-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* A channel is read in a full-width page, not a 22% panel, so the room's 82%
+   bubble cap would run a one-line message most of the way across a desktop
+   screen and make the author hard to scan. */
+.channel .chat-msg { max-width: min(82%, 44rem); }
+
+/* Where the reader had got to. A .day-divider with the accent colour rather
+   than a shape of its own: it is the same kind of object — a boundary in the
+   stream — and inventing a second one would make the two compete. */
+.day-divider-new { color: var(--accent); font-weight: 600; }
+.day-divider-new::before,
+.day-divider-new::after { border-top-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+/* A tombstone keeps its place in the conversation so the replies around it
+   still read, and says plainly what it is. */
+.chat-deleted { color: var(--text-3); font-style: italic; }
+.chat-edited { color: var(--text-3); font-size: var(--text-2xs); }
+
+/* Edit and delete on your own message. Revealed on hover of the bubble — a
+   chat with two permanent buttons on every line is unreadable — but always
+   present for keyboard and touch, where there is no hover to reveal them. */
+.chat-actions { display: inline-flex; gap: var(--space-1); margin-left: var(--space-2); vertical-align: middle; }
+.chat-action {
+  border: 0; background: none; padding: 2px; cursor: pointer;
+  color: var(--text-3); line-height: 0; border-radius: var(--radius-xs);
+}
+.chat-action:hover { color: var(--text); background: var(--surface-3); }
+@media (hover: hover) and (pointer: fine) {
+  .chat-actions { opacity: 0; transition: opacity .12s ease; }
+  .chat-msg:hover .chat-actions,
+  .chat-actions:focus-within { opacity: 1; }
+}
+
+/* An @mention token inside a message. Deliberately not a link: it resolves to
+   a person only on the server, and a mention that looks clickable but does
+   nothing is worse than one that plainly does not. */
+.mention {
+  color: var(--accent);
+  font-weight: 600;
+  border-radius: var(--radius-xs);
+  padding: 0 2px;
+  background: var(--accent-soft);
+}
+
+/* A message that names *you*. The whole bubble, not just the token: scanning a
+   channel for "was I asked something" should not mean reading every line. */
+.chat-bubble-mention {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* The count of mentions you have not read yet, above the list. Separate from
+   the unread-message count because they say different things to a reader:
+   unread is "there is something here", this is "somebody wants you". */
+.channel-mentions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.channel-frozen {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+/* The composer grew a textarea (src/chat/Composer.jsx) so a channel message
+   can have more than one line. It autogrows in JS; these are the two things
+   CSS has to agree with — no manual resize handle fighting the autogrow, and
+   bottom alignment so the send button stays level with the last line rather
+   than floating beside the middle of a tall box. */
+.compose-chat { align-items: flex-end; }
+.compose-input {
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.5;
+  font-family: inherit;
+}
+
 /* ---------- LLM debug panel ---------- */
 /* Raw request/response blocks. A class rather than an inline style so the
    fullscreen drawer rule above can grow them. */
@@ -2386,9 +2527,16 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   /* Backdrop styling comes from the shared overlay rule; only its existence
      and stacking are mobile-specific. */
   .sidebar-veil { display: block; z-index: 40; }
+  /* The mobile bar is the only thing that ever sits above a page inside the
+     shell, and a full-height page (the journey channel) has to subtract it or
+     its composer lands below the fold. Its height is stated once, as a
+     variable, and used by both — derived from padding it would be two numbers
+     that have to be kept in agreement by hand. */
+  .shell { --shell-chrome: 3rem; }
   .shell-mobilebar {
     display: flex; align-items: center; gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    height: var(--shell-chrome);
+    padding: 0 var(--space-3);
     border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 30; background: var(--bg);
   }

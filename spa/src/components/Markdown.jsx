@@ -1,6 +1,17 @@
 import { Fragment } from 'react'
+import { MENTION_SOURCE } from '../chat/mentions.js'
 
-const INLINE_RE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(\[[^\]\n]+\]\([^)\s]+\))/g
+// Inline tokens, in precedence order: code wins over bold wins over italic,
+// and code consumes its span whole so markup inside backticks is not reparsed.
+//
+// The last alternative is an `@mention` (docs 20 §19.8), composed in from
+// `chat/mentions.js` rather than written out here — a lookbehind with two
+// optional groups is worth having one copy of, and one that plain node can
+// test.
+const INLINE_RE = new RegExp(
+  `(\`[^\`\\n]+\`)|(\\*\\*[^*\\n]+\\*\\*)|(\\*[^*\\n]+\\*)|(\\[[^\\]\\n]+\\]\\([^)\\s]+\\))|(${MENTION_SOURCE})`,
+  'gi'
+)
 
 export function renderInline(text) {
   const out = []
@@ -17,6 +28,11 @@ export function renderInline(text) {
       out.push(<strong key={k++}>{tok.slice(2, -2)}</strong>)
     } else if (tok.startsWith('*')) {
       out.push(<em key={k++}>{tok.slice(1, -1)}</em>)
+    } else if (tok.startsWith('@')) {
+      // Before the link branch, which is a catch-all `else` that assumes
+      // anything reaching it is a link and falls back to raw text when the
+      // parse fails — a mention landing there would render plain, silently.
+      out.push(<span key={k++} className="mention">{tok}</span>)
     } else {
       const lm = tok.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/)
       const url = lm ? lm[2] : ''

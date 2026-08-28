@@ -14,6 +14,7 @@ import { handleCaptionPost, handleCaptionRename, handleCaptionHistory, transcrip
 import { endKelabo, cancelKelabo, rescheduleKelabo } from "./archive.js";
 import { generateMinutes } from "./minutes.js";
 import { generateJourneyReport } from "./journeys.js";
+import { JOURNEY_CHAT_PATH, handleJourneyChat } from "./journeyChat.js";
 import { log, logError } from "./log.js";
 
 export function createGateway(c) {
@@ -49,10 +50,14 @@ async function route(c, req, res) {
   const method = req.method;
 
   const captionPaths = path === "/caption" || path === "/caption/replies" || path === "/caption/rename" || path === "/caption/history";
+  // The journey channel (docs 20 §19) — matched once here and reused below,
+  // because it is a pattern rather than a fixed path and CORS must agree with
+  // routing about which requests it covers.
+  const journeyChatMatch = JOURNEY_CHAT_PATH.exec(path);
   // Same browser-origin rules as the caption channel: the SPA calls all of these
   // from the portal host with credentials. `/presence/stream` is the first
   // non-kelabo-scoped one (docs 18 §5).
-  const corsPaths = captionPaths || path === "/presence/stream" || RTC_PATHS.has(path);
+  const corsPaths = captionPaths || path === "/presence/stream" || !!journeyChatMatch || RTC_PATHS.has(path);
   if (method === "OPTIONS" && corsPaths) {
     setCorsHeaders(c, res, req);
     res.writeHead(204);
@@ -104,6 +109,14 @@ async function route(c, req, res) {
     const session = verifySessionCookie(cookies[COOKIE_SESSION], key);
     if (!session) return send(res, 401, { error: "unauthenticated" });
     return c.presence.subscribe(res, { identity: session.identity, tenantId: session.tenantId });
+  }
+
+  // The journey channel (docs 20 §19). Session-cookie authenticated, like
+  // `/presence/stream` above and unlike everything kelabo-scoped: a journey
+  // has no participant cookie and no guests. Every other journey route is
+  // served by rest-api; these are here because they are the per-message path.
+  if (journeyChatMatch) {
+    return handleJourneyChat(c, req, res, journeyChatMatch, url);
   }
 
   if (RTC_PATHS.has(path)) {

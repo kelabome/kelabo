@@ -33,7 +33,7 @@ import {
   listReadyReports,
   getJourneyDocument,
   getJourneyReport,
-  getJourneyAccessor,
+  resolveJourneyAccess,
   queryJourneyLinks,
   resolveJourneyForKelabo,
   queryJourneyTimeline,
@@ -668,21 +668,19 @@ export function createTunnel(c) {
   /**
    * Whether this identity may attach to the journey directly — the same
    * access rule rest-api's `resolveAccess` applies to every journey read
-   * (docs 20 §3.2), re-derived here rather than widened: owner, or same-tenant
-   * on a public journey, or on a private journey's `ACCESSOR#` roster. Being
-   * host or invitee of a *linked kelabo* is deliberately not enough: that
-   * grant is kelabo-scoped and already served by attaching to the kelabo.
+   * (docs 20 §3.2), never widened: owner, or same-tenant on a public journey,
+   * or on a private journey's `ACCESSOR#` roster. Being host or invitee of a
+   * *linked kelabo* is deliberately not enough: that grant is kelabo-scoped
+   * and already served by attaching to the kelabo.
+   *
+   * The rule itself lives in `journeys.js` as `resolveJourneyAccess`, shared
+   * with the journey channel's HTTP handlers (docs 20 §19) — an agent over
+   * `/rig` and a member over HTTP are the same question asked by two
+   * credentials, and this used to be the only copy of the answer.
    */
   async function mayAttachJourney(conn, meta) {
-    if (meta.tenantId && conn.tenant && meta.tenantId !== conn.tenant) return false;
-    if (meta.ownerIdentity === conn.identity) return true;
-    if (meta.visibility === "public") return true;
-    try {
-      return !!(await getJourneyAccessor(c, meta.journeyId, conn.identity));
-    } catch (err) {
-      c.logError("journey_attach_accessor_lookup_failed", err, { journeyId: meta.journeyId });
-      return false;
-    }
+    const role = await resolveJourneyAccess(c, meta, { identity: conn.identity, tenant: conn.tenant });
+    return role !== "none";
   }
 
   /**

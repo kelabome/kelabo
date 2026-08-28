@@ -85,13 +85,22 @@ click producing two live kelabos from one schedule. End/purge paths keep
 deleting `HOSTACTIVE#` rows so pre-removal rows drain away; nothing writes or
 reads them.
 
-**TTL:** `ttl` is set on META `retentionDays` after `endedAt`.
+**TTL:** `ttl` is set on META `retentionDays` after `endedAt`, and **is swept
+across the rest of the partition in the same call** — `stampKelaboTtl`
+(`gateway/src/db.js`), run from `endKelabo` after the minutes work, in chunks
+of 20 so it does not compete with live rooms. It skips META (already stamped)
+and `JOURNEY#` mirrors, which deliberately outlive the kelabo (docs 20 §4.3).
+Captions that arrive after the sweep stamp themselves from the ended META's own
+`ttl` (`gateway/src/caption.js`).
 
-⚠️ **The TTL does not cascade.** DynamoDB expires only the META item; `UTT#`,
-`CONTRIB#`, `MINUTES` and `PROMOTION` rows are left orphaned in the partition —
-unreachable through `getKelaboMeta` but still holding transcript text. There is
-no scheduled sweep. The only mechanism that deletes a whole partition today is
-the on-demand purge below.
+> This paragraph used to warn that the TTL did not cascade and that `UTT#`,
+> `CONTRIB#`, `MINUTES` and `PROMOTION` rows were left orphaned holding
+> transcript text. That was true before `stampKelaboTtl` existed and has not
+> been true for some time.
+
+The TTL is written **only** by `endKelabo`. A kelabo that never ends never
+gets one — which is one of the structural reasons a persistent chat channel
+belongs on a journey rather than on a long-lived kelabo (docs 20 §19.1).
 
 ### Retention purge (`POST /records/purge`)
 
@@ -321,6 +330,8 @@ and semantics: [20-journey.md](20-journey.md) §4; condensed catalogue:
 | `CONTRIBUTOR#<identity>` | Per-person rollup: `kelaboJoinCount`, `reportRequestCount` — maintained by `ADD` at write time, never derived by scan |
 | `TL#<pad(at,13)>#<rand6>` | Timeline projection row, written in the same call as every mutation — a genuine index, not a derived one |
 | `SETTLED#<kelaboId>` | Idempotency marker for `kelaboJoinCount` settling on kelabo end; no reader of its own |
+| `MSG#<msgId>` | One channel message (docs 20 §19). `msgId` is `<pad(at,13)>-<rand6>` — the sort suffix *is* the id, so it is also the paging cursor and makes edit/delete a point read. Hyphen, not `#`: it travels in a URL path. Append-only; delete is soft (`deletedAt`, `text` REMOVEd) so `messageCount` never decreases. Also `mentions: [identity]` (resolved server-side at write time) and `pinnedAs` once promoted to the board |
+| `READ#<identity>` | Per-person read cursor **and** mention counter: `lastReadAt`, `lastReadMsgId`, `messageCountAtRead`, `mentionCount`, `mentionCountAtRead`. Both badges are an O(1) difference, which is the reason neither counter ever decreases. ⚠️ Being mentioned **creates this row without `lastReadAt`**, so any guard on it must also test `attribute_not_exists(lastReadAt)` — DynamoDB reads `lastReadAt < :at` on a missing attribute as false, which would wedge the cursor permanently (docs 20 §19.8) |
 
 **GSI `tenant-status-index`:** PK `tenantStatus` (`<tenantId>#<status>`, sparse —
 META only), SK `updatedAt` — "journeys in my tenant", public-journey discovery,
@@ -334,8 +345,14 @@ of the kelabos `invitee-index`.
 Access is shared: the REST API has read/write (the whole §11 surface of docs
 20), and the **Gateway task role also has read+write** — it generates reports,
 writes their `ready`/`failed` rows, reads journey context for the agent's
-system prompt, and settles contributor counts on kelabo end
+system prompt, settles contributor counts on kelabo end, and owns the whole
+channel surface, `MSG#` and `READ#` (docs 20 §19.4)
 (`infra/lib/gateway-ecs-stack.js`).
+
+META's `messageCount` / `lastMessageAt` are the channel's own counters.
+`updatedAt` is deliberately **not** bumped by a message: it is the journey
+list's sort key, and chat driving it would reorder everyone's list on every
+line typed.
 
 ---
 

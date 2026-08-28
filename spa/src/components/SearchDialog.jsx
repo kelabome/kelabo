@@ -11,21 +11,29 @@ import { usePresenceContext } from '../presence/PresenceContext'
 
 const SEARCH_DEBOUNCE_MS = 250
 
+// `placeholder` per tab rather than a ternary at the input: with three tabs a
+// two-way ternary becomes a chain nobody updates when a fourth arrives.
 const TABS = [
-  { id: 'contacts', label: 'Contacts' },
-  { id: 'kelabos', label: 'Kelabos' },
+  { id: 'contacts', label: 'Contacts', placeholder: 'Name or email…' },
+  { id: 'kelabos', label: 'Kelabos', placeholder: 'Title, or anything from the minutes…' },
+  { id: 'journeys', label: 'Journeys', placeholder: 'Title, description, or a pinned message…' },
 ]
 
 /**
- * Global search, from the magnifier in the rail. One box, two tabs: people
- * (favourites and the org directory) and past kelabos (titles from the
- * record list, plus full text of the minutes — the server reads those out of
- * the archives, most recent first, so "where did we decide that?" is
- * answerable without remembering which kelabo it was).
+ * Global search, from the magnifier in the rail. One box, three tabs: people
+ * (favourites and the org directory), past kelabos (titles from the record
+ * list, plus full text of the minutes — the server reads those out of the
+ * archives, most recent first, so "where did we decide that?" is answerable
+ * without remembering which kelabo it was), and journeys (titles, then
+ * descriptions and pinned board messages, docs 20 §11).
  *
  * Rows act: a contact opens the call dialog via `onCall`; a kelabo opens its
- * record. With nothing typed, each tab shows what you would most likely reach
- * for — favourites, and the latest records.
+ * record; a journey opens its page. With nothing typed, each tab shows what
+ * you would most likely reach for — favourites, the latest records, your
+ * journeys.
+ *
+ * Both capped searches say so when they were capped, rather than letting
+ * somebody conclude the thing they are looking for is not there.
  */
 export function SearchDialog({ onClose, onCall }) {
   const navigate = useNavigate()
@@ -38,25 +46,43 @@ export function SearchDialog({ onClose, onCall }) {
   const [records, setRecords] = useState(null) // recent records, for the empty state
   const [hits, setHits] = useState(null) // server search results
   const [minutesCapped, setMinutesCapped] = useState(false)
+  const [journeys, setJourneys] = useState(null) // recent journeys, for the empty state
+  const [journeyHits, setJourneyHits] = useState(null)
+  const [bodyCapped, setBodyCapped] = useState(false)
   const [searching, setSearching] = useState(false)
 
   useEffect(() => {
     api.listContacts().then(d => setFavourites(d.favourites || [])).catch(() => {})
     api.listRecords().then(d => setRecords(d.records || [])).catch(() => setRecords([]))
+    api
+      .listJourneys()
+      // Three buckets on the wire, one list here — the distinction between
+      // owned, shared and public is a discovery concern, and somebody typing
+      // into a search box has already decided which journey they mean.
+      .then(d => setJourneys([...(d.mine || []), ...(d.accessible || []), ...(d.public || [])]))
+      .catch(() => setJourneys([]))
   }, [])
 
   // One debounce drives both tabs — the query means the same thing in each,
   // and switching tabs after typing should show results, not restart them.
   useEffect(() => {
     const q = query.trim()
-    if (q.length < 2) { setPeople(null); setHits(null); setMinutesCapped(false); setSearching(false); return undefined }
+    if (q.length < 2) {
+      setPeople(null); setHits(null); setMinutesCapped(false)
+      setJourneyHits(null); setBodyCapped(false); setSearching(false)
+      return undefined
+    }
     setSearching(true)
     const t = setTimeout(() => {
-      Promise.allSettled([api.searchPeople(q), api.searchRecords(q)])
-        .then(([p, r]) => {
+      // allSettled, not all: one endpoint failing must leave that tab empty,
+      // never break the other two.
+      Promise.allSettled([api.searchPeople(q), api.searchRecords(q), api.searchJourneys(q)])
+        .then(([p, r, j]) => {
           setPeople(p.status === 'fulfilled' ? p.value?.suggestions || [] : [])
           setHits(r.status === 'fulfilled' ? r.value?.results || [] : [])
           setMinutesCapped(r.status === 'fulfilled' ? !!r.value?.minutesCapped : false)
+          setJourneyHits(j.status === 'fulfilled' ? j.value?.results || [] : [])
+          setBodyCapped(j.status === 'fulfilled' ? !!j.value?.bodyCapped : false)
         })
         .finally(() => setSearching(false))
     }, SEARCH_DEBOUNCE_MS)
@@ -73,7 +99,13 @@ export function SearchDialog({ onClose, onCall }) {
     return (records || []).slice(0, 8).map(r => ({ ...r, matched: null }))
   }, [hits, records])
 
+  const journeyRows = useMemo(() => {
+    if (journeyHits) return journeyHits
+    return (journeys || []).slice(0, 8).map(j => ({ ...j, matched: null }))
+  }, [journeyHits, journeys])
+
   const openRecord = id => { onClose(); navigate(`/kelabos/${id}`) }
+  const openJourney = id => { onClose(); navigate(`/journeys/${id}`) }
   const openContact = email => { onClose(); navigate(`/contacts?q=${encodeURIComponent(email)}`) }
 
   return (
@@ -95,7 +127,7 @@ export function SearchDialog({ onClose, onCall }) {
             className="input"
             value={query}
             autoFocus
-            placeholder={tab === 'contacts' ? 'Name or email…' : 'Title, or anything from the minutes…'}
+            placeholder={TABS.find(t => t.id === tab)?.placeholder}
             aria-label="Search"
             onChange={e => setQuery(e.target.value)}
           />
@@ -163,6 +195,38 @@ export function SearchDialog({ onClose, onCall }) {
               ))}
               {minutesCapped && (
                 <div className="menu-note">Minutes of older kelabos were not searched — titles still were.</div>
+              )}
+            </div>
+          </>
+        )}
+
+        {tab === 'journeys' && (
+          <>
+            <div className="menu-label">{journeyHits ? 'Search results' : 'Your journeys'}</div>
+            <div className="picker-list">
+              {searching && journeyRows.length === 0 && <div className="menu-empty">Searching…</div>}
+              {!searching && journeys === null && journeyRows.length === 0 && <div className="menu-empty">Loading…</div>}
+              {!searching && journeys !== null && journeyRows.length === 0 && (
+                <div className="menu-empty">
+                  {!journeyHits && <span className="empty-mark" aria-hidden="true"></span>}
+                  {journeyHits ? 'Nothing in your journeys matches that.' : 'No journeys yet.'}
+                </div>
+              )}
+              {journeyRows.map(j => (
+                <button type="button" className="picker-row" key={j.journeyId} onClick={() => openJourney(j.journeyId)}>
+                  {/* Seeded by journeyId, the same identicon the journey list
+                      and its own page draw — a journey is recognised by it. */}
+                  <Avatar id={j.journeyId} variant={j.avatarVariant} size={22} />
+                  <span className="search-hit">
+                    <span className="search-hit-title">{j.title}</span>
+                    {j.snippet && <span className="search-hit-snippet">{j.snippet}</span>}
+                  </span>
+                  {j.matched === 'body' && <span className="chip">description</span>}
+                  <span className="row-meta">{j.updatedAt ? timeAgo(j.updatedAt) : ''}</span>
+                </button>
+              ))}
+              {bodyCapped && (
+                <div className="menu-note">Descriptions of older journeys were not searched — titles still were.</div>
               )}
             </div>
           </>

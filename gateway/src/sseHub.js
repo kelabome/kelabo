@@ -22,8 +22,11 @@ export function setCorsHeaders(c, res, req) {
   res.setHeader("Access-Control-Allow-Origin", corsOrigin(c, req?.headers?.origin));
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Headers", "content-type, authorization");
-  // PUT is needed by /rtc/sfu/renegotiate and /rtc/sfu/tracks/close.
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+  // PUT is needed by /rtc/sfu/renegotiate and /rtc/sfu/tracks/close; PATCH and
+  // DELETE by the journey channel's edit and soft-delete (docs 20 §19). A
+  // method missing here fails in the browser as a CORS preflight rejection,
+  // which reads like an auth problem and is not one.
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader("Vary", "Origin");
 }
 
