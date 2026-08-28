@@ -42,11 +42,24 @@ function writeEvent(res, data) {
 }
 
 export function createPresence(c) {
+  // Overridable only through the container, the same seam `llm` and
+  // `skipRebuild` use — a test cannot wait 25 seconds to assert the keepalive
+  // is the visible kind, and the alternative is not asserting it at all.
+  // Never a config value: no deployment has a reason to change this.
+  const pingMs = c.presencePingMs ?? PING_INTERVAL_MS;
   const pingTimer = setInterval(() => {
     for (const [, entry] of c.state.presence) {
-      for (const res of entry.streams) writeRaw(res, `: ping\n\n`);
+      // A named event, not the SSE comment this used to be. A comment keeps
+      // proxies from idling the TCP connection but is invisible to the
+      // EventSource API, so a client could never tell a quiet stream from a
+      // half-open socket — exactly the lesson `sseHub` records for the caption
+      // stream. It did not matter while this carried only presence and rings,
+      // both of which self-correct; it matters now that thread messages ride
+      // it (docs 20 §19.9) and a silently dead stream means a person simply
+      // stops being told anything.
+      for (const res of entry.streams) writeRaw(res, `event: ping\ndata: {}\n\n`);
     }
-  }, PING_INTERVAL_MS);
+  }, pingMs);
   pingTimer.unref?.();
   c.shutdownHooks.push(async () => clearInterval(pingTimer));
 
@@ -78,11 +91,45 @@ export function createPresence(c) {
     return set;
   }
 
-  /** Deliver one presence event to every stream a target identity holds. */
+  /** Deliver one presence event to every stream a target identity holds.
+   *  Answers whether anyone was reachable, which the journey fan-out logs. */
   function sendTo(identity, data) {
     const entry = c.state.presence.get(identity);
-    if (!entry) return;
+    if (!entry) return false;
     for (const res of entry.streams) writeEvent(res, data);
+    return entry.streams.size > 0;
+  }
+
+  /** Everyone from this tenant holding a stream right now. The audience for a
+   *  public journey, whose membership is a tenant match computed at read time
+   *  (docs 20 §3.2) and which the Gateway therefore cannot enumerate — but it
+   *  does not have to: an offline person cannot be pushed to anyway, and their
+   *  badge is correct the moment they load a page. */
+  function tenantOnline(tenantId) {
+    return new Set(c.state.presenceByTenant.get(tenantId) || []);
+  }
+
+  /**
+   * Fan one thread message out to a journey's members (docs 20 §19.9).
+   *
+   * This stream rather than one of its own: it is already open on every page
+   * of a signed-in tab, it is authenticated by the session cookie — exactly
+   * the credential a journey uses — and it already carries a non-presence
+   * payload in the ring. A dedicated journey stream would be a third
+   * EventSource against the browser's six-per-origin budget, and would still
+   * not solve the cross-journey badge, because you are by definition not
+   * subscribed to the journey you are not looking at.
+   *
+   * There is no replay here, deliberately (docs 18 §5.4). A missed event costs
+   * one late badge and nothing else: every surface still polls as a backstop,
+   * and the counts themselves are always recomputed server-side.
+   */
+  function notifyJourney(identities, payload) {
+    let reached = 0;
+    for (const identity of identities) {
+      if (sendTo(identity, { kind: "journey_message", ...payload })) reached++;
+    }
+    return reached;
   }
 
   /**
@@ -273,5 +320,5 @@ export function createPresence(c) {
     c.log("ring_cancelled", { kelaboId, reason });
   }
 
-  return { subscribe, refreshKelaboState, isInKelabo, isOnline, onlineIdentities, ring, ringAnswer, ringCancel };
+  return { subscribe, refreshKelaboState, isInKelabo, isOnline, onlineIdentities, tenantOnline, notifyJourney, ring, ringAnswer, ringCancel };
 }

@@ -140,6 +140,10 @@ export async function createContainer(overrides = {}) {
    *    task definition, which is also what `LLM_CONFIG` reads) and the local
    *    path (`config/kelabo.json`, which the environment does not carry).
    */
+  // Test-only: shortens the presence keepalive so the named-ping contract
+  // (docs 18 §5) can be asserted without a 25-second wait.
+  if (overrides.presencePingMs) c.presencePingMs = overrides.presencePingMs;
+
   c.llm = overrides.llm ?? {
     async completeRaw(req) {
       const apiKey = llmApiKeyFrom(await getCredential("llm"));

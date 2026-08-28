@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import { useAppData } from '../components/AppShell'
+import { usePresenceContext } from '../presence/PresenceContext'
 import { useConfirm } from '../components/ConfirmDialog'
 import { usePrompt } from '../components/PromptDialog'
 import { useToast } from '../components/Toaster'
@@ -65,11 +66,10 @@ const TABS = [
 const HELM_TAB = { id: 'helm', label: 'Helm' }
 
 // The thread list is polled here so the Threads tab can carry a badge while
-// another tab is open. Same cadence as the journey list's own poll: unread is
-// not something anyone watches by the second, and this is several rows per
-// journey. Replaced by a push over the presence stream when that lands
-// (docs 20 §19.9).
-const THREADS_POLL_MS = 20000
+// another tab is open. A backstop only: messages are pushed over the presence
+// stream (docs 20 §19.9), and this exists because that stream has no replay.
+const THREADS_POLL_MS = 60000
+const PUSH_DEBOUNCE_MS = 250
 
 const TIMELINE_TYPES = [
   { id: '', label: 'All' },
@@ -1202,6 +1202,8 @@ export default function JourneyDetail() {
   const reload = () => api.getJourney(id).then(setJourney).catch(e => setError(e.status === 403 || e.status === 401 ? 'forbidden' : e.status === 404 ? 'not_found' : 'error'))
   useEffect(() => { reload() }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const { onJourneyMessage } = usePresenceContext()
+
   // Declared before the thread poll below, which reads `isMember` in its
   // dependency array — a `const` referenced above its declaration is a
   // temporal-dead-zone throw during render, not an undefined.
@@ -1226,11 +1228,22 @@ export default function JourneyDetail() {
     load()
     const t = setInterval(load, THREADS_POLL_MS)
     document.addEventListener('visibilitychange', load)
+    // Pushed (docs 20 §19.9), and coalesced so a burst of messages costs one
+    // refresh. Filtered to this journey: the stream carries every journey the
+    // person is a member of, and the rail is what cares about the others.
+    let debounce = null
+    const off = onJourneyMessage(evt => {
+      if (evt.journeyId !== id) return
+      clearTimeout(debounce)
+      debounce = setTimeout(load, PUSH_DEBOUNCE_MS)
+    })
     return () => {
       clearInterval(t)
+      clearTimeout(debounce)
+      off()
       document.removeEventListener('visibilitychange', load)
     }
-  }, [reloadThreads, isMember]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reloadThreads, isMember, id, onJourneyMessage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const threadUnread = useMemo(
     () => (threads || []).reduce(

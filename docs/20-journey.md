@@ -1177,14 +1177,14 @@ MCP tool surface — is now built; see §10, §12.1's own note, and §12.2.
    briefing. §12.4 remains deliberately unbuilt.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.
-7. 🟡 **Threads** — §19. Built: `THREAD#`/`MSG#`/`READ#` rows, thread CRUD,
-   the Gateway's HTTP surface, the shared `src/chat/` components and the
-   Threads tab (§19.2–§19.6); pin-to-board (§19.7); `@person` mentions with
-   their own counter (§19.8); the `@kelabo` assistant and its three MCP tools
-   (§19.10); unread on the journey list; and `GET /journeys/search` with its
-   tab in the search dialog (§11). Not built: live fan-out over the presence
-   stream — the threads still poll — and pushing "you were mentioned" to an
-   attached agent (§19.9).
+7. ✅ **Threads** — §19. `THREAD#`/`MSG#`/`READ#` rows, thread CRUD, the
+   Gateway's HTTP surface, the shared `src/chat/` components and the Threads
+   tab (§19.2–§19.6); pin-to-board (§19.7); `@person` mentions with their own
+   counter (§19.8); realtime fan-out over the presence stream, with the named
+   keepalive and client watchdog it required (§19.9); the `@kelabo` assistant
+   and its three MCP tools (§19.10); unread badges at every level from the
+   rail down to the thread; and `GET /journeys/search` with its tab in the
+   search dialog (§11). What remains is in §19.11.
 
 ---
 
@@ -1461,6 +1461,48 @@ different colour. `mentionsMe` is stamped by the server onto each message for
 the same reason — a client re-deriving it would be a second implementation of
 the matching rule that could disagree with the badge it sits beside.
 
+### 19.9 Realtime
+
+A thread message is pushed over the **presence stream**, not a stream of its
+own. It is already open on every page of a signed-in tab, it is authenticated
+by the session cookie — exactly the credential a journey uses — and it already
+carries a non-presence payload in the ring. A dedicated journey stream would
+be a third `EventSource` against the browser's six-per-origin budget, and it
+would still not solve the cross-journey badge: you are by definition not
+subscribed to the journey you are not looking at.
+
+**Audience** is owner + `ACCESSOR#` roster for a private journey, and everyone
+from the tenant holding a stream for a public one — **never** a public
+journey's accessor rows, which a private→public flip leaves behind inert
+(§3.2) and which reading here would resurrect as a notification list. An
+offline member is simply not pushed to; their badge is correct the moment they
+load a page.
+
+**The whole message travels**, not a nudge to go and look, so a client already
+reading that thread renders it immediately — the difference between a chat and
+a page that refreshes. Everyone else uses the event only as a signal to
+refresh, and the counts stay server-computed: the event is never the source of
+a badge number, only of the decision to go and ask for one. Refreshes are
+debounced so a burst of messages costs one round trip.
+
+**The author is included** rather than skipped. Their other tabs need it, and
+the tab that posted merges it by `msgId` into the copy it already applied.
+
+**Every surface still polls, slowly, as a backstop** (45–60s: the thread's own
+messages, the journey's thread list, and the rail's journey list). This stream has
+no replay by design (docs 18 §5.4), so an event missed across a reconnect
+would otherwise be a badge that never appears. Push is what makes it fast;
+polling is what makes it eventually right.
+
+> The keepalive had to change for this. It was an SSE **comment**, which keeps
+> a proxy from idling the connection but is invisible to `EventSource` — so a
+> client could not tell a quiet stream from a half-open socket, and no
+> staleness watchdog was possible. It is a named `ping` event now, the same
+> lesson `sseHub` records for the caption stream, and `usePresence` carries the
+> watchdog that depends on it. It did not matter while this stream carried only
+> presence and rings, both of which self-correct; it matters when a dead socket
+> means somebody silently stops being told anything.
+
 ### 19.10 The assistant, on `@kelabo` only
 
 Typing `@kelabo …` in a thread gets an answer, posted into that same thread as
@@ -1514,27 +1556,18 @@ an attached agent is a participant. Thread messages arrive inside a
 `<kelabo-thread untrusted="true">` envelope, like every other multi-contributor
 surface.
 
-### 19.9 Not built yet
+### 19.11 Not built yet
 
-- **Phase 2 — live and unread.** Fan out on the **presence stream** rather
-  than a stream of its own: it is already open on every page, is
-  session-authed, and already carries a non-presence payload (the ring). That
-  gives cross-channel unread badges as push, with no third `EventSource`
-  against the browser's six-per-origin budget. Two obstacles named honestly:
-  its audience is the *presence* audience, so the recipient set must be
-  resolved from journey membership (owner + accessors for private, the tenant
-  for public — **never** the accessor rows for a public journey, which may be
-  stale after a visibility flip); and it has no replay, so reconnect must
-  refetch with `since`. Also: the presence stream has no client-side stall
-  watchdog, unlike `useBoard`, and would need one.
 - **Telling an agent it was mentioned.** The three MCP tools are all
   agent-initiated (§19.10). A *push* — "somebody named you in thread X" —
   needs `state.journeyTunnels`, the journey-keyed reverse index whose absence
   `tunnel.js` documents as deliberate, plus a down-frame and an unwind in
   `ws.on("close")`. The server-side path is what makes `@kelabo` answer for
   someone with no agent attached, and it is built.
-- **The mention badge in the rail.** It renders in the thread list and on the
-  journey list; the left rail has no journey section to put one on yet.
+- **A notification outside the tab.** Unread now reaches the rail, the journey
+  row, the tab and the thread (§19.3), but only while the app is open. A
+  browser notification for a mention would reuse `notify.js`, which is already
+  gated on `document.hidden`.
 
 **Reply-chains** are deliberately absent, and are a different thing from the
 named threads this section describes. `msgId` is the only grouping key inside

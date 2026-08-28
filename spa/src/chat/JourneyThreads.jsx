@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { journeyChat } from '../api'
 import { useAuth } from '../auth'
+import { usePresenceContext } from '../presence/PresenceContext'
 import { useConfirm } from '../components/ConfirmDialog'
 import { usePrompt } from '../components/PromptDialog'
 import { useToast } from '../components/Toaster'
@@ -27,11 +28,11 @@ import { apply, applyPage, emptyChannel, firstUnreadId, projectMessages } from '
  * which is pure and tested. This component fetches, polls and renders.
  */
 
-// Phase 2 replaces this with a push over the presence stream, which is already
-// open on every page. Deliberately slower than a chat feels: it is a stopgap,
-// and making it fast enough to pass for live would make it expensive enough to
-// be worth keeping.
-const POLL_MS = 5000
+// Messages arrive by push over the presence stream (docs 20 §19.9). This poll
+// is the backstop for the one thing push cannot promise: that stream has no
+// replay, so an event missed across a reconnect would otherwise be a message
+// that never appears. `since` makes each check cheap — usually an empty page.
+const POLL_MS = 45000
 
 // Debounced so scrolling through a busy thread does not write a cursor per
 // frame.
@@ -39,6 +40,7 @@ const READ_DEBOUNCE_MS = 1200
 
 export function JourneyThreads({ journeyId, isMember, isActive, threads, reloadThreads }) {
   const { identity } = useAuth()
+  const { onJourneyMessage } = usePresenceContext()
   const me = identity?.email
   const confirm = useConfirm()
   const prompt = usePrompt()
@@ -125,6 +127,21 @@ export function JourneyThreads({ journeyId, isMember, isActive, threads, reloadT
     }
   }, [journeyId, threadId, me])
 
+  // A message in the thread you are reading is applied the moment it arrives
+  // (docs 20 §19.9) — the whole message rides the event, so there is nothing
+  // to go and fetch. This is the difference between a chat and a page that
+  // refreshes.
+  useEffect(() => {
+    if (!isMember || !threadId) return undefined
+    return onJourneyMessage(evt => {
+      if (evt.journeyId !== journeyId || evt.threadId !== threadId || !evt.message) return
+      // Through the same reducer as everything else: it merges by msgId, so
+      // the echo of your own message and a duplicate delivery both collapse
+      // into the copy already held.
+      setChannel(prev => apply(prev, evt.message))
+    })
+  }, [journeyId, threadId, isMember, onJourneyMessage])
+
   useEffect(() => {
     if (!isMember || !threadId) return undefined
     const tick = async () => {
@@ -140,8 +157,8 @@ export function JourneyThreads({ journeyId, isMember, isActive, threads, reloadT
           reloadThreads().catch(() => {})
         }
       } catch {
-        // A failed poll is not worth a banner: the next one is 5s away, and
-        // the initial load already reported anything fatal.
+        // A failed poll is not worth a banner: the next one is a while away,
+        // and the initial load already reported anything fatal.
       }
     }
     const t = setInterval(tick, POLL_MS)

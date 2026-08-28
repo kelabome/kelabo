@@ -943,7 +943,63 @@ export async function putJourneyMessage(
       c.logError("journey_mention_bump_failed", err, { journeyId, threadId, msgId, identity })
     );
   }
-  return toWireMessage(item);
+
+  const message = toWireMessage(item);
+  // Push last, and never in the write's path: the message is already stored
+  // and every surface polls as a backstop, so a fan-out that throws must cost
+  // a few seconds of latency rather than the message itself.
+  fanOutJourneyMessage(c, journeyId, message).catch((err) =>
+    c.logError("journey_message_fanout_failed", err, { journeyId, threadId, msgId })
+  );
+  return message;
+}
+
+/**
+ * Who should be told about a message in this journey (docs 20 §19.9).
+ *
+ * A private journey's audience is its owner plus the `ACCESSOR#` roster. A
+ * public one's is everyone from the tenant holding a presence stream — and
+ * **never** its accessor rows, which a private→public flip leaves behind
+ * inert (§3.2) and which reading here would quietly resurrect as a
+ * notification list.
+ */
+async function journeyAudience(c, journeyId, meta) {
+  const out = new Set();
+  if (meta?.visibility === "public" && meta?.tenantId) {
+    for (const id of c.presence?.tenantOnline?.(meta.tenantId) || []) out.add(id);
+  } else {
+    const accessors = await queryJourneyItems(c, journeyId, "ACCESSOR#").catch(() => []);
+    for (const a of accessors) if (a.identity) out.add(String(a.identity).toLowerCase());
+  }
+  if (meta?.ownerIdentity) out.add(String(meta.ownerIdentity).toLowerCase());
+  return out;
+}
+
+/**
+ * Tell the journey's members a message landed.
+ *
+ * The whole message travels, not a nudge to go and look: a client already
+ * reading that thread can render it immediately, which is the difference
+ * between a chat and a page that refreshes. Everyone else uses it only as a
+ * signal to refresh their counts, which stay server-computed — the event is
+ * never the source of a badge number, only of the decision to go and ask for
+ * one.
+ *
+ * The author is included rather than skipped. Their other tabs need it, and
+ * the tab that posted merges it by `msgId` into the copy it already applied.
+ */
+async function fanOutJourneyMessage(c, journeyId, message) {
+  if (!c.presence?.notifyJourney) return;
+  const meta = await getJourneyMeta(c, journeyId).catch(() => null);
+  if (!meta) return;
+  const audience = await journeyAudience(c, journeyId, meta);
+  const reached = c.presence.notifyJourney(audience, {
+    journeyId,
+    journeyTitle: meta.title || "",
+    threadId: message.threadId,
+    message,
+  });
+  if (reached) c.log("journey_message_fanned", { journeyId, threadId: message.threadId, reached });
 }
 
 /**

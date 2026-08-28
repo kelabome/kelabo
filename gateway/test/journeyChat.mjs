@@ -146,6 +146,41 @@ const llm = {
   },
 };
 
+/** Open a /presence/stream and collect parsed `presence` events — the same
+ *  helper test/presence.mjs uses, because this is the same stream. */
+function connectPresence(port, identity, tenantId = "example.com") {
+  return new Promise((resolve, reject) => {
+    const r = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/presence/stream",
+        method: "GET",
+        headers: { cookie: `kelabo_session=${sessionCookie(identity, tenantId)}` },
+      },
+      (res) => {
+        if (res.statusCode !== 200) return reject(new Error(`presence status ${res.statusCode}`));
+        const events = [];
+        let buf = "";
+        res.on("data", (d) => {
+          buf += d.toString("utf8");
+          let i;
+          while ((i = buf.indexOf("\n\n")) >= 0) {
+            const block = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            const ev = block.match(/^event: (.+)$/m)?.[1];
+            const data = block.match(/^data: (.+)$/m)?.[1];
+            if (ev === "presence" && data) events.push(JSON.parse(data));
+          }
+        });
+        resolve({ res, events });
+      }
+    );
+    r.on("error", reject);
+    r.end();
+  });
+}
+
 const waitFor = async (fn, ms = 3000, step = 25) => {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -417,6 +452,46 @@ async function main() {
   await new Promise(r => setTimeout(r, 150));
   assert.equal(llmCalls, quiet, "an ordinary message costs no model call");
   ok("only an explicit mention reaches the model");
+
+  // --- realtime fan-out (docs 20 §19.9) -------------------------------------
+  //
+  // Driven over a real /presence/stream, because the interesting claims are
+  // who receives an event and who does not, and both are decided by code that
+  // only runs on a live connection.
+
+  const bobStream = await connectPresence(port, "bob@example.com");
+  const strangerStream = await connectPresence(port, "carol@example.com");
+  await new Promise(r => setTimeout(r, 60));
+
+  await call(port, "POST", messages, { identity: "alice@example.com", body: { text: "realtime please" } });
+  const evt = await waitFor(() => bobStream.events.find(e => e.kind === "journey_message"));
+  assert.equal(evt.journeyId, JOURNEY);
+  assert.equal(evt.threadId, T);
+  // The whole message rides the event, so a client already reading the thread
+  // renders it without a round trip. That is the difference between realtime
+  // and a fast poll.
+  assert.equal(evt.message.text, "realtime please");
+  assert.equal(evt.message.author, "alice@example.com");
+  assert.ok(evt.message.msgId);
+  ok("a message reaches a member's presence stream, whole");
+
+  // Carol is signed in and holding a stream, but is not on this private
+  // journey's roster. A fan-out that reached her would be a disclosure bug,
+  // not a noisy badge.
+  assert.equal(strangerStream.events.some(e => e.kind === "journey_message"), false);
+  ok("a non-member holding a presence stream is not told anything");
+
+  // The author's other tabs get it too — the tab that posted merges by msgId
+  // into the copy it already applied, so including them costs nothing and
+  // leaving them out would desync a second window.
+  const aliceStream = await connectPresence(port, "alice@example.com");
+  await new Promise(r => setTimeout(r, 60));
+  await call(port, "POST", messages, { identity: "alice@example.com", body: { text: "second window" } });
+  const own = await waitFor(() => aliceStream.events.find(e => e.kind === "journey_message"));
+  assert.equal(own.message.text, "second window");
+  ok("the author's own other tabs are told as well");
+
+  for (const s of [bobStream, strangerStream, aliceStream]) s.res.destroy();
 
   server.close();
   await c.shutdown?.();

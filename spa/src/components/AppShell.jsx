@@ -3,6 +3,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { api, logout } from '../api'
 import { SETTINGS_SYNCED_EVENT } from '../settings'
 import { useAuth, displayName } from '../auth'
+import { usePresenceContext } from '../presence/PresenceContext'
 import { themeIcon, toggleTheme } from '../theme'
 import { pushSettings } from '../settings'
 import { Button } from './ui/Button'
@@ -31,6 +32,13 @@ import { useConfirm } from './ConfirmDialog'
  */
 
 const SIDEBAR_KEY = 'kelabo-sidebar-collapsed'
+
+// Journey unread arrives by push (docs 20 §19.9); this is the backstop for a
+// missed event or a reconnect, not the delivery mechanism.
+const JOURNEYS_POLL_MS = 60000
+// Long enough to fold a burst of messages into one refresh, short enough that
+// a badge still feels immediate.
+const PUSH_DEBOUNCE_MS = 250
 
 /** Kelabos + records + journeys, fetched once here rather than per-route. */
 const AppDataContext = createContext({
@@ -70,6 +78,7 @@ function shortWhen(at) {
 
 export function AppShell({ children }) {
   const { identity } = useAuth()
+  const { onJourneyMessage } = usePresenceContext()
   const navigate = useNavigate()
   const location = useLocation()
   const toast = useToast()
@@ -118,9 +127,11 @@ export function AppShell({ children }) {
   // you anything. Owning the fetch here also means the route below and this
   // rail share one poll instead of racing two.
   //
-  // 20s, not the kelabo list's 8s: the call rolls up unread across every
-  // journey's threads, and nobody watches an unread count by the second.
-  // Skipped while the tab is hidden, and refreshed the moment it comes back.
+  // The poll is now a backstop, not the delivery mechanism: a thread message
+  // is pushed over the presence stream (docs 20 §19.9) and refreshes this
+  // within a moment. It stays because that stream has no replay — a missed
+  // event would otherwise mean a badge that never appears — and because a
+  // reconnect re-syncs by asking, not by being told.
   useEffect(() => {
     if (!identity) return undefined
     let cancelled = false
@@ -138,14 +149,25 @@ export function AppShell({ children }) {
         .catch(() => { if (!cancelled) setJourneys(prev => { if (!prev) setJourneysError(true); return prev }) })
     }
     load()
-    const t = setInterval(load, 20000)
+    const t = setInterval(load, JOURNEYS_POLL_MS)
     document.addEventListener('visibilitychange', load)
+    // Coalesced: a burst of messages must cost one refresh, not one each. The
+    // event carries the message, but the *count* is always recomputed
+    // server-side — a client that added up its own badge would drift from the
+    // thing it is a badge for.
+    let debounce = null
+    const off = onJourneyMessage(() => {
+      clearTimeout(debounce)
+      debounce = setTimeout(load, PUSH_DEBOUNCE_MS)
+    })
     return () => {
       cancelled = true
       clearInterval(t)
+      clearTimeout(debounce)
+      off()
       document.removeEventListener('visibilitychange', load)
     }
-  }, [identity])
+  }, [identity, onJourneyMessage])
 
   // Active kelabos drive the rail's live badges, so they poll; records only
   // change when a kelabo ends, so they reload on navigation instead.

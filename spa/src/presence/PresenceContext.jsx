@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react'
+import { createContext, useCallback, useContext, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { api } from '../api'
@@ -19,13 +19,34 @@ const PresenceContext = createContext({
   presence: new Map(),
   isOnline: () => false,
   inKelabo: () => false,
+  onJourneyMessage: () => () => {},
 })
 
 export function PresenceProvider({ children }) {
   const { identity } = useAuth()
   const navigate = useNavigate()
   const ring = useRing()
-  const value = usePresence(identity, ring.handleRingEvent)
+
+  // Journey thread messages (docs 20 §19.9) reach several unrelated places at
+  // once — the rail's badge, the journey page's tab badge, the open thread —
+  // and none of them owns the stream. A subscription set rather than a piece
+  // of state: putting the last event in state would re-render every consumer
+  // on every message, including the ones that only wanted to know a count
+  // changed.
+  const journeySubs = useRef(new Set())
+  const onJourneyMessage = useCallback(fn => {
+    journeySubs.current.add(fn)
+    return () => journeySubs.current.delete(fn)
+  }, [])
+  const fanOut = useCallback(evt => {
+    // A throwing subscriber must not stop the others from being told.
+    for (const fn of [...journeySubs.current]) {
+      try { fn(evt) } catch {}
+    }
+  }, [])
+
+  const presence = usePresence(identity, ring.handleRingEvent, fanOut)
+  const value = useMemo(() => ({ ...presence, onJourneyMessage }), [presence, onJourneyMessage])
 
   const accept = async () => {
     const r = ring.incoming

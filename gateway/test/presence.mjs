@@ -78,6 +78,26 @@ function statusOf(port, path, cookie) {
   });
 }
 
+/** Raw bytes off a presence stream, with the ping interval shortened so the
+ *  keepalive lands inside the test rather than 25 seconds later. */
+function rawPresenceFrames(port, identity, ms = 250) {
+  return new Promise((resolve, reject) => {
+    const r = http.request(
+      { host: "127.0.0.1", port, path: "/presence/stream", method: "GET", headers: { cookie: `kelabo_session=${sessionCookie(identity)}` } },
+      (res) => {
+        let buf = "";
+        res.on("data", (d) => { buf += d.toString("utf8"); });
+        res.on("error", () => {});
+        setTimeout(() => { r.destroy(); resolve(buf); }, ms);
+      }
+    );
+    // Tearing down mid-stream is the point of this helper, so the reset it
+    // provokes is expected rather than a failure.
+    r.on("error", () => {});
+    r.end();
+  });
+}
+
 const internalJwt = (sub) => signJwt({ sub, aud: "gateway-internal", iat: Math.floor(NOW / 1000), exp: Math.floor(NOW / 1000) + 300 }, KEY);
 
 function internalPost(port, path, sub, body = {}) {
@@ -111,7 +131,7 @@ let passed = 0;
 function ok(name) { console.log("ok:", name); passed++; }
 
 async function main() {
-  const c = await createContainer({ config, db, s3, secrets, skipRebuild: true });
+  const c = await createContainer({ config, db, s3, secrets, skipRebuild: true, presencePingMs: 60 });
   const server = createGateway(c);
   await new Promise((r) => server.listen(0, r));
   const port = server.address().port;
@@ -222,6 +242,19 @@ async function main() {
   alice.res.destroy();
   await waitFor(() => bob.events.find((e) => e.kind === "offline" && e.identity === "alice@example.com"));
   ok("closing the last tab fires offline to watchers");
+
+  // The keepalive is a NAMED event, not the SSE comment it used to be.
+  // A comment keeps the TCP connection warm but is invisible to EventSource,
+  // so the client cannot tell a quiet stream from a half-open socket — and
+  // with thread messages riding this stream (docs 20 §19.9), a dead socket
+  // means a person silently stops being told anything. The client's watchdog
+  // is built on seeing this event, so its name is part of the contract.
+  {
+    const raw = await rawPresenceFrames(port, "alice@example.com");
+    assert.ok(raw.includes("event: ping"), `expected a named ping frame, got: ${JSON.stringify(raw.slice(0, 200))}`);
+    assert.ok(!/^: ping/m.test(raw), "the invisible comment form must not come back");
+    ok("the keepalive is a named event the client can actually see");
+  }
 
   bob.res.destroy();
   await new Promise((r) => setTimeout(r, 30));
