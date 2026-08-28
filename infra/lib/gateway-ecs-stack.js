@@ -270,7 +270,13 @@ export class GatewayEcsStack extends Stack {
     taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({ actions: ["dynamodb:GetItem"], resources: [tables.refresh.tableArn] }),
     );
-    archiveBucket.grantWrite(taskRole);
+    // Read as well as write. Write is the obvious half — ending a kelabo puts
+    // the archive here. Read is for regenerating minutes afterwards: the record
+    // page takes `minutes` from this object, so writing them anywhere else
+    // leaves them invisible, and merging into it means first fetching what is
+    // already there. Without the read the merge fails as a silent 403 and the
+    // retry appears to succeed while changing nothing the reader can see.
+    archiveBucket.grantReadWrite(taskRole);
 
     // The cookie signing key is the one credential this task still reads from
     // Secrets Manager, and it stays there deliberately: it signs all three

@@ -95,9 +95,13 @@ async function runMinutes(c, kelaboId, meta, runtime) {
   const s3Key = `${c.config.archiveKeyPrefix}/${meta.hostIdentity}/${kelaboId}.json`;
   const archive = await getArchiveObject(c, s3Key);
   if (!archive) {
-    // A kelabo that has not been archived yet (minutes asked for mid-kelabo).
-    // Nothing to merge into and no history row to correct; the MINUTES row and
-    // `hasMinutes` are enough, and `endKelabo` picks them up when it runs.
+    // Two very different things produce a missing archive, and only one of them
+    // is normal. A kelabo that has not ended yet has none — minutes asked for
+    // mid-kelabo, and `endKelabo` will pick up the MINUTES row when it runs. An
+    // *ended* kelabo always has one, so a miss there is the read failing, and
+    // the minutes below are about to be written where the record page will
+    // never look. Say so rather than logging a cheerful success.
+    if (meta.status === "ended") c.logError("minutes_archive_missing", new Error("archive unreadable"), { kelaboId, s3Key });
     try {
       await putMinutes(c, minutes);
       await updateMeta(c, kelaboId, { hasMinutes: true });

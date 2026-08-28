@@ -516,7 +516,14 @@ export async function getArchiveObject(c, key) {
   try {
     const res = await c.s3.send(new GetObjectCommand({ Bucket: c.config.archiveBucket, Key: key }));
     return JSON.parse(await res.Body.transformToString());
-  } catch {
+  } catch (err) {
+    // Logged, not swallowed. "Absent" and "present but unreadable" produce the
+    // same `null` here and mean opposite things to the caller — the first is a
+    // kelabo that has not been archived yet, the second is a permissions or
+    // parse failure that will make a regeneration quietly write to nowhere.
+    // The task role was write-only when this was first added, so the very first
+    // real retry took the wrong branch and reported success.
+    c.logError?.("archive_object_read_failed", err, { key });
     return null;
   }
 }
