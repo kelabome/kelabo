@@ -98,7 +98,16 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
   const [unreadAfterId, setUnreadAfterId] = useState('')
   const frozeUnread = useRef('')
 
-  const scroll = useFollowingScroll(channel.messages, true)
+  // Keyed by the leg the channel *holds*, never by `legId`, which is the leg
+  // the rail has selected. This component survives a leg switch, so the hook
+  // instance is shared and needs a key at all; and the two facts disagree for
+  // exactly one commit — the render between clicking a leg and the effect
+  // below emptying the channel, where the selection is already the new leg
+  // and every message on screen is still the old one's. Keyed by the
+  // selection, that commit spends the new leg's anchor scrolling the old
+  // leg's list, and the real page then arrives to a key that already matches
+  // and gets pinned at the top. Which is the bug this is, verbatim.
+  const scroll = useFollowingScroll(channel.messages, true, { resetKey: channel.legId })
 
   // --- legs ---------------------------------------------------------------
   //

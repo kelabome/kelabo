@@ -125,6 +125,29 @@ const msg = (msgId, over = {}) => ({
   ok('only a backward page may set the history cursor')
 }
 
+{
+  // The channel says which leg it holds, because "which leg is selected" is a
+  // different fact that is briefly wrong: for one commit after clicking a leg
+  // the rail has moved and the messages have not. Anything acting on the
+  // messages — scrolling to the newest of them — must ask the channel.
+  assert.equal(emptyChannel().legId, '', 'an empty channel holds no leg')
+
+  const a = applyPage(emptyChannel(), { legId: 'leg-a', messages: [msg('0000000000002-bbbbbb')] }, { backward: true })
+  assert.equal(a.legId, 'leg-a')
+
+  // A catch-up page and a local echo both leave it alone rather than clearing
+  // it: neither is a change of conversation.
+  const caught = applyPage(a, { messages: [msg('0000000000003-cccccc')] })
+  assert.equal(caught.legId, 'leg-a', 'a page without a legId does not erase the one held')
+  assert.equal(apply(a, msg('0000000000004-dddddd')).legId, 'leg-a', 'nor does a live message')
+
+  // And switching legs replaces it, which is the signal the list reads to know
+  // it is looking at a new conversation.
+  const b = applyPage(emptyChannel(), { legId: 'leg-b', messages: [msg('0000000000009-zzzzzz')] }, { backward: true })
+  assert.equal(b.legId, 'leg-b')
+  ok('the channel carries the leg it holds, not the leg the rail has selected')
+}
+
 // --- the unread boundary ----------------------------------------------------
 
 {

@@ -22,7 +22,7 @@
  * a listener render different things.
  */
 export function emptyChannel() {
-  return { messages: [], hasMore: false, nextBefore: '', lastReadAt: 0, unreadCount: 0, unreadMentions: 0 }
+  return { legId: '', messages: [], hasMore: false, nextBefore: '', lastReadAt: 0, unreadCount: 0, unreadMentions: 0 }
 }
 
 /**
@@ -77,11 +77,22 @@ const same = (a, b) => a.text === b.text && (a.pinnedAs || '') === (b.pinnedAs |
  * `hasMore`/`nextBefore` are only meaningful for a backward page — a forward
  * (`since`) page is a catch-up and says nothing about how much history exists
  * behind it, so it must not overwrite what a backward page established.
+ *
+ * **The channel carries the id of the leg it holds**, taken from the page the
+ * server answered with. It is not the same fact as "which leg is selected",
+ * and the difference is a whole render wide: selecting a leg re-renders
+ * immediately, while the channel is only emptied and refilled by the effect
+ * that follows. For that one commit the selection says one leg and the
+ * messages on screen are the other's. Anything deciding what to *do* with
+ * those messages — scrolling to the newest of them, above all — has to ask
+ * the channel, because the selection is already talking about a conversation
+ * that has not arrived yet.
  */
 export function applyPage(state, page, { backward = false } = {}) {
   const next = apply(state, page?.messages ?? [])
   return {
     ...next,
+    legId: page?.legId || next.legId || '',
     ...(backward ? { hasMore: !!page?.hasMore, nextBefore: page?.nextBefore || '' } : {}),
     lastReadAt: typeof page?.lastReadAt === 'number' ? page.lastReadAt : next.lastReadAt,
     unreadCount: typeof page?.unreadCount === 'number' ? page.unreadCount : next.unreadCount,
