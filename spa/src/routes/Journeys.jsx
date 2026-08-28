@@ -27,6 +27,16 @@ function JourneyRow({ j, delay }) {
       <div className="row-main">
         <div className="row-title">
           {j.title}
+          {/* Unread in a thread of this journey (docs 20 §19.3). A mention
+              outranks a plain count — "somebody wants you" and "there is
+              something here" are different messages. */}
+          {j.mentions > 0 ? (
+            <span className="thread-badge thread-badge-mention" title={`${j.mentions} unread mention${j.mentions === 1 ? '' : 's'}`}>
+              @{j.mentions}
+            </span>
+          ) : j.unread > 0 ? (
+            <span className="thread-badge" title={`${j.unread} unread message${j.unread === 1 ? '' : 's'}`}>{j.unread}</span>
+          ) : null}
           {j.status === 'completed' && <span className="chip chip-ended">completed</span>}
           {j.visibility === 'public' && <span className="chip">public</span>}
           <JourneyHealthChip health={j.health} />

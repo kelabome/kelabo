@@ -773,20 +773,33 @@ export const journeyDocumentBodySchema = z.object({
   content: z.string().min(1).max(200_000),
 });
 
-// --- Journey channel (docs 20 §19) -------------------------------------------
+// --- Journey threads (docs 20 §19) -------------------------------------------
 //
-// The persistent chat on a journey: a growing tail of typed messages that
-// outlives any one kelabo, readable and writable for as long as the journey
-// is active. Deliberately NOT the board — the board is a small, curated set
-// of pinned messages (§7), and a channel is the opposite shape: append-mostly,
-// paged, and never read in full.
+// The persistent conversation on a journey, split into named threads: a
+// growing tail of typed messages that outlives any one kelabo, readable and
+// writable for as long as the journey is active.
 //
-// It is also not the kelabo transcript. A kelabo's `source: "typed"` message
-// is speech somebody typed during a meeting and belongs to that meeting's
-// record; this belongs to the journey and has no meeting.
+// Deliberately NOT the board — the board is a small, curated set of pinned
+// messages (§7), and a thread is the opposite shape: append-mostly, paged,
+// and never read in full. It is also not the kelabo transcript: a kelabo's
+// `source: "typed"` message is speech somebody typed during a meeting and
+// belongs to that meeting's record; this belongs to the journey and has no
+// meeting.
+//
+// "Thread" here means a named top-level conversation, the way a channel does
+// elsewhere — NOT a reply-chain hanging off one message. `msgId` remains the
+// only grouping key inside a thread, and nothing re-derives structure from
+// adjacency or author.
 
-// POST /journeys/:id/messages, PATCH .../messages/:msgId — same body for
-// both, matching journeyBoardMessageBodySchema's own create/edit reuse. 4000
+// POST /journeys/:id/threads, PATCH .../threads/:threadId. 80 matches the
+// journey's own title cap — a thread name is a label, and one that does not
+// fit in a list is not doing its job.
+export const journeyThreadBodySchema = z.object({
+  title: z.string().min(1).max(80),
+});
+
+// POST .../messages, PATCH .../messages/:msgId — same body for both,
+// matching journeyBoardMessageBodySchema's own create/edit reuse. 4000
 // matches the board rather than the document cap: a chat message that wants
 // 200KB is a document, and there is a tab for those.
 export const journeyMessageBodySchema = z.object({
@@ -815,12 +828,29 @@ export const journeyMessageBodySchema = z.object({
 // own contacts fetch. A name on this row would be a snapshot nobody updates.
 export const journeyMessageSchema = z.object({
   msgId: z.string().min(1).max(128),
+  threadId: z.string().min(1).max(128),
   at: z.number().int().nonnegative(),
   author: z.string().min(1).max(254),
   text: z.string().max(4000),
   kind: z.enum(JOURNEY_MESSAGE_KINDS).default("message"),
   editedAt: z.number().int().nonnegative().optional(),
   deletedAt: z.number().int().nonnegative().optional(),
+});
+
+// A thread as it goes on the wire, with this reader's own position in it —
+// the two travel together for the same reason the page carries its cursor: a
+// list that had to make a second call to find out what was unread would
+// render every thread bold for one frame on every open.
+export const journeyThreadSchema = z.object({
+  threadId: z.string().min(1).max(128),
+  title: z.string().min(1).max(80),
+  createdBy: z.string().max(254).default(""),
+  createdAt: z.number().int().nonnegative(),
+  messageCount: z.number().int().nonnegative().default(0),
+  lastMessageAt: z.number().int().nonnegative().default(0),
+  archived: z.boolean().default(false),
+  unread: z.number().int().nonnegative().default(0),
+  mentions: z.number().int().nonnegative().default(0),
 });
 
 // POST /journeys/:id/read — advance this identity's read cursor. Monotonic

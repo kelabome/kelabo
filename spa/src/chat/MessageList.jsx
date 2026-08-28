@@ -67,7 +67,10 @@ export function MessageList({ items, scroll, empty, history, renderBody, classNa
                   something" should not require reading every line. */}
               <div
                 className={
-                  'chat-bubble' + (m.state === 'open' ? ' open' : '') + (m.mentionsMe ? ' chat-bubble-mention' : '')
+                  'chat-bubble' +
+                  (m.state === 'open' ? ' open' : '') +
+                  (m.mentionsMe ? ' chat-bubble-mention' : '') +
+                  (m.assistant ? ' is-assistant' : '')
                 }
               >
                 {renderBody(m)}

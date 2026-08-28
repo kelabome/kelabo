@@ -1177,18 +1177,23 @@ MCP tool surface — is now built; see §10, §12.1's own note, and §12.2.
    briefing. §12.4 remains deliberately unbuilt.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.
-7. 🟡 **Channel** — §19. Phases 1 and 4 are built: the `MSG#`/`READ#` rows,
-   the Gateway's HTTP handlers, the shared `src/chat/` components and the
-   Channel tab (§19.2–§19.6); pin-to-board (§19.7), `@person` mentions with
-   their own counter (§19.8), and `GET /journeys/search` with its tab in the
-   search dialog (§11). Phase 2 (live fan-out over the presence stream, rail
-   badges) and phase 3 (the assistant on `@kelabo`) are specified in §19.9 and
-   not built — which is why the mention badge renders inside the channel
-   rather than in the rail, and why the channel still polls.
+7. 🟡 **Threads** — §19. Built: `THREAD#`/`MSG#`/`READ#` rows, thread CRUD,
+   the Gateway's HTTP surface, the shared `src/chat/` components and the
+   Threads tab (§19.2–§19.6); pin-to-board (§19.7); `@person` mentions with
+   their own counter (§19.8); the `@kelabo` assistant and its three MCP tools
+   (§19.10); unread on the journey list; and `GET /journeys/search` with its
+   tab in the search dialog (§11). Not built: live fan-out over the presence
+   stream — the threads still poll — and pushing "you were mentioned" to an
+   attached agent (§19.9).
 
 ---
 
-## 19. The channel — persistent chat on a journey
+## 19. Threads — persistent conversation on a journey
+
+> **"Thread" here means a named top-level conversation**, the way "channel"
+> does elsewhere — not a reply-chain hanging off one message. `msgId` remains
+> the only grouping key *inside* a thread, and nothing re-derives structure
+> from adjacency, author or time.
 
 ### 19.1 What it is, and why it is here rather than on a kelabo
 
@@ -1217,12 +1222,12 @@ the journey, and none of the above applies: nothing is retained in Gateway
 memory between messages, and the journeys table deliberately has no TTL
 (§14).
 
-**The channel is not the board.** §7's board is a small, curated set of
-pinned messages, read in full, mutable, versioned. A channel is the opposite
-shape — many messages, paged, read from the end, never read in full. They
-are different objects that happen to both contain text, and merging them
-would make the board unusable at chat volume. In channel vocabulary the
-board is "pinned messages", and §19.7 promotes one into the other.
+**A thread is not the board.** §7's board is a small, curated set of pinned
+messages, read in full, mutable, versioned. A thread is the opposite shape —
+many messages, paged, read from the end, never read in full. They are
+different objects that happen to both contain text, and merging them would
+make the board unusable at conversation volume. In thread vocabulary the board
+is "pinned messages", and §19.7 promotes one into the other.
 
 **It is not the kelabo transcript either.** A kelabo's `source: "typed"`
 message is speech somebody typed during a meeting; it belongs to that
@@ -1262,8 +1267,18 @@ names itself. A name stored on the row would be a snapshot nobody updates.
 
 ### 19.3 Unread
 
-`unreadCount = meta.messageCount − cursor.messageCountAtRead`. O(1), no
-scan, which is the whole reason for the two counters.
+`unread = thread.messageCount − cursor.messageCountAtRead`, per thread. O(1),
+no scan, which is the whole reason for the two counters.
+
+**A journey-level counter cannot be stored instead of the sum.** Reading one
+thread would advance it to the journey's total and hide every other thread's
+unread — the badge would clear itself by looking at the wrong conversation.
+So the journey list sums per-thread cursors, which is two small Queries per
+journey (`THREAD#` rows and `READ#<identity>#` rows), in parallel and capped at
+`UNREAD_SCAN_CAP`. Past the cap journeys still render, without a badge — never
+with a wrong one. The arithmetic itself is `contracts/src/journeyUnread.js`,
+shared so the Gateway's per-thread answer and rest-api's rollup cannot
+disagree.
 
 It only works because **`messageCount` never goes down**: an edit does not
 touch it, and a delete is soft (§19.5). A counter that can decrease cannot be
@@ -1292,11 +1307,15 @@ already are.
 
 | Method | Path (Gateway) |
 |---|---|
-| GET | `/journeys/:id/messages?before=\|since=&limit=` |
-| POST | `/journeys/:id/messages` |
-| PATCH | `/journeys/:id/messages/:msgId` |
-| DELETE | `/journeys/:id/messages/:msgId` |
-| POST | `/journeys/:id/read` |
+| GET | `/journeys/:id/threads` — with each reader's own unread; creates the default thread if there is none |
+| POST | `/journeys/:id/threads` |
+| PATCH | `/journeys/:id/threads/:tid` |
+| GET | `/journeys/:id/threads/:tid/messages?before=\|since=&limit=` |
+| POST | `/journeys/:id/threads/:tid/messages` |
+| PATCH | `/journeys/:id/threads/:tid/messages/:msgId` |
+| DELETE | `/journeys/:id/threads/:tid/messages/:msgId` |
+| POST | `/journeys/:id/threads/:tid/messages/:msgId/pin` |
+| POST | `/journeys/:id/threads/:tid/read` |
 
 Authenticated by the browser **SESSION cookie**, like `/presence/stream` and
 unlike everything kelabo-scoped. A journey has no participant cookie, no join
@@ -1316,6 +1335,12 @@ by watching which error comes back. Same rule `onJourneyAttach` applies.
 Posting to one is `409 journey_completed`; reading and advancing the read
 cursor both still work. Refusing the cursor would leave a badge nobody could
 ever clear.
+
+**A message range must end at `MSG#<threadId>$`**, one byte above `#`. Threads
+made this sharper than it was: `MSG#general2#…` sorts above `MSG#general#…`, so
+a looser upper bound swallows a sibling thread's entire conversation into this
+one — not just the neighbouring-prefix rows the timeline's own cursor once
+walked into.
 
 ### 19.5 Edit and soft delete
 
@@ -1436,6 +1461,59 @@ different colour. `mentionsMe` is stamped by the server onto each message for
 the same reason — a client re-deriving it would be a second implementation of
 the matching rule that could disagree with the badge it sits beside.
 
+### 19.10 The assistant, on `@kelabo` only
+
+Typing `@kelabo …` in a thread gets an answer, posted into that same thread as
+a message of `kind: "assistant"`.
+
+**No trigger gate.** `addressesAssistant` is already the strict, typed-only
+matcher — the person saw what they wrote — and running a classifier over a
+conversation would reintroduce exactly the per-message cost §19.1 exists to
+avoid. Being addressed is the whole decision.
+
+**Stateless per request.** Context is built from rows in DynamoDB, one call
+answers, the answer is written as an ordinary message. Nothing is retained
+between mentions, so none of the memory or quadratic-token problems that make
+a long-lived kelabo expensive apply.
+
+What the model is given: the journey (`buildContext` — description, pinned
+board, documents, linked kelabo minutes, prior **public** reports), **every
+thread's name and size**, and **the current thread's recent messages**. Names
+only for the other threads: reading them all on every mention would put the
+journey's entire conversation into every prompt, which is the cost model this
+design rejects. The private-report rule is inherited from `buildContext` and
+matters more here than for a report — this answer is posted where everyone
+reads it, so folding in one member's private question would publish it.
+
+> ⚠️ **The dispatch is guarded on `kind === "message"`, and that guard is
+> load-bearing.** The assistant's own reply can contain the string `@kelabo` —
+> quoting the question back is the obvious way for it to do so — and
+> dispatching on that is an unbounded loop that bills the deployment for every
+> turn of it.
+
+Three smaller decisions:
+
+- **Retried** with `withLlmRetry`, which `generateJourneyReport` deliberately
+  does not use. A failed report leaves a visible `failed` row somebody can
+  retry; an answer that never appears is indistinguishable from being ignored,
+  which is the failure this feature exists to fix.
+- **A failure posts a message saying so**, never silence.
+- **Its own metering seam** (`allowJourneyChatAnswer` / `noteJourneyChatAnswer`),
+  named apart from the report's: a hosted fork's per-report quota must not
+  silently meter chat, which is a different act at a different frequency.
+
+The author on an assistant message is `kelabo`, not an email. It can therefore
+never equal a session identity, so `editJourneyMessage` refuses every editor,
+and `journeyPeople` never offers it as a mentionable person.
+
+**For a dev agent** there are three MCP tools — `kelabo_journey_threads`,
+`kelabo_thread_messages`, `kelabo_thread_post` — all *agent-initiated*.
+`thread_post` is **not** gated by `aiCanPost`: that flag guards the board, a
+curated surface edited unsupervised, while a thread is the conversation, where
+an attached agent is a participant. Thread messages arrive inside a
+`<kelabo-thread untrusted="true">` envelope, like every other multi-contributor
+surface.
+
 ### 19.9 Not built yet
 
 - **Phase 2 — live and unread.** Fan out on the **presence stream** rather
@@ -1449,19 +1527,16 @@ the matching rule that could disagree with the badge it sits beside.
   stale after a visibility flip); and it has no replay, so reconnect must
   refetch with `since`. Also: the presence stream has no client-side stall
   watchdog, unlike `useBoard`, and would need one.
-- **Phase 3 — the assistant, on `@kelabo` only.** No trigger gate: `mention.js`'s
-  `addressesAssistant` is already the strict, typed-only path, and running a
-  classifier over a channel would reintroduce the cost problem §19.1 exists to
-  avoid. Server-side it is `generateJourneyReport` with the answer written as a
-  `MSG#` of `kind: "assistant"` — stateless per request, reusing `buildContext`
-  and the metering seam. For a dev agent it needs `state.journeyTunnels`, the
-  mirror of `tunnelByKelabo` whose absence `tunnel.js` currently documents as
-  deliberate. Replying in-channel is gated by attachment, **not** by
-  `aiCanPost`, which remains the gate on the pinned board alone.
-- **The mention badge in the rail.** The mechanism is built (§19.8) and
-  `unreadMentions` is served on every page fetch; what is missing is a rail to
-  put it on, which is phase 2's surface. Today it renders inside the channel
-  itself, which is where it can actually be seen.
+- **Telling an agent it was mentioned.** The three MCP tools are all
+  agent-initiated (§19.10). A *push* — "somebody named you in thread X" —
+  needs `state.journeyTunnels`, the journey-keyed reverse index whose absence
+  `tunnel.js` documents as deliberate, plus a down-frame and an unwind in
+  `ws.on("close")`. The server-side path is what makes `@kelabo` answer for
+  someone with no agent attached, and it is built.
+- **The mention badge in the rail.** It renders in the thread list and on the
+  journey list; the left rail has no journey section to put one on yet.
 
-Threads are deliberately absent. `msgId` is the only grouping key, and adding
-a parent would break that invariant for a feature nobody has asked for yet.
+**Reply-chains** are deliberately absent, and are a different thing from the
+named threads this section describes. `msgId` is the only grouping key inside
+a thread, and adding a parent would break that invariant for a feature nobody
+has asked for.

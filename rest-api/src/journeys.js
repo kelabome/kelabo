@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { JOURNEY_VISIBILITIES } from "@kelabo/contracts";
+import { JOURNEY_VISIBILITIES, journeyUnread, cursorsByThread } from "@kelabo/contracts";
 import { err } from "./errors.js";
 
 /**
@@ -151,7 +151,44 @@ export function createJourneys({ config, db, internal }) {
       .filter((m) => m.visibility === "public" && !mineIds.has(m.journeyId))
       .map(toSummary);
 
-    return { mine, accessible, public: publicJourneys };
+    const buckets = { mine, accessible, public: publicJourneys };
+    return await withUnread(buckets, identity);
+  }
+
+  // --- unread rollup for the list (docs 20 §19.3) ------------------------------
+  //
+  // The counters live per thread, and they have to: a journey-level cursor
+  // would be advanced by reading one thread and would then hide every other
+  // thread's unread. So the rollup is a sum, and a sum needs both collections.
+  //
+  // Two small Queries per journey, in parallel, and capped. That is the price
+  // of "read this thread, not that one" being meaningful, and it is paid on a
+  // page somebody opens rather than on every message. Past the cap the
+  // journeys still render — without a badge, never with a wrong one.
+  const UNREAD_SCAN_CAP = 30;
+
+  async function withUnread(buckets, identity) {
+    const all = [...buckets.mine, ...buckets.accessible, ...buckets.public];
+    // Newest activity first, so the cap falls on journeys nobody is watching.
+    const ranked = [...all].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, UNREAD_SCAN_CAP);
+    const counted = new Map();
+    await Promise.all(
+      ranked.map(async (j) => {
+        try {
+          const [threads, cursors] = await Promise.all([
+            db.listJourneyThreads(j.journeyId),
+            db.listJourneyReadCursors(j.journeyId, identity),
+          ]);
+          const { unread, mentions } = journeyUnread(threads, cursorsByThread(cursors));
+          counted.set(j.journeyId, { unread, mentions });
+        } catch {
+          // A journey whose rollup failed shows no badge. Showing a wrong one
+          // is worse: an unread count is a claim about what you have not seen.
+        }
+      })
+    );
+    const stamp = (list) => list.map((j) => ({ ...j, ...(counted.get(j.journeyId) || { unread: 0, mentions: 0 }) }));
+    return { mine: stamp(buckets.mine), accessible: stamp(buckets.accessible), public: stamp(buckets.public) };
   }
 
   // --- search (docs 20 §11) ---------------------------------------------------

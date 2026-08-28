@@ -240,6 +240,41 @@ export const frameJourneyBoardRequestSchema = z.object({
   journeyId: z.string().min(1).optional(),
 });
 
+// The journey's named threads (docs 20 §19). Names and sizes only — reading
+// every thread's messages is a separate, explicit ask, because the whole
+// point of splitting a conversation into threads is that you do not have to
+// carry all of it at once.
+export const frameJourneyThreadsRequestSchema = z.object({
+  type: z.literal("journey_threads_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+});
+
+// One thread's recent messages. `threadId` is required: an agent asking for
+// "the messages" without saying which conversation is a question with no
+// answer, and guessing one would be worse than refusing.
+export const frameThreadMessagesRequestSchema = z.object({
+  type: z.literal("thread_messages_request"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  threadId: z.string().min(1),
+  limit: z.number().int().positive().optional(),
+});
+
+// Post into a thread on the agent's own initiative. Not gated by `aiCanPost`,
+// which guards the *board* — a curated surface edited unsupervised — while
+// this is the conversation, where an attached agent is a participant.
+export const frameThreadPostSchema = z.object({
+  type: z.literal("thread_post"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().min(1).optional(),
+  journeyId: z.string().min(1).optional(),
+  threadId: z.string().min(1),
+  text: z.string().min(1).max(4000),
+});
+
 /** The agent's own synthesis, stored directly — no server-side LLM round
  *  trip (docs 20 §12.2's `kelabo_journey_report_submit`, structurally
  *  `kelabo_post`'s fire-and-forget shape with a requestId added: unlike a
@@ -290,6 +325,9 @@ export const upFrameSchema = z.discriminatedUnion("type", [
   frameJourneyReportsRequestSchema,
   frameJourneyTimelineRequestSchema,
   frameJourneyBoardRequestSchema,
+  frameJourneyThreadsRequestSchema,
+  frameThreadMessagesRequestSchema,
+  frameThreadPostSchema,
   frameJourneyReportSubmitSchema,
   frameJourneyPostSchema,
 ]);
@@ -493,6 +531,56 @@ export const frameJourneyBoardSchema = z.object({
     .default([]),
 });
 
+export const frameJourneyThreadsSchema = z.object({
+  type: z.literal("journey_threads"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  threads: z
+    .array(
+      z.object({
+        threadId: z.string(),
+        title: z.string(),
+        messageCount: z.number().optional(),
+        lastMessageAt: z.number().optional(),
+      })
+    )
+    .default([]),
+});
+
+export const frameThreadMessagesSchema = z.object({
+  type: z.literal("thread_messages"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  // `thread_not_found` is on this enum and not the others: a journey can be
+  // resolved and the thread inside it still be wrong, which is a different
+  // mistake from naming a journey the connection cannot reach.
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "thread_not_found"]),
+  journeys: z.array(journeyRef).default([]),
+  title: z.string().default(""),
+  messages: z
+    .array(
+      z.object({
+        msgId: z.string(),
+        author: z.string(),
+        text: z.string(),
+        at: z.number().optional(),
+        kind: z.string().optional(),
+      })
+    )
+    .default([]),
+});
+
+export const frameThreadPostedSchema = z.object({
+  type: z.literal("thread_posted"),
+  requestId: z.string().min(1),
+  kelaboId: z.string().default(""),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "thread_not_found", "journey_completed"]),
+  journeys: z.array(journeyRef).default([]),
+  msgId: z.string().default(""),
+});
+
 export const frameJourneyReportSubmittedSchema = z.object({
   type: z.literal("journey_report_submitted"),
   requestId: z.string().min(1),
@@ -667,6 +755,9 @@ export const downFrameSchema = z.discriminatedUnion("type", [
   frameJourneyInfoSchema,
   frameJourneyTimelineSchema,
   frameJourneyBoardSchema,
+  frameJourneyThreadsSchema,
+  frameThreadMessagesSchema,
+  frameThreadPostedSchema,
   frameJourneyReportSubmittedSchema,
   frameJourneyPostedSchema,
   frameJourneyBriefingSchema,

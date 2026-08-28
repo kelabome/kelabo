@@ -450,14 +450,16 @@ test("every declared frame type parses", () => {
     "archive", "attach", "board_request", "contribution", "detach", "heartbeat", "history_request",
     "journey_attach", "journey_board_request", "journey_context_request", "journey_detach",
     "journey_documents_request", "journey_info_request", "journey_kelabos_request", "journey_post",
-    "journey_report_submit", "journey_reports_request", "journey_timeline_request",
-    "register", "rename", "summary",
+    "journey_report_submit", "journey_reports_request", "journey_threads_request",
+    "journey_timeline_request",
+    "register", "rename", "summary", "thread_messages_request", "thread_post",
   ]);
   assert.deepEqual([...downTypes].sort(), [
     "board", "briefing", "history", "journey_board", "journey_briefing", "journey_context",
     "journey_documents", "journey_info", "journey_kelabos", "journey_posted",
-    "journey_report_submitted", "journey_reports", "journey_timeline", "kelabo", "ping",
-    "registered", "rejected", "request", "transcript",
+    "journey_report_submitted", "journey_reports", "journey_threads", "journey_timeline",
+    "kelabo", "ping",
+    "registered", "rejected", "request", "thread_messages", "thread_posted", "transcript",
   ]);
   // No type may appear in both directions: the bridge and the Gateway each
   // parse exactly one union, so an overlap would be ambiguous at one end.

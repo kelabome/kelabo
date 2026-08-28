@@ -201,12 +201,23 @@ export const api = {
   listJourneyContributors: id => apiRequest(`/journeys/${id}/contributors`),
 }
 
-// The journey channel (docs 20 §19). These go to the GATEWAY, not the API —
-// the only journey calls that do. It is the same split the kelabo makes:
-// captions POST to the gateway while kelabos are created over REST, because
-// this is the per-message path and the control plane is a Lambda.
-// Authenticated by the session cookie, like `/presence/stream`.
+// Journey threads (docs 20 §19). These go to the GATEWAY, not the API — the
+// only journey calls that do. It is the same split the kelabo makes: captions
+// POST to the gateway while kelabos are created over REST, because this is the
+// per-message path and the control plane is a Lambda. Authenticated by the
+// session cookie, like `/presence/stream`.
+const threadBase = (journeyId, threadId) =>
+  `/journeys/${encodeURIComponent(journeyId)}/threads` + (threadId ? `/${encodeURIComponent(threadId)}` : '')
+
 export const journeyChat = {
+  /** Every thread, each carrying this reader's own unread count. Creates the
+   *  default thread if the journey has none, so the list is never empty. */
+  threads: journeyId => request(config.gatewayBase, threadBase(journeyId)),
+  createThread: (journeyId, title) =>
+    request(config.gatewayBase, threadBase(journeyId), { method: 'POST', body: { title } }),
+  renameThread: (journeyId, threadId, title) =>
+    request(config.gatewayBase, threadBase(journeyId, threadId), { method: 'PATCH', body: { title } }),
+
   /**
    * One page, plus this identity's own read position in the same response.
    *
@@ -214,26 +225,26 @@ export const journeyChat = {
    * through history ("load earlier"), `since` returns everything newer
    * ("what did I miss"). Both exclude the row they name.
    */
-  messages: (journeyId, { before, since, limit } = {}) =>
-    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages${qs({ before, since, limit })}`),
-  post: (journeyId, text) =>
-    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages`, { method: 'POST', body: { text } }),
-  edit: (journeyId, msgId, text) =>
-    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages/${encodeURIComponent(msgId)}`, {
+  messages: (journeyId, threadId, { before, since, limit } = {}) =>
+    request(config.gatewayBase, `${threadBase(journeyId, threadId)}/messages${qs({ before, since, limit })}`),
+  post: (journeyId, threadId, text) =>
+    request(config.gatewayBase, `${threadBase(journeyId, threadId)}/messages`, { method: 'POST', body: { text } }),
+  edit: (journeyId, threadId, msgId, text) =>
+    request(config.gatewayBase, `${threadBase(journeyId, threadId)}/messages/${encodeURIComponent(msgId)}`, {
       method: 'PATCH',
       body: { text },
     }),
-  remove: (journeyId, msgId) =>
-    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages/${encodeURIComponent(msgId)}`, {
+  remove: (journeyId, threadId, msgId) =>
+    request(config.gatewayBase, `${threadBase(journeyId, threadId)}/messages/${encodeURIComponent(msgId)}`, {
       method: 'DELETE',
     }),
-  markRead: (journeyId, { at, msgId }) =>
-    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/read`, { method: 'POST', body: { at, msgId } }),
-  // Promote a channel message onto the journey's board (docs 20 §19.7). One
-  // direction only — a board message is never demoted into chat — and
+  markRead: (journeyId, threadId, { at, msgId }) =>
+    request(config.gatewayBase, `${threadBase(journeyId, threadId)}/read`, { method: 'POST', body: { at, msgId } }),
+  // Promote a thread message onto the journey's board (docs 20 §19.7). One
+  // direction only — a board message is never demoted into a thread — and
   // idempotent, so a double click puts one card up, not two.
-  pin: (journeyId, msgId) =>
-    request(config.gatewayBase, `/journeys/${encodeURIComponent(journeyId)}/messages/${encodeURIComponent(msgId)}/pin`, {
+  pin: (journeyId, threadId, msgId) =>
+    request(config.gatewayBase, `${threadBase(journeyId, threadId)}/messages/${encodeURIComponent(msgId)}/pin`, {
       method: 'POST',
     }),
 }

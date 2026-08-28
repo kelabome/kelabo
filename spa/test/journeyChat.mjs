@@ -15,6 +15,7 @@ import {
   projectMessages,
 } from '../src/chat/messageStore.js'
 import { findMentionTokens, mentionsIdentity, MENTION_SOURCE } from '../src/chat/mentions.js'
+import { journeyUnread, threadUnread, cursorsByThread } from '../../contracts/src/journeyUnread.js'
 
 let passed = 0
 const ok = msg => {
@@ -24,6 +25,7 @@ const ok = msg => {
 
 const msg = (msgId, over = {}) => ({
   msgId,
+  threadId: 'general',
   at: Number(msgId.split('-')[0]),
   author: 'alice@example.com',
   text: 'hello',
@@ -265,6 +267,52 @@ const msg = (msgId, over = {}) => ({
   // A catch-up page that says nothing about mentions must not clear the count.
   assert.equal(applyPage(page, { messages: [] }).unreadMentions, 2)
   ok('the mention badge survives a page that does not mention it')
+}
+
+// --- the unread rollup (docs 20 §19.3) --------------------------------------
+//
+// Shared with rest-api through contracts, because the Gateway answers this per
+// thread and the journey list rolls it up, and two implementations is how a
+// badge says 3 while the thread it points at shows 5.
+
+{
+  const threads = [
+    { threadId: 'a', messageCount: 5 },
+    { threadId: 'b', messageCount: 2 },
+  ]
+  const cursors = cursorsByThread([
+    { SK: 'READ#me@x.com#a', threadId: 'a', messageCountAtRead: 5, mentionCount: 2, mentionCountAtRead: 1 },
+  ])
+  const roll = journeyUnread(threads, cursors)
+  // Thread b has no cursor at all: never having opened a thread is not the
+  // same as having read it, which is what makes a new member see the backlog.
+  assert.equal(roll.unread, 2)
+  assert.equal(roll.mentions, 1)
+  assert.equal(roll.perThread.a.unread, 0)
+  assert.equal(roll.perThread.b.unread, 2)
+  ok('a journey rolls up to the sum of its threads')
+}
+
+{
+  // The reason a journey-level counter cannot replace the sum: it would be
+  // advanced by reading one thread and would hide every other thread's unread.
+  const threads = [
+    { threadId: 'a', messageCount: 3 },
+    { threadId: 'b', messageCount: 4 },
+  ]
+  const readA = cursorsByThread([{ threadId: 'a', messageCountAtRead: 3 }])
+  assert.equal(journeyUnread(threads, readA).unread, 4, 'reading one thread does not clear the other')
+}
+
+{
+  // Clamped: a cursor written before a counter existed, or rows tidied by
+  // hand, must read as nothing-unread rather than as a negative badge.
+  assert.equal(threadUnread({ messageCount: 1 }, { messageCountAtRead: 9 }).unread, 0)
+  assert.equal(threadUnread({ messageCount: 3 }, null).unread, 3)
+  assert.equal(threadUnread(null, null).unread, 0)
+  // An archived thread contributes nothing to the journey badge.
+  assert.equal(journeyUnread([{ threadId: 'a', messageCount: 9, archived: true }], {}).unread, 0)
+  ok('the rollup clamps at zero and ignores archived threads')
 }
 
 console.log(`\nspa/journeyChat: ${passed} passed`)

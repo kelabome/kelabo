@@ -16,7 +16,7 @@ import { Skeleton, SkeletonRows } from '../components/ui/Skeleton'
 import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
-import { JourneyChat } from '../chat/JourneyChat'
+import { JourneyThreads } from '../chat/JourneyThreads'
 import { JourneyHealthChip } from './Journeys'
 import { JourneyHelmExtra } from '../variant'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
@@ -41,7 +41,7 @@ const TABS = [
   // and the thing they come back for is what has been said since — the
   // Overview is what you read once. Its body owns the viewport height, which
   // is why `.page` becomes a flex column for this tab alone.
-  { id: 'chat', label: 'Channel' },
+  { id: 'chat', label: 'Threads' },
   { id: 'overview', label: 'Overview' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'kelabos', label: 'Kelabos' },
@@ -1289,7 +1289,7 @@ export default function JourneyDetail() {
             onChange={setTab}
           />
 
-          {tab === 'chat' && <JourneyChat journeyId={id} isMember={isMember} isActive={isActive} />}
+          {tab === 'chat' && <JourneyThreads journeyId={id} isMember={isMember} isActive={isActive} />}
           {tab === 'overview' && <OverviewTab journey={journey} isOwner={isOwner} isMember={isMember} reload={reload} />}
           {tab === 'timeline' && <TimelineTab journeyId={id} isMember={isMember} onOpenDocument={openDocument} />}
           {tab === 'kelabos' && <KelabosTab journeyId={id} isMember={isMember} isActive={isActive} />}

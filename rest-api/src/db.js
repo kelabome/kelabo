@@ -734,6 +734,46 @@ export function createDb({ config, client } = {}) {
     return res.Item || null;
   }
 
+  // --- journey threads (docs 20 §19) ------------------------------------------
+  //
+  // rest-api reads these two collections and writes neither: threads and their
+  // messages belong to the Gateway, which owns the per-message path. What the
+  // control plane needs is the unread rollup for the journey list, and that is
+  // a count of rows it can already reach.
+
+  async function listJourneyThreads(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "THREAD#" },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /** One identity's cursors across every thread in a journey, in one query —
+   *  which is why the sort key is `READ#<identity>#<threadId>` and not the
+   *  other way round. The trailing `#` stops `alice@example.com` matching
+   *  `alice@example.commercial`.
+   *
+   *  `threadId` comes from the key, not from the attribute: the key is what
+   *  says which thread a cursor belongs to, and a row created by being
+   *  mentioned carries a count before it carries anything else. Trusting the
+   *  attribute drops those rows from the rollup and reads them as unread
+   *  forever. */
+  async function listJourneyReadCursors(journeyId, identity) {
+    const prefix = `READ#${identity}#`;
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": prefix },
+      })
+    );
+    return (res.Items || []).map((r) => ({ ...r, threadId: String(r.SK).slice(prefix.length) }));
+  }
+
   async function listBoardMessageHeads(journeyId) {
     const res = await doc.send(
       new QueryCommand({
@@ -1772,6 +1812,8 @@ export function createDb({ config, client } = {}) {
     listAccessorJourneys,
     putJourneyDescriptionVersion,
     listJourneyDescriptionVersions,
+    listJourneyThreads,
+    listJourneyReadCursors,
     putJourneyStatusVersion,
     listJourneyStatusVersions,
     putJourneyTimelineEntry,
