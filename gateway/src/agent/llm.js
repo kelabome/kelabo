@@ -287,6 +287,29 @@ function parseToolArgs(tc, log) {
   return { id: tc.id, name: tc.function?.name, input };
 }
 
+/**
+ * The answer, from a reasoning model that may have put it in the wrong field.
+ *
+ * `reasoning_content` is a fallback, not a second answer. Reasoning models
+ * (deepseek-v4-*) leave `content` empty when `max_tokens` runs out mid-thought,
+ * and for a prose caller the chain of thought is at least *about* the right
+ * subject — better than an empty string.
+ *
+ * For a caller that asked for JSON it is strictly worse than nothing, and this
+ * is not hypothetical: a 23-minute kelabo spent its whole 8192-token minutes
+ * budget reasoning, returned empty `content`, and this fallback handed 33k
+ * chars of prose to `parseMinutesJson`. That parses to `null` exactly as an
+ * empty string would — but only after the repair has tried and failed on text
+ * that was never JSON, and the record then reported "truncated" when what
+ * happened was "the model never started writing". Reasoning is never a valid
+ * JSON document, so a JSON caller gets the empty string and an honest failure.
+ */
+function pickAnswer(content, reasoning, req) {
+  if (content && content.length) return content;
+  if (req?.responseFormat === "json") return "";
+  return reasoning ?? "";
+}
+
 function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
   const base = (baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
   const url = `${base}/chat/completions`;
@@ -314,13 +337,11 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
     };
   }
 
-  function finishResponse(data, wireCtx, status) {
+  function finishResponse(data, wireCtx, status, req) {
     wire?.response(wireCtx, status, data);
     const msg = data.choices?.[0]?.message ?? {};
     const toolCalls = (msg.tool_calls ?? []).map((tc) => parseToolArgs(tc, log));
-    // Reasoning models (e.g. deepseek-v4-*) may put the answer in reasoning_content
-    // and leave content empty when max_tokens is exhausted mid-reasoning; fall back to it.
-    const answer = (msg.content && msg.content.length ? msg.content : msg.reasoning_content) ?? "";
+    const answer = pickAnswer(msg.content, msg.reasoning_content, req);
     const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
     return {
       text: answer,
@@ -367,7 +388,7 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
     }
     if (!streaming) {
       const data = await res.json();
-      return finishResponse(data, wireCtx, res.status);
+      return finishResponse(data, wireCtx, res.status, req);
     }
     return consumeStream(req, res, wireCtx);
   }
@@ -443,7 +464,7 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
     const toolCalls = [...toolAcc.entries()]
       .sort(([a], [b]) => a - b)
       .map(([, acc]) => parseToolArgs({ id: acc.id, function: { name: acc.name, arguments: acc.arguments } }, log));
-    const answer = text.length ? text : reasoning;
+    const answer = pickAnswer(text, reasoning, req);
     const content = [{ type: "text", text: answer }, ...toolCalls.map((tc) => ({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input }))];
     const out = {
       text: answer,

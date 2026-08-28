@@ -292,12 +292,25 @@ export function createKelabos({ config, db, internal, credentials }) {
     return { kelaboId, status: "ended", archived };
   }
 
+  // Ask for minutes to be (re)generated. The Gateway answers as soon as it has
+  // accepted the work, not when it is done — the call it makes runs for minutes
+  // and this request is behind an API Gateway that gives up in thirty seconds.
+  // The caller polls the record, exactly as it already does for the minutes the
+  // automatic path produces.
   async function requestMinutes({ kelaboId, identity }) {
     const meta = await db.getKelaboMeta(kelaboId);
     if (!meta) throw err(404, "kelabo_not_found");
     if (meta.hostIdentity !== identity) throw err(403, "not_host");
-    await internal.requestMinutes(kelaboId, identity);
-    return { status: "queued" };
+    try {
+      await internal.requestMinutes(kelaboId, identity);
+    } catch (e) {
+      // The one refusal worth passing through verbatim: there is nothing
+      // recorded to summarise, so no amount of retrying will produce minutes.
+      // Anything else is an infrastructure failure and stays a 502.
+      if (String(e?.message || "").includes("no_transcript")) throw err(409, "no_transcript");
+      throw e;
+    }
+    return { status: "generating" };
   }
 
   async function board({ kelaboId, participant, since, limit }) {

@@ -6,7 +6,7 @@ import {
   UpdateCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   CREDENTIAL_SK,
   credentialPk,
@@ -400,24 +400,31 @@ export async function putHistoryRow(c, row) {
 }
 
 /**
- * Mark a record as deliberately having no minutes.
+ * Mark a record as having no minutes, and say why.
  *
  * The difference between "not written yet" and "never going to be" is invisible
  * from `hasMinutes: false` alone, and the record page rendered the first — a
  * spinner and "they'll appear here shortly" — for a kelabo whose assistant was
  * switched off and whose minutes nothing was ever going to generate.
  *
+ * `reason` carries the *second* distinction, which cost a real record its
+ * minutes: "never going to be" and "this attempt failed" are both "no minutes"
+ * on the wire, and the page guessed. It guessed wrong — a kelabo whose LLM call
+ * came back unusable was told the assistant had been off, and offered no way to
+ * try again. The gateway already logs the reason; this is the same string, put
+ * where the reader can act on it.
+ *
  * An update rather than a full re-put: the row is already there and complete,
  * and rebuilding it here would mean a second copy of its shape drifting from
  * the one that writes it.
  */
-export async function markHistoryMinutesSkipped(c, archiveId) {
+export async function markHistoryMinutesSkipped(c, archiveId, reason = "") {
   await c.db.send(
     new UpdateCommand({
       TableName: historyTable(c),
       Key: { archiveId },
-      UpdateExpression: "SET minutesSkipped = :t",
-      ExpressionAttributeValues: { ":t": true },
+      UpdateExpression: reason ? "SET minutesSkipped = :t, minutesSkippedReason = :r" : "SET minutesSkipped = :t",
+      ExpressionAttributeValues: { ":t": true, ...(reason ? { ":r": reason } : {}) },
     })
   );
 }
@@ -495,6 +502,23 @@ export async function putArchiveObject(c, key, archive) {
       ContentType: "application/json",
     })
   );
+}
+
+/**
+ * The archived record, or `null` if it is not there or unreadable.
+ *
+ * The Gateway writes this object and, until now, never read it back — which is
+ * why regenerating minutes for an already-ended kelabo could not work: the
+ * record page reads `minutes` out of THIS object, so minutes written anywhere
+ * else are invisible no matter how correct they are.
+ */
+export async function getArchiveObject(c, key) {
+  try {
+    const res = await c.s3.send(new GetObjectCommand({ Bucket: c.config.archiveBucket, Key: key }));
+    return JSON.parse(await res.Body.transformToString());
+  } catch {
+    return null;
+  }
 }
 
 export async function queryMcpScope(c, scopePk) {

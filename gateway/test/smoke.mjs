@@ -1006,11 +1006,17 @@ async function main() {
   }
 
   {
-    const pending = req(port, {
+    // Accepted, not completed. The summary call reads the whole transcript and
+    // runs for minutes; the caller is a browser behind an API Gateway that
+    // gives up in thirty seconds, so this answers at once and the record page
+    // polls — the same way it already does for the automatic path's minutes.
+    const res = await req(port, {
       method: "POST",
       path: `/internal/kelabos/${KELABO}/minutes`,
       headers: { authorization: `Bearer ${internalJwt}` },
     });
+    assert.equal(res.status, 202);
+    assert.equal(JSON.parse(res.body).status, "generating");
     // Correlated by requestId, not "whatever board post arrives next": a
     // contribution sent at this moment used to silently become the minutes.
     const request = await nextFrame((f) => f.type === "request" && f.kind === "summary");
@@ -1021,16 +1027,13 @@ async function main() {
       kelaboId: KELABO,
       text: JSON.stringify({ topics: ["retries"], decisions: ["ship Friday"], actionItems: [{ text: "cut release", owner: "Alice" }], openQuestions: [], findings: [] }),
     }));
-    const res = await pending;
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.body);
+    const put = await waitFor(() => calls.puts.find((p) => p.Item.SK === "MINUTES"));
     // A dev-mode (opencode) summary in the old string-array shape is normalized
     // into the same document the server agent produces.
-    assert.deepEqual(body.minutes.topics, [{ title: "retries" }]);
-    assert.deepEqual(body.minutes.decisions, [{ text: "ship Friday" }]);
-    assert.ok(calls.puts.find((p) => p.Item.SK === "MINUTES"), "MINUTES item stored");
+    assert.deepEqual(put.Item.topics, [{ title: "retries" }]);
+    assert.deepEqual(put.Item.decisions, [{ text: "ship Friday" }]);
     assert.ok(!sse.events.find((e) => e.data?.kind === "minutes"), "minutes never fanned to SSE");
-    console.log("ok: internal minutes (dev mode) → MINUTES stored, not fanned");
+    console.log("ok: internal minutes (dev mode) → 202, MINUTES stored, not fanned");
   }
 
   {

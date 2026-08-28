@@ -13,6 +13,11 @@ export function createState() {
     sseSubscribers: new Map(),
     promotedByKelabo: new Map(),
     agentWorkers: new Map(),
+    // Kelabos whose minutes are being regenerated right now. In-process and
+    // ephemeral on purpose: it exists only to stop a second click starting a
+    // second whole-transcript LLM call, and a task restart has already lost the
+    // call it would have been guarding.
+    minutesInFlight: new Set(),
     uttSeq: new Map(),
     // Last accepted caption per kelabo, for race-free duplicate suppression.
     lastCaption: new Map(),

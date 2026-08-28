@@ -183,3 +183,41 @@ export const SSE_EVENT_UTTERANCE = "utterance";
 // error and not a contribution: a silent absence of captions is the failure
 // this event exists to prevent, and a board card would outlive the moment.
 export const SSE_EVENT_NOTICE = "notice";
+
+// Why a record has no minutes. The gateway logs these and stores the one that
+// applied on the record's own row; the record page turns them into a sentence.
+// They explain what happened — they do NOT decide whether to try again.
+export const MINUTES_SKIPPED_REASONS = {
+  // Nothing was ever dispatched to the assistant while the kelabo ran: it was
+  // switched off, or every turn was refused. Note this says nothing about
+  // whether the words were *recorded* — they were.
+  NO_AGENT_CONTEXT: "no_agent_context",
+  // The server agent ran and what came back could not be read as minutes.
+  NO_MINUTES_RETURNED: "no_minutes_returned",
+  // A developer's local agent was attached but never answered the request.
+  NO_DEV_SUMMARY: "no_dev_summary",
+  // It answered, and the answer was not minutes.
+  DEV_SUMMARY_UNPARSEABLE: "dev_summary_unparseable",
+};
+
+/**
+ * Could minutes for this record still be written?
+ *
+ * The question is whether there is a transcript, and nothing else. Minutes are
+ * written from the persisted utterances, which the summariser re-reads out of
+ * DynamoDB every time it runs (`ensureContext`, gateway/src/agent/runner.js) —
+ * so a live agent context is a convenience of the moment, not a precondition,
+ * and every failure above is recoverable while those rows survive.
+ *
+ * This was first written as a judgement about the *reason*, treating
+ * `no_agent_context` as permanent. That is wrong in the case that matters
+ * most: a kelabo held with the assistant switched off recorded every word it
+ * heard, and can be summarised perfectly well afterwards. Nobody was
+ * listening; everything was written down.
+ *
+ * Retention is therefore the real deadline, and the reason a record can go
+ * from retryable to not without anything happening to it.
+ */
+export function minutesRetryable({ transcript } = {}) {
+  return (transcript?.length ?? 0) > 0;
+}

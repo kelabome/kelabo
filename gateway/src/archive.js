@@ -225,7 +225,7 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   // from the persisted transcript, so the buffer is no longer needed.
   c.messageBuffer?.drop(kelaboId);
   if (!minutes) {
-    generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime, languageName(meta.hostLang) || "")
+    generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime, languageName(meta.hostLang) || "", archived)
       .catch((err) => c.logError("async_minutes_failed", err, { kelaboId }))
       .finally(() => {
         c.agentDispatcher.drop(kelaboId);
@@ -241,7 +241,12 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   return { status: 200, body: { ok: true, archived, archiveId: archive.archiveId, s3Key } };
 }
 
-async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime, minutesLanguage = "") {
+// `archived` says whether the history row was actually written. It gates the
+// row updates below because DynamoDB's UpdateItem *creates* a missing item: on
+// a kelabo whose history write failed, marking it would conjure a row carrying
+// nothing but an id and "no minutes", and that row is what the records list
+// reads.
+async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime, minutesLanguage = "", archived = true) {
   // Every branch here says what it did. This function used to end a kelabo
   // without minutes and without a single line of log to say why: a dev summary
   // that never came back, an agent context that had already gone, a refused or
@@ -277,20 +282,45 @@ async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRun
   }
   if (!minutes) {
     c.log("minutes_skipped", { kelaboId, reason, mode: agentRuntime || "server" });
-    if (reason === "no_agent_context") {
-      // No minutes are ever coming for this record. Recorded on the row the
-      // record page actually reads, so it can say "no minutes, and here is
-      // why" instead of spinning on a promise nothing is working to keep.
-      await updateMeta(c, kelaboId, { minutesSkipped: true }).catch((err) =>
-        c.logError("minutes_skipped_flag_failed", err, { kelaboId })
-      );
-      await markHistoryMinutesSkipped(c, archive.archiveId).catch((err) =>
+    // Recorded for EVERY terminal reason, not just `no_agent_context`.
+    //
+    // Only that one used to be written down, on the theory that the others
+    // might still resolve. None of them do — this function has already
+    // returned, nothing retries it, and no scheduler will call it again. So a
+    // failed LLM call left `hasMinutes: false` and no mark at all, the page
+    // spun for sixty seconds and then blamed the deployment.
+    //
+    // The reason goes on the row too. It is a diagnosis, not a verdict:
+    // whether minutes can still be had is a question about the transcript
+    // (`minutesRetryable`, contracts), and every reason here is recoverable
+    // while those rows survive.
+    await updateMeta(c, kelaboId, { minutesSkipped: true, minutesSkippedReason: reason }).catch((err) =>
+      c.logError("minutes_skipped_flag_failed", err, { kelaboId })
+    );
+    if (archived) {
+      await markHistoryMinutesSkipped(c, archive.archiveId, reason).catch((err) =>
         c.logError("minutes_skipped_history_failed", err, { kelaboId })
       );
     }
     return;
   }
 
+  await persistMinutes(c, { kelaboId, minutes, archive, s3Key });
+  c.log("minutes_generated_async", { kelaboId, generatedBy: minutes.generatedBy });
+}
+
+/**
+ * Write minutes everywhere a reader can see them.
+ *
+ * Exported and shared because there are two ways minutes come into existence —
+ * automatically when the kelabo ends, and on demand when someone asks for them
+ * again — and only the first one used to do this. The second wrote the MINUTES
+ * row, set `hasMinutes: true`, and stopped: the record page reads `minutes` out
+ * of the **S3 archive object**, so a perfectly good regeneration changed
+ * nothing the reader could see, and the page went on saying there were none.
+ * Five places have to agree, and one copy of the code is the only way they do.
+ */
+export async function persistMinutes(c, { kelaboId, minutes, archive, s3Key }) {
   // Untitled kelabo? Adopt the AI-generated title from the minutes and mark
   // it as generated, so the records list can label it.
   const UNTITLED = new Set(["", "untitled kelabo"]);
@@ -302,18 +332,23 @@ async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRun
     );
   }
 
-  // Persist the minutes doc and mark the kelabo as having minutes.
+  // Persist the minutes doc and mark the kelabo as having minutes. The
+  // no-minutes marks go with the same write: a record that failed once and was
+  // regenerated must stop announcing that it has none.
   await putMinutes(c, minutes).catch((err) => c.logError("minutes_put_failed", err, { kelaboId }));
-  await updateMeta(c, kelaboId, { hasMinutes: true }).catch((err) =>
+  await updateMeta(c, kelaboId, { hasMinutes: true, minutesSkipped: false, minutesSkippedReason: "" }).catch((err) =>
     c.logError("minutes_meta_update_failed", err, { kelaboId })
   );
-  // Merge minutes into the archived object and re-write it.
+  // Merge minutes into the archived object and re-write it. This is the copy
+  // the record page reads, so a failure here is minutes that exist and cannot
+  // be seen — the loudest of the errors this function swallows.
   try {
     await putArchiveObject(c, s3Key, { ...archive, minutes });
   } catch (err) {
     c.logError("archive_minutes_merge_failed", err, { kelaboId });
   }
-  // Update the history row's hasMinutes flag.
+  // Update the history row's hasMinutes flag. A full re-put, so it also drops
+  // any `minutesSkipped`/`minutesSkippedReason` a previous failure left behind.
   await putHistoryRow(c, {
     archiveId: archive.archiveId,
     kelaboId,
@@ -338,7 +373,6 @@ async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRun
       c.logError("participant_index_minutes_failed", err, { kelaboId, identity: p.identity })
     );
   }
-  c.log("minutes_generated_async", { kelaboId, generatedBy: minutes.generatedBy });
 }
 
 /**

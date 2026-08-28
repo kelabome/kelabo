@@ -1,5 +1,6 @@
 import { S3Client, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { cutoffFromAge } from "@kelabo/contracts/retention";
+import { minutesRetryable } from "@kelabo/contracts";
 import { err } from "./errors.js";
 
 // A purge deletes an unbounded amount of data, so cap the work per request and
@@ -178,6 +179,7 @@ export function createRecords({ config, db, s3 }) {
       title: l.journeyTitleSnapshot || "",
       visibility: l.journeyVisibilitySnapshot,
     }));
+    const transcript = archive?.transcript ?? [];
     return {
       archiveId,
       title: row.titleGenerated ? row.title : (archive?.title ?? row.title),
@@ -186,14 +188,25 @@ export function createRecords({ config, db, s3 }) {
       endedAt: archive?.endedAt ?? row.endedAt,
       host: archive?.host ?? row.host,
       participants: archive?.participants ?? [],
-      transcript: archive?.transcript ?? [],
+      transcript,
       board: archive?.board ?? [],
       ...(archive?.minutes ? { minutes: archive.minutes } : {}),
-      // No minutes, and none coming: the assistant was switched off for this
-      // kelabo, so nothing was ever going to write them. Without this the page
-      // cannot tell "not yet" from "never" and spins on a promise nobody is
-      // keeping.
-      ...(row.minutesSkipped ? { minutesSkipped: true } : {}),
+      // No minutes, and this attempt is over. Without this the page cannot tell
+      // "not yet" from "no", and spins on a promise nobody is keeping.
+      //
+      // `minutesRetryable` is the part the reader can act on, and it asks about
+      // the transcript rather than about the failure: minutes are written from
+      // those rows, so while they exist the minutes can still be had — whatever
+      // went wrong the first time, including nobody having been listening.
+      // The raw `reason` rides along for operators, who otherwise have to go to
+      // the gateway log to learn what the page already knew.
+      ...(row.minutesSkipped
+        ? {
+            minutesSkipped: true,
+            ...(row.minutesSkippedReason ? { minutesSkippedReason: row.minutesSkippedReason } : {}),
+            minutesRetryable: minutesRetryable({ transcript }),
+          }
+        : {}),
       journeys,
     };
   }

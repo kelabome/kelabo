@@ -130,6 +130,8 @@ export default function RecordDetail() {
   // The minutes poll gave up. Flipped so the tab can stop promising — a
   // spinner that outlives its poll is an eternal promise (docs 19 §2/§3).
   const [minutesTimedOut, setMinutesTimedOut] = useState(false)
+  // A retry the reader asked for: '' | 'asking' | 'generating' | 'failed'.
+  const [retryState, setRetryState] = useState('')
 
   useEffect(() => {
     api.getRecord(id)
@@ -143,31 +145,54 @@ export default function RecordDetail() {
     if (!record || record.minutes) return undefined
     // Nothing is generating them, so there is nothing to poll for. Polling a
     // record the server has already said will never have minutes is a request
-    // every few seconds in service of a spinner that is itself wrong.
-    if (record.minutesSkipped) return undefined
+    // every few seconds in service of a spinner that is itself wrong. A retry
+    // the reader just asked for is the exception — that IS something running.
+    if (record.minutesSkipped && retryState !== 'generating') return undefined
     // Minutes land within a minute or two of the end. A record opened long
     // after its kelabo ended and still without them is not "generating" —
     // say so at once, and don't poll for something that is not coming.
     const MINUTES_GRACE_MS = 10 * 60 * 1000
-    if (record.endedAt && Date.now() - record.endedAt > MINUTES_GRACE_MS) {
+    if (retryState !== 'generating' && record.endedAt && Date.now() - record.endedAt > MINUTES_GRACE_MS) {
       setMinutesTimedOut(true)
       return undefined
     }
+    // A retry runs a whole-transcript LLM call, which takes far longer than the
+    // automatic path's head start — poll it for the length of that call rather
+    // than the minute that is right for a record opened just after the end.
+    const maxTries = retryState === 'generating' ? 160 : 20
     let tries = 0
     const t = setInterval(() => {
       tries += 1
       api.getRecord(id)
-        .then(r => { if (r?.minutes) setRecord(r) })
+        .then(r => {
+          // Re-take the whole record, not just the minutes: a failed retry
+          // reports itself by setting minutesSkipped and a reason, and the tab
+          // has to be able to say so instead of polling on in silence.
+          if (r?.minutes) { setRecord(r); setRetryState('') }
+          else if (retryState === 'generating' && r?.minutesSkipped) { setRecord(r); setRetryState('failed') }
+        })
         .catch(() => {})
       // Give up out loud, not silently: the Minutes tab switches from a
       // spinner to a status the moment nothing more is coming.
-      if (tries >= 20) {
+      if (tries >= maxTries) {
         clearInterval(t)
         setMinutesTimedOut(true)
+        setRetryState(s => (s === 'generating' ? 'failed' : s))
       }
     }, 3000)
     return () => clearInterval(t)
-  }, [record?.minutes, record == null, id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [record?.minutes, record == null, id, retryState]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Ask the server to write the minutes again. Offered only when the server
+  // said so — a kelabo with nothing recorded cannot be summarised however many
+  // times it is asked, and a button that can only fail is worse than no button.
+  const retryMinutes = () => {
+    setRetryState('asking')
+    setMinutesTimedOut(false)
+    api.generateMinutes(id)
+      .then(() => setRetryState('generating'))
+      .catch(() => setRetryState('failed'))
+  }
 
   const download = () => {
     const blob = new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' })
@@ -286,14 +311,39 @@ export default function RecordDetail() {
 
           {tab === 'minutes' && (
             <section className="anim-in record-panel">
-              {/* "Never" is not "not yet". The assistant was switched off for
-                  this kelabo, so nothing was ever going to write minutes, and a
-                  spinner promising them was the page keeping a promise the
-                  server had already declined to make. */}
-              {!minutes && record.minutesSkipped && (
+              {/* Four different absences, and the page used to tell three of
+                  them apart by guessing. "Never" is not "not yet", and neither
+                  is "the attempt failed and the transcript is still sitting
+                  there" — which rendered as "minutes may not be enabled on this
+                  deployment" on a deployment where they were enabled and
+                  working. The server says which it is now, and where the
+                  transcript survives the reader can just ask again. */}
+              {!minutes && retryState === 'generating' && (
+                <div className="empty hstack">
+                  <span className="con-spinner" aria-hidden="true"></span>
+                  Writing the minutes… this reads the whole transcript, so give it a minute or two.
+                </div>
+              )}
+              {!minutes && retryState !== 'generating' && record.minutesSkipped && !record.minutesRetryable && (
                 <div className="empty">
-                  No minutes for this kelabo — the assistant was off when it ended, so nothing wrote
-                  them. The call, the transcript and the messages are all here.
+                  No minutes for this kelabo, and none to be had — nothing was recorded that could be
+                  summarised. The call and the messages are all here.
+                </div>
+              )}
+              {!minutes && retryState !== 'generating' && record.minutesSkipped && record.minutesRetryable && (
+                <div className="empty vstack-sm">
+                  <div>
+                    {retryState === 'failed'
+                      ? 'That did not work either. The transcript is still here, so it is worth another try.'
+                      : record.minutesSkippedReason === 'no_agent_context'
+                        ? 'No minutes were written — the assistant was off during this kelabo, so nobody was summarising as it went. Everything said was still recorded, so they can be written now.'
+                        : "The minutes didn't get written — the attempt to summarise this kelabo failed. The transcript is still here, so they can be written again."}
+                  </div>
+                  <div>
+                    <button className="btn" onClick={retryMinutes} disabled={retryState === 'asking'}>
+                      {retryState === 'asking' ? 'Asking…' : 'Write the minutes'}
+                    </button>
+                  </div>
                 </div>
               )}
               {!minutes && !record.minutesSkipped && !minutesTimedOut && (
@@ -302,10 +352,14 @@ export default function RecordDetail() {
                   Minutes are being generated… they'll appear here shortly.
                 </div>
               )}
-              {!minutes && !record.minutesSkipped && minutesTimedOut && (
-                <div className="empty">
-                  No minutes yet. They may still be generating — reload to check —
-                  or minutes may not be enabled on this deployment.
+              {!minutes && !record.minutesSkipped && minutesTimedOut && retryState !== 'generating' && (
+                <div className="empty vstack-sm">
+                  <div>No minutes yet. They may still be generating — reload to check.</div>
+                  <div>
+                    <button className="btn" onClick={retryMinutes} disabled={retryState === 'asking'}>
+                      {retryState === 'asking' ? 'Asking…' : 'Write them now'}
+                    </button>
+                  </div>
                 </div>
               )}
               {minutes && (

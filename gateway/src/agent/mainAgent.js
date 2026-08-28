@@ -11,9 +11,14 @@ const MAX_DISPATCH_PER_TURN = 3;
 // dispatches (the orchestrator's own single call is bounded by the provider
 // timeout in llm.js). Default when the knob is absent; 0 disables.
 const DEFAULT_TURN_DEADLINE_MS = 180_000;
-// Minutes stream up to 8192 output tokens over the whole transcript — the one
-// call whose legitimate ceiling is far beyond the default provider timeout.
+// Minutes are the one long-form output the agent produces, and the one call
+// whose legitimate ceiling is far beyond the default provider timeout.
 const MINUTES_TIMEOUT_MS = 7 * 60_000;
+// 8192 was measured too tight: a 23-minute, 83-utterance kelabo exhausted it on
+// a reasoning model and came back with nothing usable. The cap has to fit the
+// *worst* kelabo, not the median one — every token short of that is a record
+// with no minutes — and non-English minutes cost far more tokens per character.
+const MINUTES_MAX_TOKENS = 16384;
 
 const DISPATCH_TOOL = {
   name: "dispatch_subagent",
@@ -670,18 +675,28 @@ export class MainAgent {
       },
     ];
     this.debug?.(kelaboId, { kind: "minutes", phase: "request", model: this.smallModel, system, messages: clipMessages(messages) });
-    // Minutes are the one long-form output the agent produces; a 4k cap was
-    // truncating the write-up back into the bullet list it is meant to replace.
-    //
     // `completeRaw`, not `complete`: the reply's finish reason is the only
     // thing that can say the budget ran out, and `complete` discards it with
     // the rest of the metadata.
     // `timeoutMs` well above the default provider timeout: this is the one
-    // legitimately long call (the whole transcript in, 8192 tokens out), and
+    // legitimately long call (the whole transcript in, 16k tokens out), and
     // it retries once on a transient failure — a 429 here used to be a record
     // with no minutes and one log line.
+    // `responseFormat: "json"` for the reason the gate uses it — it curbs the
+    // free-form narration a reasoning model would otherwise spend the entire
+    // output budget on, which is exactly how a real kelabo lost its minutes.
+    // It also makes truncation *survivable*: a cut-off JSON document still has
+    // a prefix `repairTruncatedJson` can close, where cut-off prose has none.
     const res = await withLlmRetry(
-      () => this.llm.completeRaw({ model: this.smallModel, system, messages, maxTokens: 8192, timeoutMs: MINUTES_TIMEOUT_MS }),
+      () =>
+        this.llm.completeRaw({
+          model: this.smallModel,
+          system,
+          messages,
+          maxTokens: MINUTES_MAX_TOKENS,
+          timeoutMs: MINUTES_TIMEOUT_MS,
+          responseFormat: "json",
+        }),
       { log: this.log, event: "minutes_llm_retry", fields: { kelaboId } }
     );
     const text = res.text;
@@ -692,7 +707,11 @@ export class MainAgent {
     // record, which just looks a bit thin. Non-English kelabos hit this first:
     // the same minutes cost far more output tokens per character.
     if (res.truncated)
-      this.log?.("minutes_truncated", { kelaboId, model: this.smallModel, chars: text?.length ?? 0, maxTokens: 8192 });
+      this.log?.("minutes_truncated", { kelaboId, model: this.smallModel, chars: text?.length ?? 0, maxTokens: MINUTES_MAX_TOKENS });
+    // An empty reply is its own diagnosis and must not read as "unparseable":
+    // the model produced no answer at all (budget spent before `content`
+    // started), which is a cap problem, not a prompt problem.
+    if (!text) this.log?.("minutes_empty_reply", { kelaboId, model: this.smallModel, truncated: !!res.truncated });
     return parseMinutesJson(text, kelaboId, "server");
   }
 }
