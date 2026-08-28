@@ -27,8 +27,8 @@ export function PresenceProvider({ children }) {
   const navigate = useNavigate()
   const ring = useRing()
 
-  // Journey thread messages (docs 20 §19.9) reach several unrelated places at
-  // once — the rail's badge, the journey page's tab badge, the open thread —
+  // Journey leg messages (docs 20 §19.9) reach several unrelated places at
+  // once — the rail's badge, the journey page's tab badge, the open leg —
   // and none of them owns the stream. A subscription set rather than a piece
   // of state: putting the last event in state would re-render every consumer
   // on every message, including the ones that only wanted to know a count

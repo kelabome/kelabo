@@ -39,8 +39,8 @@ import {
   queryJourneyTimeline,
   submitJourneyReport,
   postJourneyBoardMessage,
-  listJourneyThreads,
-  getJourneyThread,
+  listJourneyLegs,
+  getJourneyLeg,
   queryJourneyMessages,
   putJourneyMessage,
   resolveJourneyMentions,
@@ -62,12 +62,12 @@ const JOURNEY_BOARD_LIMIT = 20;
 // write cap is 4,000 per message, and 20 × 4,000 unclipped was the one
 // tool response that could dwarf every other budget on this surface.
 const JOURNEY_BOARD_CLIP = 2000;
-// Threads (docs 20 §19). The list is names and sizes only, so it stays cheap
-// even on a journey with many; reading one thread's messages is the separate,
+// Legs (docs 20 §19). The list is names and sizes only, so it stays cheap
+// even on a journey with many; reading one leg's messages is the separate,
 // explicit ask, and it is the one that needs a budget.
-const JOURNEY_THREADS_LIMIT = 50;
-const THREAD_MESSAGES_LIMIT = 60;
-const THREAD_MESSAGE_CLIP = 1500;
+const JOURNEY_LEGS_LIMIT = 50;
+const LEG_MESSAGES_LIMIT = 60;
+const LEG_MESSAGE_CLIP = 1500;
 // kelabo_journey_info returns the description in full spirit but not in
 // full 20,000-char write-cap glory — the same 4,000 the context bundle
 // allows. The description is prose about the journey, not a document; the
@@ -279,14 +279,14 @@ export function createTunnel(c) {
       case "journey_board_request":
         return onJourneyBoardRequest(conn, frame);
 
-      case "journey_threads_request":
-        return onJourneyThreadsRequest(conn, frame);
+      case "journey_legs_request":
+        return onJourneyLegsRequest(conn, frame);
 
-      case "thread_messages_request":
-        return onThreadMessagesRequest(conn, frame);
+      case "leg_messages_request":
+        return onLegMessagesRequest(conn, frame);
 
-      case "thread_post":
-        return onThreadPost(conn, frame);
+      case "leg_post":
+        return onLegPost(conn, frame);
       case "journey_report_submit":
         return onJourneyReportSubmit(conn, frame);
       case "journey_post":
@@ -942,38 +942,38 @@ export function createTunnel(c) {
     });
   }
 
-  // --- threads (docs 20 §19) ------------------------------------------------
+  // --- legs (docs 20 §19) ------------------------------------------------
   //
   // Read tools plus one write. All three are agent-*initiated*: the agent
   // asks, the Gateway answers. Being *told* that somebody mentioned you in a
-  // thread is a push, which needs a journey-keyed reverse index this file
+  // leg is a push, which needs a journey-keyed reverse index this file
   // deliberately does not have (see `conn.journeys`), and is not built.
 
-  async function onJourneyThreadsRequest(conn, frame) {
+  async function onJourneyLegsRequest(conn, frame) {
     const { kelaboId, requestId } = frame;
     const resolution = await resolveJourneyRequest(conn, frame);
     if (!resolution) {
-      c.log("journey_threads_request_from_unattached", { kelaboId, identity: conn.identity });
+      c.log("journey_legs_request_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
     if (resolution.resolved !== "ok") {
-      sendDown(conn.ws, { type: "journey_threads", requestId, kelaboId, ...resolution, threads: [] });
+      sendDown(conn.ws, { type: "journey_legs", requestId, kelaboId, ...resolution, legs: [] });
       return;
     }
-    let threads = [];
+    let legs = [];
     try {
-      threads = await listJourneyThreads(c, resolution.journeyId);
+      legs = await listJourneyLegs(c, resolution.journeyId);
     } catch (err) {
-      c.logError("journey_threads_query_failed", err, { kelaboId, journeyId: resolution.journeyId });
+      c.logError("journey_legs_query_failed", err, { kelaboId, journeyId: resolution.journeyId });
     }
     sendDown(conn.ws, {
-      type: "journey_threads",
+      type: "journey_legs",
       requestId,
       kelaboId,
       resolved: "ok",
       journeys: [],
-      threads: threads.slice(0, JOURNEY_THREADS_LIMIT).map((t) => ({
-        threadId: t.threadId,
+      legs: legs.slice(0, JOURNEY_LEGS_LIMIT).map((t) => ({
+        legId: t.legId,
         title: t.title,
         messageCount: t.messageCount,
         lastMessageAt: t.lastMessageAt,
@@ -981,40 +981,40 @@ export function createTunnel(c) {
     });
   }
 
-  async function onThreadMessagesRequest(conn, frame) {
-    const { kelaboId, requestId, threadId } = frame;
+  async function onLegMessagesRequest(conn, frame) {
+    const { kelaboId, requestId, legId } = frame;
     const resolution = await resolveJourneyRequest(conn, frame);
     if (!resolution) {
-      c.log("thread_messages_request_from_unattached", { kelaboId, identity: conn.identity });
+      c.log("leg_messages_request_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
     if (resolution.resolved !== "ok") {
-      sendDown(conn.ws, { type: "thread_messages", requestId, kelaboId, ...resolution, messages: [] });
+      sendDown(conn.ws, { type: "leg_messages", requestId, kelaboId, ...resolution, messages: [] });
       return;
     }
     const journeyId = resolution.journeyId;
-    const thread = await getJourneyThread(c, journeyId, threadId).catch((err) => {
-      c.logError("thread_lookup_failed", err, { journeyId, threadId });
+    const leg = await getJourneyLeg(c, journeyId, legId).catch((err) => {
+      c.logError("leg_lookup_failed", err, { journeyId, legId });
       return null;
     });
-    if (!thread) {
-      sendDown(conn.ws, { type: "thread_messages", requestId, kelaboId, resolved: "thread_not_found", journeys: [], messages: [] });
+    if (!leg) {
+      sendDown(conn.ws, { type: "leg_messages", requestId, kelaboId, resolved: "leg_not_found", journeys: [], messages: [] });
       return;
     }
-    const limit = Math.min(frame.limit || THREAD_MESSAGES_LIMIT, THREAD_MESSAGES_LIMIT);
+    const limit = Math.min(frame.limit || LEG_MESSAGES_LIMIT, LEG_MESSAGES_LIMIT);
     let page = { messages: [] };
     try {
-      page = await queryJourneyMessages(c, journeyId, threadId, { limit });
+      page = await queryJourneyMessages(c, journeyId, legId, { limit });
     } catch (err) {
-      c.logError("thread_messages_query_failed", err, { journeyId, threadId });
+      c.logError("leg_messages_query_failed", err, { journeyId, legId });
     }
     sendDown(conn.ws, {
-      type: "thread_messages",
+      type: "leg_messages",
       requestId,
       kelaboId,
       resolved: "ok",
       journeys: [],
-      title: thread.title || "",
+      title: leg.title || "",
       // Tombstones are dropped rather than sent as empty strings: an agent
       // reading a conversation wants what was said, and a run of blanks is
       // noise it would have to be told to ignore.
@@ -1023,7 +1023,7 @@ export function createTunnel(c) {
         .map((m) => ({
           msgId: m.msgId,
           author: m.kind === "assistant" ? "kelabo" : m.author,
-          text: clip(m.text || "", THREAD_MESSAGE_CLIP),
+          text: clip(m.text || "", LEG_MESSAGE_CLIP),
           at: m.at,
           kind: m.kind,
         })),
@@ -1031,25 +1031,25 @@ export function createTunnel(c) {
   }
 
   /**
-   * Post into a thread on the agent's own initiative.
+   * Post into a leg on the agent's own initiative.
    *
    * Not gated by `aiCanPost`. That flag guards the *board* — a curated,
-   * always-visible surface being edited unsupervised — while a thread is the
+   * always-visible surface being edited unsupervised — while a leg is the
    * conversation, where an attached agent is a participant like anyone else.
    * The gate that applies here is attachment: you can only write to a journey
    * this connection resolved to, which `resolveJourneyRequest` enforces.
    */
-  async function onThreadPost(conn, frame) {
-    const { kelaboId, requestId, threadId, text } = frame;
+  async function onLegPost(conn, frame) {
+    const { kelaboId, requestId, legId, text } = frame;
     const resolution = await resolveJourneyRequest(conn, frame);
     if (!resolution) {
-      c.log("thread_post_from_unattached", { kelaboId, identity: conn.identity });
+      c.log("leg_post_from_unattached", { kelaboId, identity: conn.identity });
       return;
     }
     const reply = (resolved, extra = {}) =>
-      sendDown(conn.ws, { type: "thread_posted", requestId, kelaboId, resolved, journeys: [], ...extra });
+      sendDown(conn.ws, { type: "leg_posted", requestId, kelaboId, resolved, journeys: [], ...extra });
     if (resolution.resolved !== "ok") {
-      sendDown(conn.ws, { type: "thread_posted", requestId, kelaboId, ...resolution, msgId: "" });
+      sendDown(conn.ws, { type: "leg_posted", requestId, kelaboId, ...resolution, msgId: "" });
       return;
     }
     const journeyId = resolution.journeyId;
@@ -1057,24 +1057,24 @@ export function createTunnel(c) {
     if (!meta) return reply("journey_not_found");
     // The same freeze every other journey write obeys.
     if (meta.status === "completed") return reply("journey_completed");
-    const thread = await getJourneyThread(c, journeyId, threadId).catch(() => null);
-    if (!thread) return reply("thread_not_found");
+    const leg = await getJourneyLeg(c, journeyId, legId).catch(() => null);
+    if (!leg) return reply("leg_not_found");
 
     try {
       // Mentions resolve for an agent's message exactly as for a person's —
       // an agent writing "@bob take a look" should raise Bob's badge, and the
       // resolution is server-side either way.
-      const mentions = await resolveJourneyMentions(c, journeyId, threadId, meta, text).catch(() => []);
-      const message = await putJourneyMessage(c, journeyId, threadId, {
+      const mentions = await resolveJourneyMentions(c, journeyId, legId, meta, text).catch(() => []);
+      const message = await putJourneyMessage(c, journeyId, legId, {
         text,
         author: conn.identity,
         mentions,
       });
-      c.log("thread_post_by_agent", { journeyId, threadId, identity: conn.identity, runtime: conn.agent?.runtime });
+      c.log("leg_post_by_agent", { journeyId, legId, identity: conn.identity, runtime: conn.agent?.runtime });
       reply("ok", { msgId: message.msgId });
     } catch (err) {
-      c.logError("thread_post_failed", err, { journeyId, threadId });
-      reply("thread_not_found");
+      c.logError("leg_post_failed", err, { journeyId, legId });
+      reply("leg_not_found");
     }
   }
 

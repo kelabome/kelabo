@@ -392,53 +392,53 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
     return res.nextBefore ? `${rendered}\n\nMore available — call again with before:${res.nextBefore}.` : rendered;
   }
 
-  async function journeyThreads({ journeyId } = {}) {
+  async function journeyLegs({ journeyId } = {}) {
     const kelaboId = journeyScope();
-    const res = await tunnel.requestJourneyThreads(kelaboId, journeyId);
+    const res = await tunnel.requestJourneyLegs(kelaboId, journeyId);
     if (!res) throw new Error("Kelabo did not answer. Try again.");
     const explained = explainJourneyResolution(res);
     if (explained) return explained;
-    if (!res.threads.length) return "This journey has no threads yet.";
+    if (!res.legs.length) return "This journey has no legs yet.";
     return [
-      "Threads on this journey. Read one with kelabo_thread_messages(threadId).",
-      ...res.threads.map(
-        (t) => `- ${t.title} (id: ${t.threadId}, ${t.messageCount || 0} message${t.messageCount === 1 ? "" : "s"})`
+      "Legs on this journey. Read one with kelabo_leg_messages(legId).",
+      ...res.legs.map(
+        (t) => `- ${t.title} (id: ${t.legId}, ${t.messageCount || 0} message${t.messageCount === 1 ? "" : "s"})`
       ),
     ].join("\n");
   }
 
-  async function threadMessages({ threadId, journeyId, limit } = {}) {
-    if (!threadId) throw new Error("threadId is required — list them with kelabo_journey_threads.");
+  async function legMessages({ legId, journeyId, limit } = {}) {
+    if (!legId) throw new Error("legId is required — list them with kelabo_journey_legs.");
     const kelaboId = journeyScope();
-    const res = await tunnel.requestThreadMessages(kelaboId, journeyId, threadId, limit);
+    const res = await tunnel.requestLegMessages(kelaboId, journeyId, legId, limit);
     if (!res) throw new Error("Kelabo did not answer. Try again.");
-    if (res.resolved === "thread_not_found") return "There is no thread with that id on this journey.";
+    if (res.resolved === "leg_not_found") return "There is no leg with that id on this journey.";
     const explained = explainJourneyResolution(res);
     if (explained) return explained;
-    if (!res.messages.length) return `Thread "${res.title}" has no messages yet.`;
+    if (!res.messages.length) return `Leg "${res.title}" has no messages yet.`;
     // The same untrusted envelope every other multi-contributor surface gets:
     // this is a conversation between people, some of whom the agent has never
     // met, and it is exactly the shape a prompt injection would take.
     return [
-      `<kelabo-thread untrusted="true" title="${res.title}">`,
+      `<kelabo-leg untrusted="true" title="${res.title}">`,
       ...res.messages.map((m) => `${m.author}: ${m.text}`),
-      "</kelabo-thread>",
+      "</kelabo-leg>",
     ].join("\n");
   }
 
-  async function threadPost({ threadId, text, journeyId } = {}) {
-    if (!threadId) throw new Error("threadId is required — list them with kelabo_journey_threads.");
+  async function legPost({ legId, text, journeyId } = {}) {
+    if (!legId) throw new Error("legId is required — list them with kelabo_journey_legs.");
     if (!text || !text.trim()) throw new Error("Nothing to post.");
     const kelaboId = journeyScope();
-    const res = await tunnel.postThreadMessage(kelaboId, journeyId, threadId, text.trim());
+    const res = await tunnel.postLegMessage(kelaboId, journeyId, legId, text.trim());
     if (!res) throw new Error("Kelabo did not answer. Try again.");
-    if (res.resolved === "thread_not_found") return "There is no thread with that id on this journey.";
+    if (res.resolved === "leg_not_found") return "There is no leg with that id on this journey.";
     if (res.resolved === "journey_completed") {
-      return "This journey is completed, so its threads are read-only. Nothing was posted.";
+      return "This journey is completed, so its legs are read-only. Nothing was posted.";
     }
     const explained = explainJourneyResolution(res);
     if (explained) return explained;
-    return "Posted to the thread.";
+    return "Posted to the leg.";
   }
 
   async function journeyBoard({ journeyId } = {}) {
@@ -665,7 +665,7 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
 
   return {
     join, post, working, kelabo, board, history, minutes, leave, sweep, briefing: () => briefing,
-    journeyInfo, journeyTimeline, journeyBoard, journeyThreads, threadMessages, threadPost, journeyReportSubmit, journeyPost,
+    journeyInfo, journeyTimeline, journeyBoard, journeyLegs, legMessages, legPost, journeyReportSubmit, journeyPost,
     journeyJoin, journeyLeave, journeyContext, journeyKelabos, journeyDocuments, journeyReports,
   };
 }

@@ -22,15 +22,15 @@ import {
   getJourneyReadCursor,
   listJourneyReadCursors,
   advanceJourneyReadCursor,
-  listJourneyThreads,
-  createJourneyThread,
-  ensureDefaultThread,
-  renameJourneyThread,
-  DEFAULT_THREAD_ID,
+  listJourneyLegs,
+  createJourneyLeg,
+  ensureDefaultLeg,
+  renameJourneyLeg,
+  DEFAULT_LEG_ID,
 } from "../src/journeys.js";
 import { loadJourneyContext, historyStillApplies } from "../src/agent/journeyContext.js";
 import { mainAgentSystemPrompt } from "../src/agent/persona.js";
-import { journeyUnread, threadUnread, cursorsByThread } from "@kelabo/contracts";
+import { journeyUnread, legUnread, cursorsByLeg } from "@kelabo/contracts";
 
 function makeStore(seed = {}) {
   const items = new Map(Object.entries(seed));
@@ -718,9 +718,9 @@ await test("KELABO_LLM_API_KEY is a bootstrap for an empty credentials table, an
 // rule the tunnel and the HTTP handlers now share, the two paging cursors,
 // and the counter/cursor arithmetic the unread badge is differenced from.
 
-// Every channel test runs inside one thread; the thread-scoped key shapes are
+// Every channel test runs inside one leg; the leg-scoped key shapes are
 // asserted where they matter, not restated in forty call sites.
-const T = DEFAULT_THREAD_ID;
+const T = DEFAULT_LEG_ID;
 
 const channelSeed = (journeyId, meta = {}) => ({
   [`${journeyPk(journeyId)}|META`]: {
@@ -734,11 +734,11 @@ const channelSeed = (journeyId, meta = {}) => ({
     status: "active",
     ...meta,
   },
-  [`${journeyPk(journeyId)}|THREAD#${T}`]: {
+  [`${journeyPk(journeyId)}|LEG#${T}`]: {
     PK: journeyPk(journeyId),
-    SK: `THREAD#${T}`,
-    threadId: T,
-    title: "General",
+    SK: `LEG#${T}`,
+    legId: T,
+    title: "Trunk",
     createdAt: 1,
     messageCount: 0,
     lastMessageAt: 0,
@@ -838,96 +838,96 @@ await test("queryJourneyMessages: the range stays inside MSG#, never walking int
   seed[`${journeyPk(journeyId)}|LINK#k1`] = { PK: journeyPk(journeyId), SK: "LINK#k1", kelaboId: "k1" };
   seed[`${journeyPk(journeyId)}|REPORT#r1`] = { PK: journeyPk(journeyId), SK: "REPORT#r1", reportId: "r1" };
 
-  // A sibling thread whose id has this one's as a PREFIX. This is the hazard
-  // threads added: `MSG#general2#…` sorts above `MSG#general#…`, so a range
-  // ending at anything looser than `MSG#general$` swallows another thread's
+  // A sibling leg whose id has this one's as a PREFIX. This is the hazard
+  // legs added: `MSG#trunk2#…` sorts above `MSG#trunk#…`, so a range
+  // ending at anything looser than `MSG#trunk$` swallows another leg's
   // whole conversation into this one.
-  seed[`${journeyPk(journeyId)}|THREAD#general2`] = {
-    PK: journeyPk(journeyId), SK: "THREAD#general2", threadId: "general2", title: "Other", createdAt: 1,
+  seed[`${journeyPk(journeyId)}|LEG#trunk2`] = {
+    PK: journeyPk(journeyId), SK: "LEG#trunk2", legId: "trunk2", title: "Other", createdAt: 1,
   };
   const c = makeContainer({ store: makeStore(seed) });
 
   const only = await putJourneyMessage(c, journeyId, T, { text: "hello", author: "alice@example.com" });
-  const elsewhere = await putJourneyMessage(c, journeyId, "general2", { text: "not here", author: "alice@example.com" });
+  const elsewhere = await putJourneyMessage(c, journeyId, "trunk2", { text: "not here", author: "alice@example.com" });
 
   for (const args of [{}, { before: "9999999999999-zzzzzz" }, { since: "0000000000000-000000" }]) {
     const page = await queryJourneyMessages(c, journeyId, T, args);
     assert.deepEqual(page.messages.map((m) => m.msgId), [only.msgId], JSON.stringify(args));
   }
-  // …and the other thread sees only its own.
-  const other = await queryJourneyMessages(c, journeyId, "general2", {});
+  // …and the other leg sees only its own.
+  const other = await queryJourneyMessages(c, journeyId, "trunk2", {});
   assert.deepEqual(other.messages.map((m) => m.msgId), [elsewhere.msgId]);
 });
 
-await test("threads: the default one is fixed-id and safe to create twice", async () => {
-  const journeyId = "j-threads";
+await test("legs: the default one is fixed-id and safe to create twice", async () => {
+  const journeyId = "j-legs";
   const store = makeStore(channelSeed(journeyId));
   const c = makeContainer({ store });
   // The seed already has it; ensuring again must be a no-op rather than a
-  // second "General". Two people opening a journey at once do exactly this.
-  const again = await ensureDefaultThread(c, journeyId, "alice@example.com");
-  assert.equal(again.threadId, DEFAULT_THREAD_ID);
-  assert.equal((await listJourneyThreads(c, journeyId)).length, 1);
+  // second "Trunk". Two people opening a journey at once do exactly this.
+  const again = await ensureDefaultLeg(c, journeyId, "alice@example.com");
+  assert.equal(again.legId, DEFAULT_LEG_ID);
+  assert.equal((await listJourneyLegs(c, journeyId)).length, 1);
 
-  const { created, thread } = await createJourneyThread(c, journeyId, {
+  const { created, leg } = await createJourneyLeg(c, journeyId, {
     title: "Rollout",
     identity: "bob@example.com",
   });
   assert.equal(created, true);
-  assert.notEqual(thread.threadId, DEFAULT_THREAD_ID, "a person's thread gets a uuid");
-  assert.equal(thread.messageCount, 0);
+  assert.notEqual(leg.legId, DEFAULT_LEG_ID, "a person's leg gets a uuid");
+  assert.equal(leg.messageCount, 0);
 
-  // General is pinned to the top whatever its activity — it is the thread
+  // Trunk is pinned to the top whatever its activity — it is the leg
   // every journey has and where a message lands when nobody chose, so a list
   // where it drifts down is one where the default place to talk is hardest to
   // find. Everything else is most recently active first.
-  await putJourneyMessage(c, journeyId, thread.threadId, { text: "hi", author: "bob@example.com" });
+  await putJourneyMessage(c, journeyId, leg.legId, { text: "hi", author: "bob@example.com" });
   assert.deepEqual(
-    (await listJourneyThreads(c, journeyId)).map((t) => t.threadId),
-    [DEFAULT_THREAD_ID, thread.threadId],
-    "General stays first even though the other thread is the active one"
+    (await listJourneyLegs(c, journeyId)).map((t) => t.legId),
+    [DEFAULT_LEG_ID, leg.legId],
+    "Trunk stays first even though the other leg is the active one"
   );
 
-  const { thread: third } = await createJourneyThread(c, journeyId, { title: "Later", identity: "bob@example.com" });
-  await putJourneyMessage(c, journeyId, third.threadId, { text: "newest", author: "bob@example.com" });
+  const { leg: third } = await createJourneyLeg(c, journeyId, { title: "Later", identity: "bob@example.com" });
+  await putJourneyMessage(c, journeyId, third.legId, { text: "newest", author: "bob@example.com" });
   assert.deepEqual(
-    (await listJourneyThreads(c, journeyId)).map((t) => t.threadId),
-    [DEFAULT_THREAD_ID, third.threadId, thread.threadId],
+    (await listJourneyLegs(c, journeyId)).map((t) => t.legId),
+    [DEFAULT_LEG_ID, third.legId, leg.legId],
     "and the rest sort newest-active first behind it"
   );
 
-  assert.equal((await renameJourneyThread(c, journeyId, thread.threadId, { title: "Rollout plan" })).ok, true);
-  const renamed = (await listJourneyThreads(c, journeyId)).find((t) => t.threadId === thread.threadId);
+  assert.equal((await renameJourneyLeg(c, journeyId, leg.legId, { title: "Rollout plan" })).ok, true);
+  const renamed = (await listJourneyLegs(c, journeyId)).find((t) => t.legId === leg.legId);
   assert.equal(renamed.title, "Rollout plan");
-  assert.equal((await renameJourneyThread(c, journeyId, "nope", { title: "x" })).reason, "thread_not_found");
+  assert.equal((await renameJourneyLeg(c, journeyId, "nope", { title: "x" })).reason, "leg_not_found");
 });
 
-await test("unread is per thread, so reading one does not clear another", async () => {
+await test("unread is per leg, so reading one does not clear another", async () => {
   // The reason a journey-level cursor cannot be stored instead of a sum: it
-  // would be advanced by reading one thread and would then hide every other
-  // thread's unread.
+  // would be advanced by reading one leg and would then hide every other
+  // leg's unread.
   const journeyId = "j-rollup";
   const store = makeStore(channelSeed(journeyId));
   const c = makeContainer({ store });
-  const { thread: other } = await createJourneyThread(c, journeyId, { title: "Other", identity: "alice@example.com" });
+  const { leg: other } = await createJourneyLeg(c, journeyId, { title: "Other", identity: "alice@example.com" });
   const bob = "bob@example.com";
 
   const a = await putJourneyMessage(c, journeyId, T, { text: "one", author: "alice@example.com" });
-  await putJourneyMessage(c, journeyId, other.threadId, { text: "two", author: "alice@example.com" });
+  await putJourneyMessage(c, journeyId, other.legId, { text: "two", author: "alice@example.com" });
 
   const roll = async () => {
-    const threads = await listJourneyThreads(c, journeyId);
-    const cursors = cursorsByThread(await listJourneyReadCursors(c, journeyId, bob));
-    return journeyUnread(threads, cursors);
+    const legs = await listJourneyLegs(c, journeyId);
+    const cursors = cursorsByLeg(await listJourneyReadCursors(c, journeyId, bob));
+    return journeyUnread(legs, cursors);
   };
 
-  assert.equal((await roll()).unread, 2, "never opened: both threads are unread");
+  assert.equal((await roll()).unread, 2, "never opened: both legs are unread");
 
   await advanceJourneyReadCursor(c, journeyId, bob, T, { at: a.at, messageCount: 1 });
   const after = await roll();
-  assert.equal(after.unread, 1, "the other thread is still unread");
-  assert.equal(after.perThread[T].unread, 0);
-  assert.equal(after.perThread[other.threadId].unread, 1);
+  assert.equal(after.unread, 1, "the other leg is still unread");
+  assert.equal(after.perLeg[T].unread, 0);
+  assert.equal(after.perLeg[other.legId].unread, 1);
 });
 
 await test("editJourneyMessage: author-only, and never resurrects a tombstone", async () => {
@@ -947,7 +947,7 @@ await test("editJourneyMessage: author-only, and never resurrects a tombstone", 
   assert.equal(ok.message.text, "the plan");
   assert.ok(ok.message.editedAt >= msg.at);
   // An edit is not a new message: the badge must not move for a typo fix.
-  assert.equal(store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`).messageCount, 1);
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|LEG#${T}`).messageCount, 1);
 
   const missing = await editJourneyMessage(c, journeyId, T, "0000000000000-nope00", { text: "x", identity: "alice@example.com" });
   assert.equal(missing.reason, "journey_message_not_found");
@@ -978,7 +978,7 @@ await test("deleteJourneyMessage: soft, idempotent, author-or-lead, and the coun
   assert.ok(row, "the row survives");
   assert.equal(row.text, undefined, "REMOVEd, not blanked");
   assert.equal(row.deletedBy, "alice@example.com");
-  assert.equal(store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`).messageCount, 1);
+  assert.equal(store.items.get(`${journeyPk(journeyId)}|LEG#${T}`).messageCount, 1);
 
   // Deleting twice is success, like every other remove/archive on a journey.
   assert.equal((await deleteJourneyMessage(c, journeyId, T, mine.msgId, { identity: "bob@example.com" })).ok, true);
@@ -1093,9 +1093,9 @@ await test("your own message never raises your own badge", async () => {
   const c = makeContainer({ store });
   const bob = "bob@example.com";
   const unreadFor = (who) => {
-    const thread = store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`);
+    const leg = store.items.get(`${journeyPk(journeyId)}|LEG#${T}`);
     const cursor = store.items.get(`${journeyPk(journeyId)}|READ#${who}#${T}`);
-    return threadUnread(thread, cursor).unread;
+    return legUnread(leg, cursor).unread;
   };
 
   await putJourneyMessage(c, journeyId, T, { text: "mine", author: bob });
@@ -1108,15 +1108,15 @@ await test("your own message never raises your own badge", async () => {
 
 await test("posting does not swallow what other people said while you were away", async () => {
   // The reason the author's cursor moves by exactly one rather than being
-  // snapped to the thread's total: a snapshot would mark every message that
+  // snapped to the leg's total: a snapshot would mark every message that
   // arrived since they last looked as read, just because they typed.
   const journeyId = "j-own-2";
   const store = makeStore(channelSeed(journeyId));
   const c = makeContainer({ store });
   const bob = "bob@example.com";
   const unreadForBob = () =>
-    threadUnread(
-      store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`),
+    legUnread(
+      store.items.get(`${journeyPk(journeyId)}|LEG#${T}`),
       store.items.get(`${journeyPk(journeyId)}|READ#${bob}#${T}`)
     ).unread;
 
@@ -1137,7 +1137,7 @@ await test("the assistant's answer does not accrete a cursor row of its own", as
   assert.equal(store.items.get(`${journeyPk(journeyId)}|READ#kelabo#${T}`), undefined);
   // And it *is* unread for a real person, like any other message.
   assert.equal(
-    threadUnread(store.items.get(`${journeyPk(journeyId)}|THREAD#${T}`), null).unread,
+    legUnread(store.items.get(`${journeyPk(journeyId)}|LEG#${T}`), null).unread,
     1
   );
 });

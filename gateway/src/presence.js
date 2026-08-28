@@ -54,7 +54,7 @@ export function createPresence(c) {
       // EventSource API, so a client could never tell a quiet stream from a
       // half-open socket — exactly the lesson `sseHub` records for the caption
       // stream. It did not matter while this carried only presence and rings,
-      // both of which self-correct; it matters now that thread messages ride
+      // both of which self-correct; it matters now that leg messages ride
       // it (docs 20 §19.9) and a silently dead stream means a person simply
       // stops being told anything.
       for (const res of entry.streams) writeRaw(res, `event: ping\ndata: {}\n\n`);
@@ -110,7 +110,7 @@ export function createPresence(c) {
   }
 
   /**
-   * Fan one thread message out to a journey's members (docs 20 §19.9).
+   * Fan one leg message out to a journey's members (docs 20 §19.9).
    *
    * This stream rather than one of its own: it is already open on every page
    * of a signed-in tab, it is authenticated by the session cookie — exactly

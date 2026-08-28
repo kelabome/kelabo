@@ -240,38 +240,38 @@ export const frameJourneyBoardRequestSchema = z.object({
   journeyId: z.string().min(1).optional(),
 });
 
-// The journey's named threads (docs 20 §19). Names and sizes only — reading
-// every thread's messages is a separate, explicit ask, because the whole
-// point of splitting a conversation into threads is that you do not have to
+// The journey's named legs (docs 20 §19). Names and sizes only — reading
+// every leg's messages is a separate, explicit ask, because the whole
+// point of splitting a conversation into legs is that you do not have to
 // carry all of it at once.
-export const frameJourneyThreadsRequestSchema = z.object({
-  type: z.literal("journey_threads_request"),
+export const frameJourneyLegsRequestSchema = z.object({
+  type: z.literal("journey_legs_request"),
   requestId: z.string().min(1),
   kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
 });
 
-// One thread's recent messages. `threadId` is required: an agent asking for
+// One leg's recent messages. `legId` is required: an agent asking for
 // "the messages" without saying which conversation is a question with no
 // answer, and guessing one would be worse than refusing.
-export const frameThreadMessagesRequestSchema = z.object({
-  type: z.literal("thread_messages_request"),
+export const frameLegMessagesRequestSchema = z.object({
+  type: z.literal("leg_messages_request"),
   requestId: z.string().min(1),
   kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
-  threadId: z.string().min(1),
+  legId: z.string().min(1),
   limit: z.number().int().positive().optional(),
 });
 
-// Post into a thread on the agent's own initiative. Not gated by `aiCanPost`,
+// Post into a leg on the agent's own initiative. Not gated by `aiCanPost`,
 // which guards the *board* — a curated surface edited unsupervised — while
 // this is the conversation, where an attached agent is a participant.
-export const frameThreadPostSchema = z.object({
-  type: z.literal("thread_post"),
+export const frameLegPostSchema = z.object({
+  type: z.literal("leg_post"),
   requestId: z.string().min(1),
   kelaboId: z.string().min(1).optional(),
   journeyId: z.string().min(1).optional(),
-  threadId: z.string().min(1),
+  legId: z.string().min(1),
   text: z.string().min(1).max(4000),
 });
 
@@ -325,9 +325,9 @@ export const upFrameSchema = z.discriminatedUnion("type", [
   frameJourneyReportsRequestSchema,
   frameJourneyTimelineRequestSchema,
   frameJourneyBoardRequestSchema,
-  frameJourneyThreadsRequestSchema,
-  frameThreadMessagesRequestSchema,
-  frameThreadPostSchema,
+  frameJourneyLegsRequestSchema,
+  frameLegMessagesRequestSchema,
+  frameLegPostSchema,
   frameJourneyReportSubmitSchema,
   frameJourneyPostSchema,
 ]);
@@ -531,16 +531,16 @@ export const frameJourneyBoardSchema = z.object({
     .default([]),
 });
 
-export const frameJourneyThreadsSchema = z.object({
-  type: z.literal("journey_threads"),
+export const frameJourneyLegsSchema = z.object({
+  type: z.literal("journey_legs"),
   requestId: z.string().min(1),
   kelaboId: z.string().default(""),
   resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found"]),
   journeys: z.array(journeyRef).default([]),
-  threads: z
+  legs: z
     .array(
       z.object({
-        threadId: z.string(),
+        legId: z.string(),
         title: z.string(),
         messageCount: z.number().optional(),
         lastMessageAt: z.number().optional(),
@@ -549,14 +549,14 @@ export const frameJourneyThreadsSchema = z.object({
     .default([]),
 });
 
-export const frameThreadMessagesSchema = z.object({
-  type: z.literal("thread_messages"),
+export const frameLegMessagesSchema = z.object({
+  type: z.literal("leg_messages"),
   requestId: z.string().min(1),
   kelaboId: z.string().default(""),
-  // `thread_not_found` is on this enum and not the others: a journey can be
-  // resolved and the thread inside it still be wrong, which is a different
+  // `leg_not_found` is on this enum and not the others: a journey can be
+  // resolved and the leg inside it still be wrong, which is a different
   // mistake from naming a journey the connection cannot reach.
-  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "thread_not_found"]),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "leg_not_found"]),
   journeys: z.array(journeyRef).default([]),
   title: z.string().default(""),
   messages: z
@@ -572,11 +572,11 @@ export const frameThreadMessagesSchema = z.object({
     .default([]),
 });
 
-export const frameThreadPostedSchema = z.object({
-  type: z.literal("thread_posted"),
+export const frameLegPostedSchema = z.object({
+  type: z.literal("leg_posted"),
   requestId: z.string().min(1),
   kelaboId: z.string().default(""),
-  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "thread_not_found", "journey_completed"]),
+  resolved: z.enum(["ok", "no_journey", "ambiguous", "journey_not_found", "leg_not_found", "journey_completed"]),
   journeys: z.array(journeyRef).default([]),
   msgId: z.string().default(""),
 });
@@ -755,9 +755,9 @@ export const downFrameSchema = z.discriminatedUnion("type", [
   frameJourneyInfoSchema,
   frameJourneyTimelineSchema,
   frameJourneyBoardSchema,
-  frameJourneyThreadsSchema,
-  frameThreadMessagesSchema,
-  frameThreadPostedSchema,
+  frameJourneyLegsSchema,
+  frameLegMessagesSchema,
+  frameLegPostedSchema,
   frameJourneyReportSubmittedSchema,
   frameJourneyPostedSchema,
   frameJourneyBriefingSchema,

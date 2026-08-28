@@ -14,7 +14,7 @@ import { handleCaptionPost, handleCaptionRename, handleCaptionHistory, transcrip
 import { endKelabo, cancelKelabo, rescheduleKelabo } from "./archive.js";
 import { generateMinutes } from "./minutes.js";
 import { generateJourneyReport } from "./journeys.js";
-import { JOURNEY_CHAT_PATH, handleJourneyChat } from "./journeyChat.js";
+import { JOURNEY_LEGS_PATH, handleJourneyLegs } from "./journeyLegs.js";
 import { log, logError } from "./log.js";
 
 export function createGateway(c) {
@@ -53,11 +53,11 @@ async function route(c, req, res) {
   // The journey channel (docs 20 §19) — matched once here and reused below,
   // because it is a pattern rather than a fixed path and CORS must agree with
   // routing about which requests it covers.
-  const journeyChatMatch = JOURNEY_CHAT_PATH.exec(path);
+  const journeyLegsMatch = JOURNEY_LEGS_PATH.exec(path);
   // Same browser-origin rules as the caption channel: the SPA calls all of these
   // from the portal host with credentials. `/presence/stream` is the first
   // non-kelabo-scoped one (docs 18 §5).
-  const corsPaths = captionPaths || path === "/presence/stream" || !!journeyChatMatch || RTC_PATHS.has(path);
+  const corsPaths = captionPaths || path === "/presence/stream" || !!journeyLegsMatch || RTC_PATHS.has(path);
   if (method === "OPTIONS" && corsPaths) {
     setCorsHeaders(c, res, req);
     res.writeHead(204);
@@ -115,8 +115,8 @@ async function route(c, req, res) {
   // `/presence/stream` above and unlike everything kelabo-scoped: a journey
   // has no participant cookie and no guests. Every other journey route is
   // served by rest-api; these are here because they are the per-message path.
-  if (journeyChatMatch) {
-    return handleJourneyChat(c, req, res, journeyChatMatch, url);
+  if (journeyLegsMatch) {
+    return handleJourneyLegs(c, req, res, journeyLegsMatch, url);
   }
 
   if (RTC_PATHS.has(path)) {
@@ -174,7 +174,7 @@ async function route(c, req, res) {
   }
 
   // Journey reports (docs 20 §6) — a bounded synthesis over rows already in
-  // DynamoDB, run inline (no worker thread, no dev-tunnel): the LLM
+  // DynamoDB, run inline (no worker leg, no dev-tunnel): the LLM
   // credential lives here, which is the entire reason this call exists.
   const reportMatch = path.match(/^\/internal\/journeys\/([^/]+)\/report$/);
   if (method === "POST" && reportMatch) {

@@ -330,9 +330,9 @@ and semantics: [20-journey.md](20-journey.md) §4; condensed catalogue:
 | `CONTRIBUTOR#<identity>` | Per-person rollup: `kelaboJoinCount`, `reportRequestCount` — maintained by `ADD` at write time, never derived by scan |
 | `TL#<pad(at,13)>#<rand6>` | Timeline projection row, written in the same call as every mutation — a genuine index, not a derived one |
 | `SETTLED#<kelaboId>` | Idempotency marker for `kelaboJoinCount` settling on kelabo end; no reader of its own |
-| `THREAD#<threadId>` | One named conversation (docs 20 §19): `title`, `createdBy`, `createdAt`, `messageCount`, `lastMessageAt`, `archived`. The default thread's id is the fixed string `general`, not a uuid — that is what makes lazy creation under `attribute_not_exists(SK)` idempotent when two people open a journey at once |
-| `MSG#<threadId>#<msgId>` | One message. `msgId` is `<pad(at,13)>-<rand6>` — the sort suffix *is* the id, so it is also the paging cursor and makes edit/delete a point read. Hyphen, not `#`: it travels in a URL path. Append-only; delete is soft (`deletedAt`, `text` REMOVEd) so `messageCount` never decreases. Also `mentions: [identity]` (resolved server-side at write time) and `pinnedAs` once promoted to the board. ⚠️ A range read must end at `MSG#<threadId>$` — `MSG#general2#…` sorts above `MSG#general#…`, so a looser bound swallows a sibling thread |
-| `READ#<identity>#<threadId>` | Per-person, per-thread read cursor **and** mention counter: `lastReadAt`, `lastReadMsgId`, `messageCountAtRead`, `mentionCount`, `mentionCountAtRead`. Identity before threadId so one query gets all of a person's cursors in a journey. Both badges are an O(1) difference, which is why neither counter decreases. ⚠️ Being mentioned **creates this row without `lastReadAt`**, so any guard on it must also test `attribute_not_exists(lastReadAt)` — DynamoDB reads `lastReadAt < :at` on a missing attribute as false, which would wedge the cursor permanently (docs 20 §19.8) — and `threadId` must be read off the key, not the attribute, for the same reason |
+| `LEG#<legId>` | One named conversation (docs 20 §19): `title`, `createdBy`, `createdAt`, `messageCount`, `lastMessageAt`, `archived`. Trunk, the default leg, has the fixed id `trunk` rather than a uuid — that is what makes lazy creation under `attribute_not_exists(SK)` idempotent when two people open a journey at once |
+| `MSG#<legId>#<msgId>` | One message. `msgId` is `<pad(at,13)>-<rand6>` — the sort suffix *is* the id, so it is also the paging cursor and makes edit/delete a point read. Hyphen, not `#`: it travels in a URL path. Append-only; delete is soft (`deletedAt`, `text` REMOVEd) so `messageCount` never decreases. Also `mentions: [identity]` (resolved server-side at write time) and `pinnedAs` once promoted to the board. ⚠️ A range read must end at `MSG#<legId>$` — `MSG#trunk2#…` sorts above `MSG#trunk#…`, so a looser bound swallows a sibling leg |
+| `READ#<identity>#<legId>` | Per-person, per-leg read cursor **and** mention counter: `lastReadAt`, `lastReadMsgId`, `messageCountAtRead`, `mentionCount`, `mentionCountAtRead`. Identity before legId so one query gets all of a person's cursors in a journey. Both badges are an O(1) difference, which is why neither counter decreases. ⚠️ Being mentioned **creates this row without `lastReadAt`**, so any guard on it must also test `attribute_not_exists(lastReadAt)` — DynamoDB reads `lastReadAt < :at` on a missing attribute as false, which would wedge the cursor permanently (docs 20 §19.8) — and `legId` must be read off the key, not the attribute, for the same reason |
 
 **GSI `tenant-status-index`:** PK `tenantStatus` (`<tenantId>#<status>`, sparse —
 META only), SK `updatedAt` — "journeys in my tenant", public-journey discovery,
@@ -350,8 +350,8 @@ system prompt, settles contributor counts on kelabo end, and owns the whole
 channel surface, `MSG#` and `READ#` (docs 20 §19.4)
 (`infra/lib/gateway-ecs-stack.js`).
 
-META's `messageCount` / `lastMessageAt` are journey-wide totals; the per-thread
-counters that the unread badge is actually computed from live on `THREAD#`.
+META's `messageCount` / `lastMessageAt` are journey-wide totals; the per-leg
+counters that the unread badge is actually computed from live on `LEG#`.
 `updatedAt` is deliberately **not** bumped by a message: it is the journey
 list's sort key, and chat driving it would reorder everyone's list on every
 line typed.

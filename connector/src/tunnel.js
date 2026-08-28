@@ -123,9 +123,9 @@ export function createTunnel({
       case "journey_reports":
       case "journey_timeline":
       case "journey_board":
-      case "journey_threads":
-      case "thread_messages":
-      case "thread_posted":
+      case "journey_legs":
+      case "leg_messages":
+      case "leg_posted":
       case "journey_report_submitted":
       case "journey_posted": {
         // Resolved with the whole frame in every one of these, not a
@@ -265,18 +265,18 @@ export function createTunnel({
   const requestJourneyBoard = (kelaboId, journeyId) =>
     requestJourney("journey_board_request", kelaboId, journeyId ? { journeyId } : {});
 
-  const requestJourneyThreads = (kelaboId, journeyId) =>
-    requestJourney("journey_threads_request", kelaboId, journeyId ? { journeyId } : {});
+  const requestJourneyLegs = (kelaboId, journeyId) =>
+    requestJourney("journey_legs_request", kelaboId, journeyId ? { journeyId } : {});
 
-  const requestThreadMessages = (kelaboId, journeyId, threadId, limit) =>
-    requestJourney("thread_messages_request", kelaboId, {
-      threadId,
+  const requestLegMessages = (kelaboId, journeyId, legId, limit) =>
+    requestJourney("leg_messages_request", kelaboId, {
+      legId,
       ...(journeyId ? { journeyId } : {}),
       ...(limit ? { limit } : {}),
     });
 
-  const postThreadMessage = (kelaboId, journeyId, threadId, text) =>
-    requestJourney("thread_post", kelaboId, { threadId, text, ...(journeyId ? { journeyId } : {}) });
+  const postLegMessage = (kelaboId, journeyId, legId, text) =>
+    requestJourney("leg_post", kelaboId, { legId, text, ...(journeyId ? { journeyId } : {}) });
 
   const requestJourneyContext = (kelaboId, journeyId) =>
     requestJourney("journey_context_request", kelaboId, journeyId ? { journeyId } : {});
@@ -322,9 +322,9 @@ export function createTunnel({
     requestJourneyInfo,
     requestJourneyTimeline,
     requestJourneyBoard,
-    requestJourneyThreads,
-    requestThreadMessages,
-    postThreadMessage,
+    requestJourneyLegs,
+    requestLegMessages,
+    postLegMessage,
     requestJourneyContext,
     requestJourneyKelabos,
     requestJourneyDocuments,

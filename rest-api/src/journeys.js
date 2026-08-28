@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { JOURNEY_VISIBILITIES, journeyUnread, cursorsByThread } from "@kelabo/contracts";
+import { JOURNEY_VISIBILITIES, journeyUnread, cursorsByLeg } from "@kelabo/contracts";
 import { err } from "./errors.js";
 
 /**
@@ -157,12 +157,12 @@ export function createJourneys({ config, db, internal }) {
 
   // --- unread rollup for the list (docs 20 §19.3) ------------------------------
   //
-  // The counters live per thread, and they have to: a journey-level cursor
-  // would be advanced by reading one thread and would then hide every other
-  // thread's unread. So the rollup is a sum, and a sum needs both collections.
+  // The counters live per leg, and they have to: a journey-level cursor
+  // would be advanced by reading one leg and would then hide every other
+  // leg's unread. So the rollup is a sum, and a sum needs both collections.
   //
   // Two small Queries per journey, in parallel, and capped. That is the price
-  // of "read this thread, not that one" being meaningful, and it is paid on a
+  // of "read this leg, not that one" being meaningful, and it is paid on a
   // page somebody opens rather than on every message. Past the cap the
   // journeys still render — without a badge, never with a wrong one.
   const UNREAD_SCAN_CAP = 30;
@@ -175,11 +175,11 @@ export function createJourneys({ config, db, internal }) {
     await Promise.all(
       ranked.map(async (j) => {
         try {
-          const [threads, cursors] = await Promise.all([
-            db.listJourneyThreads(j.journeyId),
+          const [legs, cursors] = await Promise.all([
+            db.listJourneyLegs(j.journeyId),
             db.listJourneyReadCursors(j.journeyId, identity),
           ]);
-          const { unread, mentions } = journeyUnread(threads, cursorsByThread(cursors));
+          const { unread, mentions } = journeyUnread(legs, cursorsByLeg(cursors));
           counted.set(j.journeyId, { unread, mentions });
         } catch {
           // A journey whose rollup failed shows no badge. Showing a wrong one

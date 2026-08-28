@@ -17,8 +17,8 @@ import { Skeleton, SkeletonRows } from '../components/ui/Skeleton'
 import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
-import { JourneyThreads } from '../chat/JourneyThreads'
-import { journeyChat } from '../api'
+import { JourneyLegs } from '../chat/JourneyLegs'
+import { journeyLegs } from '../api'
 import { JourneyHealthChip } from './Journeys'
 import { JourneyHelmExtra } from '../variant'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
@@ -41,11 +41,11 @@ function kelaboHref(kelaboId, status) {
 const TABS = [
   { id: 'overview', label: 'Overview' },
   // Second in the strip but still the tab that opens (docs 20 §19): Overview
-  // is what you read once and threads are what you come back for, so the
+  // is what you read once and legs are what you come back for, so the
   // order reflects the hierarchy while the default reflects the traffic.
   // Its body owns the viewport height, which is why `.page` becomes a flex
   // column for this tab alone.
-  { id: 'chat', label: 'Threads' },
+  { id: 'chat', label: 'Legs' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'kelabos', label: 'Kelabos' },
   // "Questions" is display vocabulary over an unchanged `reports` mechanism
@@ -65,10 +65,10 @@ const TABS = [
 // Waters / Anchored, and the Lead who is at it.
 const HELM_TAB = { id: 'helm', label: 'Helm' }
 
-// The thread list is polled here so the Threads tab can carry a badge while
+// The leg list is polled here so the Legs tab can carry a badge while
 // another tab is open. A backstop only: messages are pushed over the presence
 // stream (docs 20 §19.9), and this exists because that stream has no replay.
-const THREADS_POLL_MS = 60000
+const LEGS_POLL_MS = 60000
 const PUSH_DEBOUNCE_MS = 250
 
 const TIMELINE_TYPES = [
@@ -1204,29 +1204,29 @@ export default function JourneyDetail() {
 
   const { onJourneyMessage } = usePresenceContext()
 
-  // Declared before the thread poll below, which reads `isMember` in its
+  // Declared before the leg poll below, which reads `isMember` in its
   // dependency array — a `const` referenced above its declaration is a
   // temporal-dead-zone throw during render, not an undefined.
   const isOwner = journey?.myRole === 'owner'
   const isMember = !!journey?.myRole
   const isActive = journey?.status === 'active'
 
-  // The thread list lives here rather than in the Threads tab, because the
+  // The leg list lives here rather than in the Legs tab, because the
   // tab needs a badge while you are looking at a *different* one (docs 20
   // §19.3) — a list fetched by that component would only exist once you had
   // already navigated to it, which is exactly too late to tell you to.
   //
   // It also means one poll per journey page instead of one per tab visit.
-  const [threads, setThreads] = useState(null)
-  const reloadThreads = useCallback(
-    () => journeyChat.threads(id).then(d => { setThreads(d.threads || []); return d.threads || [] }),
+  const [legs, setLegs] = useState(null)
+  const reloadLegs = useCallback(
+    () => journeyLegs.list(id).then(d => { setLegs(d.legs || []); return d.legs || [] }),
     [id]
   )
   useEffect(() => {
     if (!isMember) return undefined
-    const load = () => { if (!document.hidden) reloadThreads().catch(() => {}) }
+    const load = () => { if (!document.hidden) reloadLegs().catch(() => {}) }
     load()
-    const t = setInterval(load, THREADS_POLL_MS)
+    const t = setInterval(load, LEGS_POLL_MS)
     document.addEventListener('visibilitychange', load)
     // Pushed (docs 20 §19.9), and coalesced so a burst of messages costs one
     // refresh. Filtered to this journey: the stream carries every journey the
@@ -1243,14 +1243,14 @@ export default function JourneyDetail() {
       off()
       document.removeEventListener('visibilitychange', load)
     }
-  }, [reloadThreads, isMember, id, onJourneyMessage]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reloadLegs, isMember, id, onJourneyMessage]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const threadUnread = useMemo(
-    () => (threads || []).reduce(
+  const legUnread = useMemo(
+    () => (legs || []).reduce(
       (acc, t) => ({ unread: acc.unread + (t.unread || 0), mentions: acc.mentions + (t.mentions || 0) }),
       { unread: 0, mentions: 0 }
     ),
-    [threads]
+    [legs]
   )
 
   useEffect(() => {
@@ -1342,7 +1342,7 @@ export default function JourneyDetail() {
           <Tabs
             tabs={(isOwner ? [...TABS, HELM_TAB] : TABS).map(t =>
               t.id === 'chat'
-                ? { ...t, badge: threadUnread.mentions || threadUnread.unread, mention: threadUnread.mentions > 0 }
+                ? { ...t, badge: legUnread.mentions || legUnread.unread, mention: legUnread.mentions > 0 }
                 : t
             )}
             active={tab}
@@ -1350,12 +1350,12 @@ export default function JourneyDetail() {
           />
 
           {tab === 'chat' && (
-            <JourneyThreads
+            <JourneyLegs
               journeyId={id}
               isMember={isMember}
               isActive={isActive}
-              threads={threads}
-              reloadThreads={reloadThreads}
+              legs={legs}
+              reloadLegs={reloadLegs}
             />
           )}
           {tab === 'overview' && <OverviewTab journey={journey} isOwner={isOwner} isMember={isMember} reload={reload} />}

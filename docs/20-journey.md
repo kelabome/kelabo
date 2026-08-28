@@ -357,7 +357,7 @@ the Gateway at all, it marks the row `failed: gateway_unreachable` itself
 ### 6.2 Context assembly and size discipline
 
 The existing pipeline enforces **no size limit** on what it feeds an LLM
-today — the main-agent thread and the minutes prompt both grow unbounded
+today — the main-agent leg and the minutes prompt both grow unbounded
 (`runner.js:121-127`'s own comment: "no limit... the entire history, not
 just a rolling window"). A journey report must not repeat that; it brings
 its own explicit budget in `gateway/src/journeys.js`'s `buildContext()`,
@@ -1177,23 +1177,33 @@ MCP tool surface — is now built; see §10, §12.1's own note, and §12.2.
    briefing. §12.4 remains deliberately unbuilt.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.
-7. ✅ **Threads** — §19. `THREAD#`/`MSG#`/`READ#` rows, thread CRUD, the
-   Gateway's HTTP surface, the shared `src/chat/` components and the Threads
+7. ✅ **Legs** — §19. `LEG#`/`MSG#`/`READ#` rows, leg CRUD, the
+   Gateway's HTTP surface, the shared `src/chat/` components and the Legs
    tab (§19.2–§19.6); pin-to-board (§19.7); `@person` mentions with their own
    counter (§19.8); realtime fan-out over the presence stream, with the named
    keepalive and client watchdog it required (§19.9); the `@kelabo` assistant
    and its three MCP tools (§19.10); unread badges at every level from the
-   rail down to the thread; and `GET /journeys/search` with its tab in the
+   rail down to the leg; and `GET /journeys/search` with its tab in the
    search dialog (§11). What remains is in §19.11.
 
 ---
 
-## 19. Threads — persistent conversation on a journey
+## 19. Legs — persistent conversation on a journey
 
-> **"Thread" here means a named top-level conversation**, the way "channel"
-> does elsewhere — not a reply-chain hanging off one message. `msgId` remains
-> the only grouping key *inside* a thread, and nothing re-derives structure
-> from adjacency, author or time.
+> **A leg is a named conversation inside a journey** — one stretch of the way,
+> the way a journey is made of legs. It is what "channel" means elsewhere, and
+> it is deliberately *not* a reply-chain hanging off one message: `msgId`
+> remains the only grouping key *inside* a leg, and nothing re-derives
+> structure from adjacency, author or time.
+>
+> Every journey has a **Trunk** — the leg a message lands in when nobody chose
+> one, and the main line the rest branch off. Its id is the fixed string
+> `trunk` (§19.2); its title is editable like any other leg's.
+>
+> The vocabulary is the journey metaphor's own, alongside the Helm and Full
+> Steam / Shoal Waters / Anchored (§13). It replaced "thread"/"General", which
+> said nothing about a journey and collided with `worker_thread` and the
+> orchestrator's own `thread` everywhere in the Gateway.
 
 ### 19.1 What it is, and why it is here rather than on a kelabo
 
@@ -1210,7 +1220,7 @@ that are structural rather than aesthetic:
   the age of the room; total cost is quadratic.
 - The worker keeps the full transcript in memory and never trims it
   (`gateway/src/agent/worker.js`), alongside a second unbounded
-  `MainAgent.thread`. Both are freed only by `endKelabo`.
+  `MainAgent.leg`. Both are freed only by `endKelabo`.
 - `ttl` is written **exclusively** by `endKelabo`
   (`gateway/src/archive.js`). A kelabo that never ends never gets one.
 
@@ -1222,11 +1232,11 @@ the journey, and none of the above applies: nothing is retained in Gateway
 memory between messages, and the journeys table deliberately has no TTL
 (§14).
 
-**A thread is not the board.** §7's board is a small, curated set of pinned
-messages, read in full, mutable, versioned. A thread is the opposite shape —
+**A leg is not the board.** §7's board is a small, curated set of pinned
+messages, read in full, mutable, versioned. A leg is the opposite shape —
 many messages, paged, read from the end, never read in full. They are
 different objects that happen to both contain text, and merging them would
-make the board unusable at conversation volume. In thread vocabulary the board
+make the board unusable at conversation volume. In leg vocabulary the board
 is "pinned messages", and §19.7 promotes one into the other.
 
 **It is not the kelabo transcript either.** A kelabo's `source: "typed"`
@@ -1235,23 +1245,47 @@ meeting's record. This belongs to the journey and has no meeting.
 
 ### 19.2 Items
 
-Both live in the journey's own partition, so `deleteJourneyChildren` (§14)
+All three live in the journey's own partition, so `deleteJourneyChildren` (§14)
 reclaims them with everything else.
 
 | SK | Fields |
 |---|---|
-| `MSG#<msgId>` | `msgId, at, author, text, kind, editedAt?, deletedAt?, deletedBy?` |
-| `READ#<identity>` | `lastReadAt, lastReadMsgId, messageCountAtRead, updatedAt` |
+| `LEG#<legId>` | `title, createdBy, createdAt, messageCount, lastMessageAt, archived` |
+| `MSG#<legId>#<msgId>` | `msgId, legId, at, author, text, kind, mentions?, editedAt?, deletedAt?, deletedBy?, pinnedAs?` |
+| `READ#<identity>#<legId>` | `lastReadAt, lastReadMsgId, messageCountAtRead, mentionCount, mentionCountAtRead` |
 
-META gains `messageCount` and `lastMessageAt`. It deliberately does **not**
-bump `updatedAt`: that is the journey list's sort key, and letting chat drive
-it would reorder everybody's journey list every time anyone typed.
+**Trunk's id is the fixed string `trunk`, not a uuid.** That is what makes
+creating it lazily safe: the first person to open a journey creates it and so
+does the second, but both write the same key under
+`attribute_not_exists(SK)`, so one wins and the other is a harmless no-op.
+With a uuid, two people opening a journey at the same moment would each get
+their own Trunk and neither would understand why.
+
+**Cursor keys put identity before legId**, so `begins_with(SK,
+"READ#<identity>#")` fetches all of one person's positions in a journey in a
+single query — which is what the list's rollup needs. The trailing `#` is
+load-bearing: without it `alice@example.com` prefix-matches
+`alice@example.commercial`.
+
+`legId` is read off the **key**, never trusted from the attribute. The key is
+what says which leg a cursor belongs to, and being mentioned creates a row
+that carries a count before it carries anything else; trusting the attribute
+drops those rows from the rollup and reads them as unread forever.
+
+META keeps `messageCount` and `lastMessageAt` as journey-wide totals. It
+deliberately does **not** bump `updatedAt`: that is the journey list's sort
+key, and letting conversation drive it would reorder everybody's journey list
+every time anyone typed.
 
 **`msgId` is the sort suffix itself** — `<pad(at,13)>-<rand6>`. One value is
-the identity, the ordering key and the paging cursor, and `SK = MSG#<msgId>`
-makes edit and delete a point read rather than a scan for a uuid. The
-separator is a hyphen, not the `#` every other sort key here uses, because
-this id travels in a URL path where `#` starts a fragment.
+the identity, the ordering key and the paging cursor, and `SK =
+MSG#<legId>#<msgId>` makes edit and delete a point read rather than a scan for
+a uuid. The separator is a hyphen, not the `#` every other sort key here uses,
+because this id travels in a URL path where `#` starts a fragment.
+
+**A range read must end at `MSG#<legId>$`**, one byte above `#`: `MSG#trunk2#…`
+sorts above `MSG#trunk#…`, so a looser upper bound swallows a sibling leg's
+entire conversation.
 
 `at` comes from a **monotonic clock**, not `Date.now()`
 (`monotonicNow` in `gateway/src/journeys.js`). Two messages sent in the same
@@ -1267,17 +1301,17 @@ names itself. A name stored on the row would be a snapshot nobody updates.
 
 ### 19.3 Unread
 
-`unread = thread.messageCount − cursor.messageCountAtRead`, per thread. O(1),
+`unread = leg.messageCount − cursor.messageCountAtRead`, per leg. O(1),
 no scan, which is the whole reason for the two counters.
 
 **A journey-level counter cannot be stored instead of the sum.** Reading one
-thread would advance it to the journey's total and hide every other thread's
+leg would advance it to the journey's total and hide every other leg's
 unread — the badge would clear itself by looking at the wrong conversation.
-So the journey list sums per-thread cursors, which is two small Queries per
-journey (`THREAD#` rows and `READ#<identity>#` rows), in parallel and capped at
+So the journey list sums per-leg cursors, which is two small Queries per
+journey (`LEG#` rows and `READ#<identity>#` rows), in parallel and capped at
 `UNREAD_SCAN_CAP`. Past the cap journeys still render, without a badge — never
 with a wrong one. The arithmetic itself is `contracts/src/journeyUnread.js`,
-shared so the Gateway's per-thread answer and rest-api's rollup cannot
+shared so the Gateway's per-leg answer and rest-api's rollup cannot
 disagree.
 
 It only works because **`messageCount` never goes down**: an edit does not
@@ -1288,7 +1322,7 @@ differenced against a cursor written before the decrease.
 own `messageCountAtRead` by one, cancelling the message out of their count.
 Without it the sender's badge ticks up the instant they hit send —
 `messageCount` grew and their cursor did not — and clears only if they happen
-to be looking at that thread when the mark-read debounce fires; from anywhere
+to be looking at that leg when the mark-read debounce fires; from anywhere
 else in the app it sits there pointing at something they wrote themselves.
 
 It is an increment, not a snapshot of the new total. Snapping the cursor to
@@ -1321,15 +1355,15 @@ already are.
 
 | Method | Path (Gateway) |
 |---|---|
-| GET | `/journeys/:id/threads` — with each reader's own unread; creates the default thread if there is none |
-| POST | `/journeys/:id/threads` |
-| PATCH | `/journeys/:id/threads/:tid` |
-| GET | `/journeys/:id/threads/:tid/messages?before=\|since=&limit=` |
-| POST | `/journeys/:id/threads/:tid/messages` |
-| PATCH | `/journeys/:id/threads/:tid/messages/:msgId` |
-| DELETE | `/journeys/:id/threads/:tid/messages/:msgId` |
-| POST | `/journeys/:id/threads/:tid/messages/:msgId/pin` |
-| POST | `/journeys/:id/threads/:tid/read` |
+| GET | `/journeys/:id/legs` — with each reader's own unread; creates the default leg if there is none |
+| POST | `/journeys/:id/legs` |
+| PATCH | `/journeys/:id/legs/:tid` |
+| GET | `/journeys/:id/legs/:tid/messages?before=\|since=&limit=` |
+| POST | `/journeys/:id/legs/:tid/messages` |
+| PATCH | `/journeys/:id/legs/:tid/messages/:msgId` |
+| DELETE | `/journeys/:id/legs/:tid/messages/:msgId` |
+| POST | `/journeys/:id/legs/:tid/messages/:msgId/pin` |
+| POST | `/journeys/:id/legs/:tid/read` |
 
 Authenticated by the browser **SESSION cookie**, like `/presence/stream` and
 unlike everything kelabo-scoped. A journey has no participant cookie, no join
@@ -1349,12 +1383,6 @@ by watching which error comes back. Same rule `onJourneyAttach` applies.
 Posting to one is `409 journey_completed`; reading and advancing the read
 cursor both still work. Refusing the cursor would leave a badge nobody could
 ever clear.
-
-**A message range must end at `MSG#<threadId>$`**, one byte above `#`. Threads
-made this sharper than it was: `MSG#general2#…` sorts above `MSG#general#…`, so
-a looser upper bound swallows a sibling thread's entire conversation into this
-one — not just the neighbouring-prefix rows the timeline's own cursor once
-walked into.
 
 ### 19.5 Edit and soft delete
 
@@ -1382,7 +1410,7 @@ and the client upserts by `msgId`. Three events for one row is how a client
 ends up with two copies of a message it already had.
 
 The reducer is `spa/src/chat/messageStore.js` — pure, node-tested
-(`spa/test/journeyChat.mjs`), for the same reason the transcript modules are.
+(`spa/test/journeyLegs.mjs`), for the same reason the transcript modules are.
 It sorts by `msgId` rather than `at` (a total order versus a partial one) and
 refuses a delivery staler than the copy it holds, so a page fetched before an
 edit and arriving after it cannot silently revert the message.
@@ -1477,7 +1505,7 @@ the matching rule that could disagree with the badge it sits beside.
 
 ### 19.9 Realtime
 
-A thread message is pushed over the **presence stream**, not a stream of its
+A leg message is pushed over the **presence stream**, not a stream of its
 own. It is already open on every page of a signed-in tab, it is authenticated
 by the session cookie — exactly the credential a journey uses — and it already
 carries a non-presence payload in the ring. A dedicated journey stream would
@@ -1493,7 +1521,7 @@ offline member is simply not pushed to; their badge is correct the moment they
 load a page.
 
 **The whole message travels**, not a nudge to go and look, so a client already
-reading that thread renders it immediately — the difference between a chat and
+reading that leg renders it immediately — the difference between a chat and
 a page that refreshes. Everyone else uses the event only as a signal to
 refresh, and the counts stay server-computed: the event is never the source of
 a badge number, only of the decision to go and ask for one. Refreshes are
@@ -1502,8 +1530,8 @@ debounced so a burst of messages costs one round trip.
 **The author is included** rather than skipped. Their other tabs need it, and
 the tab that posted merges it by `msgId` into the copy it already applied.
 
-**Every surface still polls, slowly, as a backstop** (45–60s: the thread's own
-messages, the journey's thread list, and the rail's journey list). This stream has
+**Every surface still polls, slowly, as a backstop** (45–60s: the leg's own
+messages, the journey's leg list, and the rail's journey list). This stream has
 no replay by design (docs 18 §5.4), so an event missed across a reconnect
 would otherwise be a badge that never appears. Push is what makes it fast;
 polling is what makes it eventually right.
@@ -1519,7 +1547,7 @@ polling is what makes it eventually right.
 
 ### 19.10 The assistant, on `@kelabo` only
 
-Typing `@kelabo …` in a thread gets an answer, posted into that same thread as
+Typing `@kelabo …` in a leg gets an answer, posted into that same leg as
 a message of `kind: "assistant"`.
 
 **No trigger gate.** `addressesAssistant` is already the strict, typed-only
@@ -1534,8 +1562,8 @@ a long-lived kelabo expensive apply.
 
 What the model is given: the journey (`buildContext` — description, pinned
 board, documents, linked kelabo minutes, prior **public** reports), **every
-thread's name and size**, and **the current thread's recent messages**. Names
-only for the other threads: reading them all on every mention would put the
+leg's name and size**, and **the current leg's recent messages**. Names
+only for the other legs: reading them all on every mention would put the
 journey's entire conversation into every prompt, which is the cost model this
 design rejects. The private-report rule is inherited from `buildContext` and
 matters more here than for a report — this answer is posted where everyone
@@ -1562,28 +1590,28 @@ The author on an assistant message is `kelabo`, not an email. It can therefore
 never equal a session identity, so `editJourneyMessage` refuses every editor,
 and `journeyPeople` never offers it as a mentionable person.
 
-**For a dev agent** there are three MCP tools — `kelabo_journey_threads`,
-`kelabo_thread_messages`, `kelabo_thread_post` — all *agent-initiated*.
-`thread_post` is **not** gated by `aiCanPost`: that flag guards the board, a
-curated surface edited unsupervised, while a thread is the conversation, where
-an attached agent is a participant. Thread messages arrive inside a
-`<kelabo-thread untrusted="true">` envelope, like every other multi-contributor
+**For a dev agent** there are three MCP tools — `kelabo_journey_legs`,
+`kelabo_leg_messages`, `kelabo_leg_post` — all *agent-initiated*.
+`leg_post` is **not** gated by `aiCanPost`: that flag guards the board, a
+curated surface edited unsupervised, while a leg is the conversation, where
+an attached agent is a participant. Leg messages arrive inside a
+`<kelabo-leg untrusted="true">` envelope, like every other multi-contributor
 surface.
 
 ### 19.11 Not built yet
 
 - **Telling an agent it was mentioned.** The three MCP tools are all
-  agent-initiated (§19.10). A *push* — "somebody named you in thread X" —
+  agent-initiated (§19.10). A *push* — "somebody named you in leg X" —
   needs `state.journeyTunnels`, the journey-keyed reverse index whose absence
   `tunnel.js` documents as deliberate, plus a down-frame and an unwind in
   `ws.on("close")`. The server-side path is what makes `@kelabo` answer for
   someone with no agent attached, and it is built.
 - **A notification outside the tab.** Unread now reaches the rail, the journey
-  row, the tab and the thread (§19.3), but only while the app is open. A
+  row, the tab and the leg (§19.3), but only while the app is open. A
   browser notification for a mention would reuse `notify.js`, which is already
   gated on `document.hidden`.
 
 **Reply-chains** are deliberately absent, and are a different thing from the
-named threads this section describes. `msgId` is the only grouping key inside
-a thread, and adding a parent would break that invariant for a feature nobody
+named legs this section describes. `msgId` is the only grouping key inside
+a leg, and adding a parent would break that invariant for a feature nobody
 has asked for.

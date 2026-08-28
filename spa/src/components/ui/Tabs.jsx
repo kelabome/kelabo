@@ -21,8 +21,8 @@ export function Tabs({ tabs, active, onChange }) {
           {t.label}
           {t.badge > 0 && (
             <span
-              className={'thread-badge' + (t.mention ? ' thread-badge-mention' : '')}
-              // The label alone reads as "Threads 3" to a screen reader, which
+              className={'leg-badge' + (t.mention ? ' leg-badge-mention' : '')}
+              // The label alone reads as "Legs 3" to a screen reader, which
               // is not what the number means.
               aria-label={`${t.badge} unread`}
             >

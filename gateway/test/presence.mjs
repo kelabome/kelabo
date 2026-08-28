@@ -246,7 +246,7 @@ async function main() {
   // The keepalive is a NAMED event, not the SSE comment it used to be.
   // A comment keeps the TCP connection warm but is invisible to EventSource,
   // so the client cannot tell a quiet stream from a half-open socket — and
-  // with thread messages riding this stream (docs 20 §19.9), a dead socket
+  // with leg messages riding this stream (docs 20 §19.9), a dead socket
   // means a person silently stops being told anything. The client's watchdog
   // is built on seeing this event, so its name is part of the contract.
   {

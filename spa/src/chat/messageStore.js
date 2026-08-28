@@ -1,5 +1,5 @@
 /**
- * The journey channel's reducer (docs 20 §19) — pure, so `spa/test/journeyChat.mjs`
+ * The journey channel's reducer (docs 20 §19) — pure, so `spa/test/journeyLegs.mjs`
  * can run it under plain node.
  *
  * It exists for the same reason `transcript/composer.js` and

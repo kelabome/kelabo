@@ -1,4 +1,4 @@
-// The journey threads' HTTP surface (docs 20 §19) — list and create threads,
+// The journey legs' HTTP surface (docs 20 §19) — list and create legs,
 // post, page, edit, delete, pin, and advance a read cursor.
 //
 // Why these live on the Gateway and not in rest-api, which owns every other
@@ -14,11 +14,11 @@
 // shares.
 import {
   addressesAssistant,
-  cursorsByThread,
+  cursorsByLeg,
   journeyMessageBodySchema,
-  journeyThreadBodySchema,
+  journeyLegBodySchema,
   journeyReadBodySchema,
-  threadUnread,
+  legUnread,
   COOKIE_SESSION,
 } from "@kelabo/contracts";
 import { parseCookies, verifySessionCookie } from "./cookies.js";
@@ -26,11 +26,11 @@ import { readJson, send } from "./caption.js";
 import {
   getJourneyMeta,
   resolveJourneyAccess,
-  listJourneyThreads,
-  createJourneyThread,
-  ensureDefaultThread,
-  getJourneyThread,
-  renameJourneyThread,
+  listJourneyLegs,
+  createJourneyLeg,
+  ensureDefaultLeg,
+  getJourneyLeg,
+  renameJourneyLeg,
   putJourneyMessage,
   queryJourneyMessages,
   editJourneyMessage,
@@ -45,15 +45,15 @@ import {
 } from "./journeys.js";
 
 /**
- * `/journeys/<id>/threads[/<threadId>[/messages[/<msgId>[/pin]]|/read]]`.
+ * `/journeys/<id>/legs[/<legId>[/messages[/<msgId>[/pin]]|/read]]`.
  *
  * Matched as one pattern because CORS and routing must agree about which
  * requests are covered, and a second regex is a second thing to keep in step.
  * Ids are path segments, which is why a message id uses a hyphen rather than
  * the `#` every other sort key in the partition uses.
  */
-export const JOURNEY_CHAT_PATH =
-  /^\/journeys\/([^/]+)\/threads(?:\/([^/]+))?(?:\/(messages|read))?(?:\/([^/]+))?(\/pin)?$/;
+export const JOURNEY_LEGS_PATH =
+  /^\/journeys\/([^/]+)\/legs(?:\/([^/]+))?(?:\/(messages|read))?(?:\/([^/]+))?(\/pin)?$/;
 
 /**
  * Resolve the caller and their access in one step, or write the response and
@@ -89,7 +89,7 @@ async function authorize(c, req, res, journeyId, { needWrite }) {
   // A completed journey is frozen for writes and open for reads — the same
   // `requireActive` rule rest-api applies to every other journey write. This
   // is the whole of "the context stays available as long as it has not
-  // ended": completing a journey closes its threads, and reopening it opens
+  // ended": completing a journey closes its legs, and reopening it opens
   // them back up, with nothing archived or moved in between.
   if (needWrite && meta.status === "completed") {
     send(res, 409, { error: "journey_completed" });
@@ -99,66 +99,66 @@ async function authorize(c, req, res, journeyId, { needWrite }) {
   return { session, meta, role };
 }
 
-export async function handleJourneyChat(c, req, res, match, url) {
-  const [, journeyId, threadId, kind, msgId, pin] = match;
+export async function handleJourneyLegs(c, req, res, match, url) {
+  const [, journeyId, legId, kind, msgId, pin] = match;
   const method = req.method;
 
-  if (!threadId) {
-    if (method === "GET") return getThreads(c, req, res, journeyId);
-    if (method === "POST") return postThread(c, req, res, journeyId);
+  if (!legId) {
+    if (method === "GET") return getLegs(c, req, res, journeyId);
+    if (method === "POST") return postLeg(c, req, res, journeyId);
     return send(res, 404, { error: "not_found" });
   }
   if (!kind) {
-    if (method === "PATCH") return patchThread(c, req, res, journeyId, threadId);
+    if (method === "PATCH") return patchLeg(c, req, res, journeyId, legId);
     return send(res, 404, { error: "not_found" });
   }
   // `/read` takes no sub-path. Without the guard `POST …/read/pin` would fall
   // through and quietly act as a mark-read.
   if (kind === "read") {
     if (method !== "POST" || msgId || pin) return send(res, 404, { error: "not_found" });
-    return postRead(c, req, res, journeyId, threadId);
+    return postRead(c, req, res, journeyId, legId);
   }
-  if (method === "POST" && msgId && pin) return pinMessage(c, req, res, journeyId, threadId, msgId);
+  if (method === "POST" && msgId && pin) return pinMessage(c, req, res, journeyId, legId, msgId);
   if (pin) return send(res, 404, { error: "not_found" });
-  if (method === "GET" && !msgId) return getMessages(c, req, res, journeyId, threadId, url);
-  if (method === "POST" && !msgId) return postMessage(c, req, res, journeyId, threadId);
-  if (method === "PATCH" && msgId) return patchMessage(c, req, res, journeyId, threadId, msgId);
-  if (method === "DELETE" && msgId) return deleteMessage(c, req, res, journeyId, threadId, msgId);
+  if (method === "GET" && !msgId) return getMessages(c, req, res, journeyId, legId, url);
+  if (method === "POST" && !msgId) return postMessage(c, req, res, journeyId, legId);
+  if (method === "PATCH" && msgId) return patchMessage(c, req, res, journeyId, legId, msgId);
+  if (method === "DELETE" && msgId) return deleteMessage(c, req, res, journeyId, legId, msgId);
   return send(res, 404, { error: "not_found" });
 }
 
-// --- threads ----------------------------------------------------------------
+// --- legs ----------------------------------------------------------------
 
 /**
- * The journey's threads, each with this reader's own unread count.
+ * The journey's legs, each with this reader's own unread count.
  *
- * The default thread is created here if it is missing, which is what makes a
- * journey that predates threads — or one nobody has spoken in — open to a
+ * The default leg is created here if it is missing, which is what makes a
+ * journey that predates legs — or one nobody has spoken in — open to a
  * usable list rather than an empty one. Skipped on a completed journey, where
  * writes are refused anyway and creating one would be the only write that
  * slipped through.
  */
-async function getThreads(c, req, res, journeyId) {
+async function getLegs(c, req, res, journeyId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: false });
   if (!auth) return undefined;
 
   try {
-    let threads = await listJourneyThreads(c, journeyId);
-    if (!threads.length && auth.meta.status !== "completed") {
-      await ensureDefaultThread(c, journeyId, auth.session.identity);
-      threads = await listJourneyThreads(c, journeyId);
+    let legs = await listJourneyLegs(c, journeyId);
+    if (!legs.length && auth.meta.status !== "completed") {
+      await ensureDefaultLeg(c, journeyId, auth.session.identity);
+      legs = await listJourneyLegs(c, journeyId);
     }
-    const cursors = cursorsByThread(await listJourneyReadCursors(c, journeyId, auth.session.identity));
+    const cursors = cursorsByLeg(await listJourneyReadCursors(c, journeyId, auth.session.identity));
     return send(res, 200, {
-      threads: threads.map((t) => ({ ...t, ...threadUnread(t, cursors[t.threadId]) })),
+      legs: legs.map((t) => ({ ...t, ...legUnread(t, cursors[t.legId]) })),
     });
   } catch (err) {
-    c.logError("journey_threads_read_failed", err, { journeyId });
+    c.logError("journey_legs_read_failed", err, { journeyId });
     return send(res, 500, { error: "internal_error" });
   }
 }
 
-async function postThread(c, req, res, journeyId) {
+async function postLeg(c, req, res, journeyId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: true });
   if (!auth) return undefined;
 
@@ -168,23 +168,23 @@ async function postThread(c, req, res, journeyId) {
   } catch {
     return send(res, 400, { error: "bad_request" });
   }
-  const parsed = journeyThreadBodySchema.safeParse(body);
+  const parsed = journeyLegBodySchema.safeParse(body);
   if (!parsed.success) return send(res, 400, { error: "bad_request", detail: parsed.error.issues });
 
   try {
-    const { thread } = await createJourneyThread(c, journeyId, {
+    const { leg } = await createJourneyLeg(c, journeyId, {
       title: parsed.data.title.trim(),
       identity: auth.session.identity,
     });
-    c.log("journey_thread_created", { journeyId, threadId: thread.threadId, by: auth.session.identity });
-    return send(res, 201, { thread: { ...thread, unread: 0, mentions: 0 } });
+    c.log("journey_leg_created", { journeyId, legId: leg.legId, by: auth.session.identity });
+    return send(res, 201, { leg: { ...leg, unread: 0, mentions: 0 } });
   } catch (err) {
-    c.logError("journey_thread_create_failed", err, { journeyId });
+    c.logError("journey_leg_create_failed", err, { journeyId });
     return send(res, 500, { error: "internal_error" });
   }
 }
 
-async function patchThread(c, req, res, journeyId, threadId) {
+async function patchLeg(c, req, res, journeyId, legId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: true });
   if (!auth) return undefined;
 
@@ -194,15 +194,15 @@ async function patchThread(c, req, res, journeyId, threadId) {
   } catch {
     return send(res, 400, { error: "bad_request" });
   }
-  const parsed = journeyThreadBodySchema.safeParse(body);
+  const parsed = journeyLegBodySchema.safeParse(body);
   if (!parsed.success) return send(res, 400, { error: "bad_request", detail: parsed.error.issues });
 
   try {
-    const result = await renameJourneyThread(c, journeyId, threadId, { title: parsed.data.title.trim() });
+    const result = await renameJourneyLeg(c, journeyId, legId, { title: parsed.data.title.trim() });
     if (!result.ok) return send(res, 404, { error: result.reason });
     return send(res, 200, { ok: true });
   } catch (err) {
-    c.logError("journey_thread_rename_failed", err, { journeyId, threadId });
+    c.logError("journey_leg_rename_failed", err, { journeyId, legId });
     return send(res, 500, { error: "internal_error" });
   }
 }
@@ -210,13 +210,13 @@ async function patchThread(c, req, res, journeyId, threadId) {
 // --- messages ---------------------------------------------------------------
 
 /**
- * One page of a thread, plus this identity's own read position.
+ * One page of a leg, plus this identity's own read position.
  *
  * The cursor rides the same response as the messages deliberately: a client
  * that had to make a second call to find out where it had got to would render
- * the whole thread as unread for one frame on every open.
+ * the whole leg as unread for one frame on every open.
  */
-async function getMessages(c, req, res, journeyId, threadId, url) {
+async function getMessages(c, req, res, journeyId, legId, url) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: false });
   if (!auth) return undefined;
 
@@ -227,39 +227,39 @@ async function getMessages(c, req, res, journeyId, threadId, url) {
 
   let page;
   let cursor;
-  let thread;
+  let leg;
   try {
-    [page, cursor, thread] = await Promise.all([
-      queryJourneyMessages(c, journeyId, threadId, { before, since, limit }),
-      getJourneyReadCursor(c, journeyId, auth.session.identity, threadId),
-      getJourneyThread(c, journeyId, threadId),
+    [page, cursor, leg] = await Promise.all([
+      queryJourneyMessages(c, journeyId, legId, { before, since, limit }),
+      getJourneyReadCursor(c, journeyId, auth.session.identity, legId),
+      getJourneyLeg(c, journeyId, legId),
     ]);
   } catch (err) {
-    c.logError("journey_messages_read_failed", err, { journeyId, threadId });
+    c.logError("journey_messages_read_failed", err, { journeyId, legId });
     return send(res, 500, { error: "internal_error" });
   }
-  if (!thread) return send(res, 404, { error: "thread_not_found" });
+  if (!leg) return send(res, 404, { error: "leg_not_found" });
 
   const me = auth.session.identity;
-  const counts = threadUnread(thread, cursor);
+  const counts = legUnread(leg, cursor);
   return send(res, 200, {
     ...page,
-    threadId,
-    title: thread.title || "",
+    legId,
+    title: leg.title || "",
     // `mentionsMe` is stamped here rather than left to the client to work out
     // from `mentions`: the server already resolved the handles against the
     // roster, and a client re-deriving it would be a second implementation of
     // the matching rule that could disagree with the badge count below.
     messages: page.messages.map((m) => (m.mentions?.includes(me) ? { ...m, mentionsMe: true } : m)),
-    messageCount: thread.messageCount || 0,
-    lastMessageAt: thread.lastMessageAt || 0,
+    messageCount: leg.messageCount || 0,
+    lastMessageAt: leg.lastMessageAt || 0,
     lastReadAt: cursor?.lastReadAt || 0,
     unreadCount: counts.unread,
     unreadMentions: counts.mentions,
   });
 }
 
-async function postMessage(c, req, res, journeyId, threadId) {
+async function postMessage(c, req, res, journeyId, legId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: true });
   if (!auth) return undefined;
 
@@ -272,34 +272,34 @@ async function postMessage(c, req, res, journeyId, threadId) {
   const parsed = journeyMessageBodySchema.safeParse(body);
   if (!parsed.success) return send(res, 400, { error: "bad_request", detail: parsed.error.issues });
 
-  const thread = await getJourneyThread(c, journeyId, threadId).catch(() => null);
-  if (!thread) return send(res, 404, { error: "thread_not_found" });
+  const leg = await getJourneyLeg(c, journeyId, legId).catch(() => null);
+  if (!leg) return send(res, 404, { error: "leg_not_found" });
 
   let message;
   try {
     // Resolved server-side against the journey's own people (§19.8), never
     // taken from the client: the mention list is what raises somebody else's
     // badge, so a client that supplied it could notify anyone it liked.
-    const mentions = await resolveJourneyMentions(c, journeyId, threadId, auth.meta, parsed.data.text).catch(
+    const mentions = await resolveJourneyMentions(c, journeyId, legId, auth.meta, parsed.data.text).catch(
       (err) => {
         // A mention is an enhancement to a message, not a precondition for it.
-        c.logError("journey_mention_resolve_failed", err, { journeyId, threadId });
+        c.logError("journey_mention_resolve_failed", err, { journeyId, legId });
         return [];
       }
     );
-    message = await putJourneyMessage(c, journeyId, threadId, {
+    message = await putJourneyMessage(c, journeyId, legId, {
       text: parsed.data.text,
       author: auth.session.identity,
       mentions,
     });
   } catch (err) {
-    c.logError("journey_message_write_failed", err, { journeyId, threadId });
+    c.logError("journey_message_write_failed", err, { journeyId, legId });
     return send(res, 500, { error: "internal_error" });
   }
 
   c.log("journey_message_posted", {
     journeyId,
-    threadId,
+    legId,
     msgId: message.msgId,
     author: message.author,
     mentions: message.mentions?.length || 0,
@@ -314,16 +314,16 @@ async function postMessage(c, req, res, journeyId, threadId) {
   // obvious way for it to do so — and dispatching on that is an unbounded
   // loop that bills the deployment for every turn of it.
   if (message.kind === "message" && addressesAssistant(parsed.data.text)) {
-    answerJourneyMention(c, journeyId, threadId, auth.meta, {
+    answerJourneyMention(c, journeyId, legId, auth.meta, {
       text: parsed.data.text,
       identity: auth.session.identity,
-    }).catch((err) => c.logError("journey_answer_failed", err, { journeyId, threadId }));
+    }).catch((err) => c.logError("journey_answer_failed", err, { journeyId, legId }));
   }
 
   return send(res, 201, { message });
 }
 
-async function patchMessage(c, req, res, journeyId, threadId, msgId) {
+async function patchMessage(c, req, res, journeyId, legId, msgId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: true });
   if (!auth) return undefined;
 
@@ -338,12 +338,12 @@ async function patchMessage(c, req, res, journeyId, threadId, msgId) {
 
   let result;
   try {
-    result = await editJourneyMessage(c, journeyId, threadId, msgId, {
+    result = await editJourneyMessage(c, journeyId, legId, msgId, {
       text: parsed.data.text,
       identity: auth.session.identity,
     });
   } catch (err) {
-    c.logError("journey_message_edit_failed", err, { journeyId, threadId, msgId });
+    c.logError("journey_message_edit_failed", err, { journeyId, legId, msgId });
     return send(res, 500, { error: "internal_error" });
   }
   if (!result.ok) {
@@ -352,18 +352,18 @@ async function patchMessage(c, req, res, journeyId, threadId, msgId) {
   return send(res, 200, { message: result.message });
 }
 
-async function deleteMessage(c, req, res, journeyId, threadId, msgId) {
+async function deleteMessage(c, req, res, journeyId, legId, msgId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: true });
   if (!auth) return undefined;
 
   let result;
   try {
-    result = await deleteJourneyMessage(c, journeyId, threadId, msgId, {
+    result = await deleteJourneyMessage(c, journeyId, legId, msgId, {
       identity: auth.session.identity,
       isLead: auth.role === "owner",
     });
   } catch (err) {
-    c.logError("journey_message_delete_failed", err, { journeyId, threadId, msgId });
+    c.logError("journey_message_delete_failed", err, { journeyId, legId, msgId });
     return send(res, 500, { error: "internal_error" });
   }
   if (!result.ok) {
@@ -379,21 +379,21 @@ async function deleteMessage(c, req, res, journeyId, threadId, msgId) {
  * flag gates the assistant editing a curated surface unsupervised, and this is
  * a person promoting something they can already read.
  */
-async function pinMessage(c, req, res, journeyId, threadId, msgId) {
+async function pinMessage(c, req, res, journeyId, legId, msgId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: true });
   if (!auth) return undefined;
 
   let result;
   try {
-    result = await pinJourneyMessage(c, journeyId, threadId, msgId, { identity: auth.session.identity });
+    result = await pinJourneyMessage(c, journeyId, legId, msgId, { identity: auth.session.identity });
   } catch (err) {
-    c.logError("journey_message_pin_failed", err, { journeyId, threadId, msgId });
+    c.logError("journey_message_pin_failed", err, { journeyId, legId, msgId });
     return send(res, 500, { error: "internal_error" });
   }
   if (!result.ok) {
     return send(res, result.reason === "journey_message_not_found" ? 404 : 409, { error: result.reason });
   }
-  c.log("journey_message_pinned", { journeyId, threadId, msgId, boardMsgId: result.msgId });
+  c.log("journey_message_pinned", { journeyId, legId, msgId, boardMsgId: result.msgId });
   // Idempotent: pinning twice returns the board message that already exists,
   // rather than putting a second copy of the same words on the board.
   return send(res, result.already ? 200 : 201, { boardMsgId: result.msgId, pinnedAs: result.msgId });
@@ -401,10 +401,10 @@ async function pinMessage(c, req, res, journeyId, threadId, msgId) {
 
 /**
  * Advance the read cursor. Writable on a completed journey — marking a frozen
- * thread as read is not a write to the journey's content, and refusing it
+ * leg as read is not a write to the journey's content, and refusing it
  * would leave a badge nobody could ever clear.
  */
-async function postRead(c, req, res, journeyId, threadId) {
+async function postRead(c, req, res, journeyId, legId) {
   const auth = await authorize(c, req, res, journeyId, { needWrite: false });
   if (!auth) return undefined;
 
@@ -421,19 +421,19 @@ async function postRead(c, req, res, journeyId, threadId) {
     // The counters the cursor is differenced against are read here, never
     // taken from the client: they are what the badge is computed from, and a
     // client that sent its own would be choosing its own unread total.
-    const [thread, cursor] = await Promise.all([
-      getJourneyThread(c, journeyId, threadId),
-      getJourneyReadCursor(c, journeyId, auth.session.identity, threadId).catch(() => null),
+    const [leg, cursor] = await Promise.all([
+      getJourneyLeg(c, journeyId, legId),
+      getJourneyReadCursor(c, journeyId, auth.session.identity, legId).catch(() => null),
     ]);
-    if (!thread) return send(res, 404, { error: "thread_not_found" });
-    await advanceJourneyReadCursor(c, journeyId, auth.session.identity, threadId, {
+    if (!leg) return send(res, 404, { error: "leg_not_found" });
+    await advanceJourneyReadCursor(c, journeyId, auth.session.identity, legId, {
       at: parsed.data.at,
       msgId: parsed.data.msgId,
-      messageCount: thread.messageCount || 0,
+      messageCount: leg.messageCount || 0,
       mentionCount: cursor?.mentionCount || 0,
     });
   } catch (err) {
-    c.logError("journey_read_advance_failed", err, { journeyId, threadId });
+    c.logError("journey_read_advance_failed", err, { journeyId, legId });
     return send(res, 500, { error: "internal_error" });
   }
   return send(res, 200, { ok: true });

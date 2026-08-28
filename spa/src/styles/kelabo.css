@@ -1809,7 +1809,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 /* A count beside a tab label — the middle rung of the journey badge cascade
    (docs 20 §19.3), for when the thing with unread is a tab you are not on.
    The button is not a flex container, so the badge is aligned by hand. */
-.tabs button .thread-badge { display: inline-block; margin-left: 6px; vertical-align: 1px; }
+.tabs button .leg-badge { display: inline-block; margin-left: 6px; vertical-align: 1px; }
 
 /* bounded scroll list (e.g. inside a panel-inset preview) */
 .scroll-list {
@@ -2168,17 +2168,17 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    message scroll, above the oldest loaded page. */
 .load-earlier { display: block; margin: var(--space-2) auto var(--space-3); }
 
-/* Threads: a rail of names beside the conversation. Two columns on a desktop,
+/* Legs: a rail of names beside the conversation. Two columns on a desktop,
    one on a phone — where the rail becomes a horizontal strip, because a 260px
    sidebar on a 390px screen is not a sidebar. */
-.threads {
+.legs {
   flex: 1;
   display: flex;
   gap: var(--space-3);
   min-height: 0;
 }
 
-.thread-rail {
+.leg-rail {
   width: 14rem;
   flex-shrink: 0;
   display: flex;
@@ -2189,16 +2189,16 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   background: var(--surface);
   overflow: hidden;
 }
-.thread-rail-head {
+.leg-rail-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.thread-rail-head .menu-label { padding: 0; }
-.thread-rail-list { flex: 1; overflow-y: auto; padding: var(--space-1); }
+.leg-rail-head .menu-label { padding: 0; }
+.leg-rail-list { flex: 1; overflow-y: auto; padding: var(--space-1); }
 
-.thread-item {
+.leg-item {
   width: 100%;
   display: flex; align-items: center; gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
@@ -2207,11 +2207,11 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   font: inherit; font-size: var(--text-sm); text-align: left;
   cursor: pointer;
 }
-.thread-item:hover { background: var(--surface-2); color: var(--text); }
-.thread-item.is-on { background: var(--accent-soft); color: var(--text); font-weight: 600; }
-/* A long thread name truncates rather than wrapping to three lines and
-   pushing every other thread down the rail. */
-.thread-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.leg-item:hover { background: var(--surface-2); color: var(--text); }
+.leg-item.is-on { background: var(--accent-soft); color: var(--text); font-weight: 600; }
+/* A long leg name truncates rather than wrapping to three lines and
+   pushing every other leg down the rail. */
+.leg-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Unread. Green and filled, not a grey pill: this is the one thing on the
    page somebody is scanning for, and a badge that blends into the row is a
@@ -2219,7 +2219,7 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    the same fixed status green the live/RSVP chips already use — so it stays
    legible against every palette, and white on it clears contrast in both
    light and dark. */
-.thread-badge {
+.leg-badge {
   flex-shrink: 0;
   min-width: 1.3rem; padding: 0 6px;
   border-radius: 999px;
@@ -2229,19 +2229,19 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
 }
 /* A mention outranks a count — "somebody wants you" and "there is something
    here" are different messages, and only one of them should pull the eye. */
-.thread-badge-mention { background: var(--accent); color: var(--accent-on); }
+.leg-badge-mention { background: var(--accent); color: var(--accent-on); }
 
 /* On a list row the badge sits among chips that all have their own margins;
    without this it crowds the title it belongs to. */
-.row-title .thread-badge { margin-left: var(--space-1); }
+.row-title .leg-badge { margin-left: var(--space-1); }
 
 @media (max-width: 767px) {
-  .threads { flex-direction: column; }
-  .thread-rail { width: auto; max-height: 9rem; }
+  .legs { flex-direction: column; }
+  .leg-rail { width: auto; max-height: 9rem; }
 }
 
 /* --------------------------------------------------------------------------
-   Journey threads (docs 20 §19)
+   Journey legs (docs 20 §19)
 
    The persistent chat on a journey. It reuses the room's own .chat-* bubbles,
    day dividers and compose box wholesale — the two are the same list, and the
@@ -2294,7 +2294,7 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   gap: var(--space-3);
 }
 
-/* A thread is read in a full-width page, not a 22% panel, so the room's 82%
+/* A leg is read in a full-width page, not a 22% panel, so the room's 82%
    bubble cap would run a one-line message most of the way across a desktop
    screen and make the author hard to scan. */
 .channel .chat-msg { max-width: min(82%, 44rem); }
@@ -2303,7 +2303,7 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    
    The room alternates sides — your own messages right-aligned — which suits a
    narrow side panel where two columns of bubbles read as a conversation. A
-   thread is a full-width page people scroll through looking for who said what,
+   leg is a full-width page people scroll through looking for who said what,
    and there a ragged left edge makes every author's name land in a different
    place. Undoes the three rules that create the right-hand column
    (`align-self`, the reversed meta row, and the flipped tail corner) and keeps

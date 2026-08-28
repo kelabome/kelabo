@@ -19,7 +19,7 @@ const KEY = "test-secret-key";
 const NOW = Date.now();
 const JOURNEY = "j-http";
 const PK = `JOURNEY#${JOURNEY}`;
-const T = "general";
+const T = "trunk";
 
 /** A journeys table just wide enough for the handlers: point reads, a
  *  prefix/range query, puts, and the two conditional updates. */
@@ -52,8 +52,8 @@ function makeDb(seed) {
         const k = `${input.Key.PK}|${input.Key.SK}`;
         // UpdateItem CREATES the item it was asked to update, which is why
         // every write that must not conjure a row carries this condition. A
-        // fake that ignored it would let a rename of a missing thread succeed
-        // here and 404 in production — or worse, invent the thread.
+        // fake that ignored it would let a rename of a missing leg succeed
+        // here and 404 in production — or worse, invent the leg.
         if (input.ConditionExpression === "attribute_exists(SK)" && !items.has(k)) {
           const e = new Error("ConditionalCheckFailedException");
           e.name = "ConditionalCheckFailedException";
@@ -72,7 +72,7 @@ function makeDb(seed) {
           // two are distinguished by the attribute name, not by order —
           // `messageCount = ` does not appear in `messageCountAtRead = `.
           item.messageCountAtRead = (existing.messageCountAtRead || 0) + 1;
-          item.threadId = existing.threadId ?? v[":tid"];
+          item.legId = existing.legId ?? v[":tid"];
         } else if (/messageCount = if_not_exists/.test(expr)) {
           item.messageCount = (existing.messageCount || 0) + 1;
           item.lastMessageAt = v[":at"];
@@ -217,7 +217,7 @@ async function main() {
       status: "active",
     },
     { PK: PK, SK: "ACCESSOR#bob@example.com", identity: "bob@example.com" },
-    { PK: PK, SK: `THREAD#${T}`, threadId: T, title: "General", createdAt: 1, messageCount: 0, lastMessageAt: 0, archived: false },
+    { PK: PK, SK: `LEG#${T}`, legId: T, title: "Trunk", createdAt: 1, messageCount: 0, lastMessageAt: 0, archived: false },
   ]);
   const c = await createContainer({
     config,
@@ -230,8 +230,8 @@ async function main() {
   const server = createGateway(c);
   await new Promise((r) => server.listen(0, r));
   const port = server.address().port;
-  const threads = `/journeys/${JOURNEY}/threads`;
-  const messages = `${threads}/${T}/messages`;
+  const legs = `/journeys/${JOURNEY}/legs`;
+  const messages = `${legs}/${T}/messages`;
 
   assert.equal((await call(port, "GET", messages)).status, 401);
   assert.equal((await call(port, "POST", messages, { body: { text: "hi" } })).status, 401);
@@ -242,7 +242,7 @@ async function main() {
   const stranger = await call(port, "GET", messages, { identity: "carol@example.com" });
   assert.equal(stranger.status, 404);
   assert.equal(stranger.body.error, "journey_not_found");
-  const absent = await call(port, "GET", "/journeys/no-such-journey/threads/general/messages", { identity: "alice@example.com" });
+  const absent = await call(port, "GET", "/journeys/no-such-journey/legs/trunk/messages", { identity: "alice@example.com" });
   assert.deepEqual([absent.status, absent.body.error], [404, "journey_not_found"]);
   ok("a non-member and a missing journey give the same answer");
 
@@ -272,7 +272,7 @@ async function main() {
   assert.equal(page.body.lastReadAt, 0);
   ok("the owner reads the page, and their unread position comes with it");
 
-  const read = await call(port, "POST", `${threads}/${T}/read`, {
+  const read = await call(port, "POST", `${legs}/${T}/read`, {
     identity: "alice@example.com",
     body: { at: page.body.lastMessageAt, msgId },
   });
@@ -323,7 +323,7 @@ async function main() {
   assert.equal((await call(port, "GET", messages, { identity: "bob@example.com" })).status, 200, "still readable");
   // Refusing this would leave a badge nobody could ever clear.
   assert.equal(
-    (await call(port, "POST", `${threads}/${T}/read`, { identity: "bob@example.com", body: { at: NOW } })).status,
+    (await call(port, "POST", `${legs}/${T}/read`, { identity: "bob@example.com", body: { at: NOW } })).status,
     200,
     "still markable as read"
   );
@@ -355,7 +355,7 @@ async function main() {
   // The regression that made this worth an HTTP test: being mentioned creates
   // the READ# row before it has ever been read, and a guard that did not
   // tolerate the missing lastReadAt left the badge stuck forever.
-  await call(port, "POST", `${threads}/${T}/read`, {
+  await call(port, "POST", `${legs}/${T}/read`, {
     identity: "bob@example.com",
     body: { at: bobsView.body.lastMessageAt, msgId: mine.msgId },
   });
@@ -386,71 +386,71 @@ async function main() {
   );
   ok("pinning is behind the same membership check as everything else");
 
-  // --- threads (docs 20 §19) ------------------------------------------------
+  // --- legs (docs 20 §19) ------------------------------------------------
 
-  const list = await call(port, "GET", threads, { identity: "bob@example.com" });
+  const list = await call(port, "GET", legs, { identity: "bob@example.com" });
   assert.equal(list.status, 200);
-  assert.equal(list.body.threads.length, 1);
-  assert.equal(list.body.threads[0].threadId, T);
-  // The reader's own position rides the list, so it never renders every thread
+  assert.equal(list.body.legs.length, 1);
+  assert.equal(list.body.legs[0].legId, T);
+  // The reader's own position rides the list, so it never renders every leg
   // bold for a frame while a second call is in flight.
-  assert.equal(typeof list.body.threads[0].unread, "number");
-  ok("the thread list carries each reader's own unread count");
+  assert.equal(typeof list.body.legs[0].unread, "number");
+  ok("the leg list carries each reader's own unread count");
 
-  const made = await call(port, "POST", threads, { identity: "bob@example.com", body: { title: "Rollout" } });
+  const made = await call(port, "POST", legs, { identity: "bob@example.com", body: { title: "Rollout" } });
   assert.equal(made.status, 201);
-  const second = made.body.thread.threadId;
-  assert.notEqual(second, T, "a person's thread gets a uuid, not the fixed default id");
-  assert.equal((await call(port, "POST", threads, { identity: "bob@example.com", body: { title: "" } })).status, 400);
-  ok("a member can create a named thread");
+  const second = made.body.leg.legId;
+  assert.notEqual(second, T, "a person's leg gets a uuid, not the fixed default id");
+  assert.equal((await call(port, "POST", legs, { identity: "bob@example.com", body: { title: "" } })).status, 400);
+  ok("a member can create a named leg");
 
-  const renamed = await call(port, "PATCH", `${threads}/${second}`, {
+  const renamed = await call(port, "PATCH", `${legs}/${second}`, {
     identity: "bob@example.com",
     body: { title: "Rollout plan" },
   });
   assert.equal(renamed.status, 200);
   assert.equal(
-    (await call(port, "PATCH", `${threads}/nope`, { identity: "bob@example.com", body: { title: "x" } })).status,
+    (await call(port, "PATCH", `${legs}/nope`, { identity: "bob@example.com", body: { title: "x" } })).status,
     404
   );
-  ok("threads can be renamed, and a missing one is a 404");
+  ok("legs can be renamed, and a missing one is a 404");
 
-  // A message in one thread must not appear in another, and must not move the
+  // A message in one leg must not appear in another, and must not move the
   // other's badge.
-  await call(port, "POST", `${threads}/${second}/messages`, { identity: "bob@example.com", body: { text: "over here" } });
-  const inSecond = await call(port, "GET", `${threads}/${second}/messages`, { identity: "alice@example.com" });
+  await call(port, "POST", `${legs}/${second}/messages`, { identity: "bob@example.com", body: { text: "over here" } });
+  const inSecond = await call(port, "GET", `${legs}/${second}/messages`, { identity: "alice@example.com" });
   assert.equal(inSecond.body.messages.length, 1);
   assert.equal(inSecond.body.messages[0].text, "over here");
-  const both = await call(port, "GET", threads, { identity: "alice@example.com" });
-  const byId = Object.fromEntries(both.body.threads.map(t => [t.threadId, t]));
+  const both = await call(port, "GET", legs, { identity: "alice@example.com" });
+  const byId = Object.fromEntries(both.body.legs.map(t => [t.legId, t]));
   assert.equal(byId[second].unread, 1);
   // Zero, and worth being precise about why: everything added to the default
-  // thread since Alice last marked it read was written by Alice.
+  // leg since Alice last marked it read was written by Alice.
   assert.equal(byId[T].unread, 0, "her own messages are not unread to her");
-  ok("threads are isolated, and unread is counted per thread");
+  ok("legs are isolated, and unread is counted per leg");
 
-  assert.equal((await call(port, "GET", `${threads}/nope/messages`, { identity: "bob@example.com" })).status, 404);
+  assert.equal((await call(port, "GET", `${legs}/nope/messages`, { identity: "bob@example.com" })).status, 404);
   assert.equal(
-    (await call(port, "POST", `${threads}/nope/messages`, { identity: "bob@example.com", body: { text: "x" } })).status,
+    (await call(port, "POST", `${legs}/nope/messages`, { identity: "bob@example.com", body: { text: "x" } })).status,
     404
   );
-  ok("posting to a thread that does not exist is refused, not silently created");
+  ok("posting to a leg that does not exist is refused, not silently created");
 
   // --- @kelabo (docs 20 §19.10) ---------------------------------------------
 
-  const asked = await call(port, "POST", `${threads}/${second}/messages`, {
+  const asked = await call(port, "POST", `${legs}/${second}/messages`, {
     identity: "bob@example.com",
     body: { text: "@kelabo what did we decide?" },
   });
   assert.equal(asked.status, 201, "the asker gets their message back immediately");
   // The answer is dispatched after the response, so it lands a tick later.
   const answer = await waitFor(async () => {
-    const page = await call(port, "GET", `${threads}/${second}/messages`, { identity: "bob@example.com" });
+    const page = await call(port, "GET", `${legs}/${second}/messages`, { identity: "bob@example.com" });
     return page.body.messages.find(m => m.kind === "assistant");
   });
   assert.equal(answer.author, "kelabo");
   assert.ok(answer.text.includes("stub answer"), answer.text);
-  ok("@kelabo is answered, in the thread it was asked in");
+  ok("@kelabo is answered, in the leg it was asked in");
 
   // The guard that matters most: the assistant's own reply contains the string
   // "@kelabo" — quoting the question back is the obvious way for it to do so —
@@ -458,12 +458,12 @@ async function main() {
   const before = llmCalls;
   await new Promise(r => setTimeout(r, 250));
   assert.equal(llmCalls, before, "the assistant's own message never triggers another answer");
-  const settled = await call(port, "GET", `${threads}/${second}/messages`, { identity: "bob@example.com" });
+  const settled = await call(port, "GET", `${legs}/${second}/messages`, { identity: "bob@example.com" });
   assert.equal(settled.body.messages.filter(m => m.kind === "assistant").length, 1);
   ok("an assistant reply that mentions @kelabo does not answer itself");
 
   const quiet = llmCalls;
-  await call(port, "POST", `${threads}/${second}/messages`, { identity: "bob@example.com", body: { text: "no mention here" } });
+  await call(port, "POST", `${legs}/${second}/messages`, { identity: "bob@example.com", body: { text: "no mention here" } });
   await new Promise(r => setTimeout(r, 150));
   assert.equal(llmCalls, quiet, "an ordinary message costs no model call");
   ok("only an explicit mention reaches the model");
@@ -481,8 +481,8 @@ async function main() {
   await call(port, "POST", messages, { identity: "alice@example.com", body: { text: "realtime please" } });
   const evt = await waitFor(() => bobStream.events.find(e => e.kind === "journey_message"));
   assert.equal(evt.journeyId, JOURNEY);
-  assert.equal(evt.threadId, T);
-  // The whole message rides the event, so a client already reading the thread
+  assert.equal(evt.legId, T);
+  // The whole message rides the event, so a client already reading the leg
   // renders it without a round trip. That is the difference between realtime
   // and a fast poll.
   assert.equal(evt.message.text, "realtime please");
@@ -511,20 +511,20 @@ async function main() {
   {
     // --- the sender never badges themselves --------------------------------
 
-    const fresh = await call(port, "POST", threads, { identity: "alice@example.com", body: { title: "Quiet" } });
-    const quietId = fresh.body.thread.threadId;
-    const quietPath = `${threads}/${quietId}`;
+    const fresh = await call(port, "POST", legs, { identity: "alice@example.com", body: { title: "Quiet" } });
+    const quietId = fresh.body.leg.legId;
+    const quietPath = `${legs}/${quietId}`;
 
     await call(port, "POST", `${quietPath}/messages`, { identity: "alice@example.com", body: { text: "just me" } });
     const mine = await call(port, "GET", `${quietPath}/messages`, { identity: "alice@example.com" });
     assert.equal(mine.body.unreadCount, 0, "the sender sees no badge for their own message");
     const theirs = await call(port, "GET", `${quietPath}/messages`, { identity: "bob@example.com" });
     assert.equal(theirs.body.unreadCount, 1, "everyone else does");
-    // And the thread list agrees with the thread — they are the two places the
+    // And the leg list agrees with the leg — they are the two places the
     // same number is rendered, and they are computed by different code.
-    const aliceThreads = await call(port, "GET", threads, { identity: "alice@example.com" });
-    assert.equal(aliceThreads.body.threads.find(t => t.threadId === quietId).unread, 0);
-    ok("posting raises no badge on the sender, at the thread or in the list");
+    const aliceLegs = await call(port, "GET", legs, { identity: "alice@example.com" });
+    assert.equal(aliceLegs.body.legs.find(t => t.legId === quietId).unread, 0);
+    ok("posting raises no badge on the sender, at the leg or in the list");
 
     await call(port, "POST", `${quietPath}/messages`, { identity: "bob@example.com", body: { text: "one" } });
     await call(port, "POST", `${quietPath}/messages`, { identity: "bob@example.com", body: { text: "two" } });

@@ -58,7 +58,7 @@ export function usePresence(identity, onRing, onJourneyMessage) {
         // Ring events (docs 18 §6) ride the same stream — routed to the ring
         // handler, not the presence reducer, which stays about who-is-online only.
         if (RING_KINDS.has(evt.kind)) { onRingRef.current?.(evt); return }
-        // Journey thread messages ride it too (docs 20 §19.9), for the same
+        // Journey leg messages ride it too (docs 20 §19.9), for the same
         // reason: this stream is already open on every page, and a badge is
         // needed precisely for the journey you are NOT currently subscribed to.
         if (evt.kind === 'journey_message') { onJourneyRef.current?.(evt); return }

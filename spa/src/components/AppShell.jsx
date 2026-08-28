@@ -127,7 +127,7 @@ export function AppShell({ children }) {
   // you anything. Owning the fetch here also means the route below and this
   // rail share one poll instead of racing two.
   //
-  // The poll is now a backstop, not the delivery mechanism: a thread message
+  // The poll is now a backstop, not the delivery mechanism: a leg message
   // is pushed over the presence stream (docs 20 §19.9) and refreshes this
   // within a moment. It stays because that stream has no replay — a missed
   // event would otherwise mean a badge that never appears — and because a
@@ -246,7 +246,7 @@ export function AppShell({ children }) {
   }, [identity, location.pathname])
 
   // Unread across every journey the person can reach. Summed rather than
-  // stored, for the same reason a journey's own badge sums its threads: a
+  // stored, for the same reason a journey's own badge sums its legs: a
   // total nobody maintains cannot drift from the parts it is made of.
   const journeyUnread = useMemo(() => {
     const all = [...(journeys?.mine || []), ...(journeys?.accessible || []), ...(journeys?.public || [])]
