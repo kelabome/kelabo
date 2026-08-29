@@ -327,6 +327,23 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...(block.auth ?? {}),
   };
 
+  // Sign-in codes, same shape as `auth`/`joinCode` and now for the same
+  // reason as the agent block below: these are published operational config
+  // (docs 23), the file entry is only the bootstrap, and the intended end
+  // state is a block-less kelabo.json. `lambda-stack.js` writes each field
+  // into the Lambda env with `String(...)`, so an absent block used to fail
+  // synth. Defaults match `resolveOpConfig`'s fallbacks exactly.
+  const otp = {
+    ttlSeconds: 600,
+    maxAttempts: 5,
+    resendSeconds: 30,
+    perEmailWindowSeconds: 3600,
+    perEmailMaxRequests: 5,
+    perIpWindowSeconds: 3600,
+    perIpMaxRequests: 30,
+    ...(block.otp ?? {}),
+  };
+
   // Join codes (rest-api/src/joinCode.js): the two-minute spoken stand-in for a
   // kelabo URL. Always available — it needs no third-party service and no
   // secret, so there is nothing for a deployment to turn on. What a deployment
@@ -461,7 +478,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     // owns env-specific values, so a deployment that omits the block and one
     // that names deepgram explicitly are the same thing by the time anyone
     // downstream reads it.
-    stt: { ...(block.stt ?? {}), provider: sttProvider },
+    stt: { language: "en", ...(block.stt ?? {}), provider: sttProvider },
     // The agent knobs are OPTIONAL in the file — they are published operational
     // config now (docs 23; `agent` in `opConfigSchema`), and the file entry is
     // only the bootstrap. Defaulted here, field by field and to the SAME values
@@ -496,7 +513,11 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     allowIpsV6,
     contacts,
     auth,
+    otp,
     joinCode,
+    // Same rule as the blocks above: publishable, so the file entry is
+    // optional and the default is the fold's own fallback.
+    retentionDays: block.retentionDays ?? 30,
     logRetentionDays,
     secrets: {
       ...block.secrets,
