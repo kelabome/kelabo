@@ -435,7 +435,10 @@ console** — it publishes `kelabo.json` values over whatever was set there.
    a number or a boolean, so `0`/`false` survive the fold.
 2. A line in `resolveOpConfig`, and one in `applyOpConfig` if the service holds it
    under a different name.
-3. A control in `spa/src/routes/Admin.jsx`, in the tab it belongs to.
+3. A control in `spa/src/components/opconfig/OpConfigForms.jsx`, in the group
+   it belongs to — the group components are shared so a console other than
+   `/admin` (the saas branch's `/superadmin`) grows the field on its next
+   merge instead of forking the form. `Admin.jsx` only places groups in tabs.
 4. The consumer reads the resolved value, never `config.x` — in the Lambda that
    is `(await settings()).x`, on the Gateway it is `effectiveConfig(c)` (or
    `effectiveConfigNow(c)` inside a callback that cannot await).
