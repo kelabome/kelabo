@@ -47,7 +47,10 @@ import { sha256 } from "./jwt.js";
  * `dryRun` walks the same lists and returns the same report without deleting
  * anything.
  */
-export function createCloseAccount({ config, db, records, secrets, log }) {
+export function createCloseAccount({ config, db, records, secrets, log, opConfig }) {
+  // The retention window a cancelled kelabo is stamped with, published.
+  const retentionNow = async () =>
+    (opConfig ? (await opConfig.effective()).retentionDays : config.retentionDays);
   const warn = (msg, fields) =>
     (log || ((m, f) => console.warn(JSON.stringify({ level: "warn", msg: m, ...f }))))(msg, fields);
 
@@ -97,7 +100,7 @@ export function createCloseAccount({ config, db, records, secrets, log }) {
     for (const meta of hostedScheduled) {
       report.scheduledCancelled.push(meta.kelaboId);
       if (dryRun) continue;
-      const ttl = Math.floor(now / 1000) + config.retentionDays * 86400;
+      const ttl = Math.floor(now / 1000) + (await retentionNow()) * 86400;
       try {
         await db.cancelScheduledKelabo({
           kelaboId: meta.kelaboId,

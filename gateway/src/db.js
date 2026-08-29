@@ -13,11 +13,38 @@ import {
   mcpSecretSk,
   parseCredential,
 } from "@kelabo/contracts/credentials";
+import { OPCONFIG_PK } from "@kelabo/contracts/opconfig";
 
 const kelabosTable = (c) => c.config.tableNames.kelabos;
 const historyTable = (c) => c.config.tableNames.history;
 const mcpTable = (c) => c.config.tableNames.mcp;
 const credentialsTable = (c) => c.config.tableNames.credentials;
+const configTable = (c) => c.config.tableNames.config;
+
+/**
+ * Every published operational-config version (contracts/src/opconfig.js).
+ *
+ * Read-only, and Query rather than Scan for two reasons: the admin roster lives
+ * in the same table and this task has no business reading it, and IAM fences
+ * this to the `OPCONFIG` partition — a Scan cannot be constrained by
+ * `dynamodb:LeadingKeys` at all and would be denied.
+ *
+ * A missing table name returns nothing, which the cache reads as "a deployment
+ * that has published nothing" and answers from this service's own environment
+ * config. That is what keeps an environment deployed before this table existed
+ * running exactly as it did.
+ */
+export async function listOpConfigs(c) {
+  if (!configTable(c)) return [];
+  const out = await c.db.send(
+    new QueryCommand({
+      TableName: configTable(c),
+      KeyConditionExpression: "PK = :pk",
+      ExpressionAttributeValues: { ":pk": OPCONFIG_PK },
+    })
+  );
+  return out.Items || [];
+}
 
 /**
  * A supplier credential, by slot.
@@ -298,6 +325,14 @@ export async function getMinutes(c, kelaboId) {
  * Across tenants it is a Scan of the index, filtered in code. The index holds
  * one row per kelabo and this runs on a 15-minute timer, so the cost is small
  * and bounded; `endsWith` is done here because DynamoDB has no such operator.
+ *
+ * `tenantId` is deliberately the BOOTSTRAP value, not the published
+ * `allowedEmailDomain` (docs 23 §7.3). Rows are stamped with the *creator's*
+ * email domain at creation, so a deployment that publishes a corrected domain
+ * has rows under both — and a sweeper that followed the published value would
+ * silently stop seeing everything stamped before the publish. The bootstrap is
+ * wrong in the same way but stable; a deployment changing its domain should
+ * expect the sweep to need the multi-tenant Scan path, not a config read.
  */
 async function kelabosByStatus(c, status) {
   const tenant = c.config.tenantId;

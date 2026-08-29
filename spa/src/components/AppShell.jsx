@@ -117,6 +117,17 @@ export function AppShell({ children }) {
     return () => window.removeEventListener(SETTINGS_SYNCED_EVENT, resync)
   }, [])
 
+  // Whether to offer this deployment's operational console. Asked once per
+  // session and treated as cosmetic: every `/admin` route re-checks the
+  // identity server-side, so a false here hides a menu entry and nothing more.
+  // Failing to `false` is the right direction — a deployment whose config table
+  // is unreachable should not sprout an admin entry for everyone.
+  const [isAdmin, setIsAdmin] = useState(false)
+  useEffect(() => {
+    if (!identity) return
+    api.adminWhoami().then(w => setIsAdmin(!!w.admin)).catch(() => setIsAdmin(false))
+  }, [identity])
+
   // The name the user chose in Settings wins over the identity-derived one —
   // the same precedence every join flow uses.
   const name = localStorage.getItem('kelabo-name') || displayName(identity)
@@ -622,6 +633,14 @@ export function AppShell({ children }) {
                   <MenuItem icon={<Icon name="settings" />} onClick={() => { close(); navigate('/settings') }}>
                     Settings
                   </MenuItem>
+                  {/* Only for the people who run this deployment. The server
+                      refuses everyone else whatever this menu shows — hiding
+                      the entry is a courtesy, not the control. */}
+                  {isAdmin && (
+                    <MenuItem icon={<Icon name="terminal" />} onClick={() => { close(); navigate('/admin') }}>
+                      Administration
+                    </MenuItem>
+                  )}
                   <MenuItem icon={<Icon name="logout" />} onClick={() => logout()}>
                     Sign out
                   </MenuItem>

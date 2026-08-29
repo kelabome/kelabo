@@ -25,21 +25,32 @@ export function resolveDisplayName(user, identity) {
   return chosen ?? (user?.displayName || identity.split("@")[0]);
 }
 
-export function createSessions({ config, db, secrets }) {
-  const { sessionTtlSeconds, refreshTtlDays, participantTtlSeconds } = config.auth;
+export function createSessions({ config, db, secrets, opConfig }) {
+  /**
+   * Token lifetimes, published (contracts/src/opconfig.js) and read at the
+   * moment a token is minted.
+   *
+   * That timing is the whole of what this can and cannot do, and it is worth
+   * being plain about: shortening a lifetime here affects tokens minted from
+   * now on and **does not touch a session already issued**. Nothing in this
+   * mechanism revokes; an operator tightening a TTL after an incident still
+   * needs `/logout-all`.
+   */
+  const authNow = async () => (opConfig ? (await opConfig.effective()).auth : config.auth);
 
-  function sessionPayload(identity, tenantId) {
+  async function sessionPayload(identity, tenantId) {
     return {
       kind: "identity",
       identity,
       tenantId,
-      exp: Math.floor(Date.now() / 1000) + sessionTtlSeconds,
+      exp: Math.floor(Date.now() / 1000) + (await authNow()).sessionTtlSeconds,
     };
   }
 
   async function mintSessionCookie(identity, tenantId) {
     const key = await secrets.getCookieKey(config);
-    return serializeCookie(COOKIE_SESSION, mintCookie(sessionPayload(identity, tenantId), key), {
+    const sessionTtlSeconds = (await authNow()).sessionTtlSeconds;
+    return serializeCookie(COOKIE_SESSION, mintCookie(await sessionPayload(identity, tenantId), key), {
       maxAgeSeconds: sessionTtlSeconds,
       // Domain-scoped like the refresh and participant cookies, so it reaches the
       // gateway subdomain (`gw.<portal>`). Presence (docs 18 §5) is the first
@@ -55,6 +66,7 @@ export function createSessions({ config, db, secrets }) {
     const tokenId = randomUUID();
     const raw = randomToken(32);
     const now = Date.now();
+    const refreshTtlDays = (await authNow()).refreshTtlDays;
     const expiresAt = now + refreshTtlDays * 86400 * 1000;
     await db.putRefreshToken({
       tokenId,

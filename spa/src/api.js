@@ -29,6 +29,25 @@ const apiRequest = (path, opts) => request(config.apiBase, path, opts)
 
 export const api = {
   me: () => apiRequest('/me'),
+  // Deployment administration (contracts/src/opconfig.js). `adminWhoami` is the
+  // only one that answers a non-admin instead of refusing them — it is what the
+  // shell asks on load to decide whether to show the menu entry, and hiding
+  // that entry is a courtesy, never the control. Every call below re-checks.
+  adminWhoami: () => apiRequest('/admin/whoami'),
+  adminConfig: () => apiRequest('/admin/config'),
+  adminPublishConfig: (config, note) =>
+    apiRequest('/admin/config', { method: 'POST', body: { config, note } }),
+  // Supplier keys. `adminCredentials` returns status and field descriptors and
+  // never a value — there is no route that returns one. A save MERGES: fields
+  // left empty are untouched, which is what lets the form render a slot without
+  // the operator re-pasting keys they are not changing.
+  adminCredentials: () => apiRequest('/admin/credentials'),
+  adminSaveCredential: (slot, fields) =>
+    apiRequest(`/admin/credentials/${encodeURIComponent(slot)}`, { method: 'PUT', body: { fields } }),
+  adminRoster: () => apiRequest('/admin/roster'),
+  adminGrant: email => apiRequest('/admin/roster', { method: 'POST', body: { email } }),
+  adminRevoke: email =>
+    apiRequest(`/admin/roster/${encodeURIComponent(email)}`, { method: 'DELETE' }),
   getSettings: () => apiRequest('/me/settings'),
   putSettings: body => apiRequest('/me/settings', { method: 'PUT', body }),
   getMcp: () => apiRequest('/me/mcp'),

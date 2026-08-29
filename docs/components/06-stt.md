@@ -2,7 +2,8 @@
 
 Live speech-to-text with real-time speaker diarization, behind a **provider
 boundary**: two providers are built in — **Deepgram** and **Soniox** — and a
-deployment picks one with a single config value (`stt.provider`). Key property,
+deployment picks one by publishing `stt.provider` from `/admin` (docs 23;
+`config.stt.provider` is the bootstrap it falls back to). Key property,
 whichever provider: **audio goes browser → provider directly**; it never
 touches Kelabo infra (cost + serverless + privacy). Kelabo only mints a
 short-lived credential and receives finalized transcripts.
@@ -93,13 +94,20 @@ ever mints.
     attribution. The transport renews between utterances via the injected
     `renew()`, never on the critical path of an utterance.
 - Per-provider tuning (model, TTLs, Soniox endpointing) lives in
-  `config.stt.providers.<id>` and is opaque to the core — a provider is handed
-  its own block and only its own.
+  `config.stt.providers.<id>`, is publishable as `stt.settings.<id>`, and is
+  opaque to the core — a provider is handed its own block and only its own. The
+  fold is a **merge, not a replace**: a published block for one engine spreads
+  over the deployment's map rather than replacing it, so configuring Soniox
+  cannot silently drop Deepgram's settings.
 
 > The env path mirrors config exactly: `KELABO_STT_PROVIDER`,
 > `KELABO_STT_LANGUAGE`, `KELABO_STT_PROVIDERS`
-> (`infra/lib/lambda-stack.js`). No secret name travels with them — the key is
-> the `stt` credential slot, reached through `KELABO_TABLE_CREDENTIALS`.
+> (`infra/lib/lambda-stack.js`) — and all three are the **bootstrap**. A
+> published version wins over every one of them, so "I changed
+> `KELABO_STT_PROVIDER` and nothing happened" means something is published
+> (docs 23). No secret name travels with them — the key is the `stt` credential
+> slot, reached through `KELABO_TABLE_CREDENTIALS`, and settable from `/admin` →
+> Suppliers as well as `make credential-set`.
 
 ## 4. Capture client (browser)
 
@@ -230,7 +238,14 @@ the Gateway `/caption`, fanned out, persisted and offered to the agent.
 Three files (§2), one line in each registry, a `config.stt.providers.<id>`
 block, a field for it in `CREDENTIAL_FIELDS.stt`
 (`contracts/src/credentials.js` — the field list is closed, so an undeclared
-name is refused), and its key written into the `stt` credential slot.
+name is refused), and its key written into the `stt` credential slot — from
+`/admin` → Suppliers, or `make credential-set` on a deployment nobody can sign
+in to yet.
+
+**It needs no change to `opConfigSchema`, and that is designed.** `stt.settings`
+is an opaque `z.record`, so a new engine's tuning block does not edit the
+published-config schema, the console, or every deployed task definition — the
+same reason it is opaque in config (docs 23 §1.2).
 The conformance suite iterates the registry (`sttClientIds()`), so a new
 provider is exercised by the existing tests; nothing downstream of the
 `SttRead` / `Utterance` contracts changes. A self-hoster could swap in local

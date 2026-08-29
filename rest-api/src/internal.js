@@ -51,6 +51,20 @@ export function createInternal({ config, secrets, fetchImpl = fetch }) {
     ringCancel: (kelaboId, identity) => post(`/internal/kelabos/${kelaboId}/ring/cancel`, identity),
     ringAnswer: (kelaboId, identity, { response }) =>
       post(`/internal/kelabos/${kelaboId}/ring/answer`, identity, { response }),
+    // Tell the Gateway that the operational config changed, so it re-reads it
+    // now rather than at the end of its 60-second cache window — and, because
+    // the LLM settings are in there, re-initialises the agent worker with
+    // whatever was just published.
+    //
+    // The one internal call that is about the deployment rather than a kelabo,
+    // and the only one whose failure is not worth surfacing: the publish is
+    // already durable, the gateway converges on its own, and a saved change
+    // that reports an error because a container was rolling would be read as
+    // "it did not save". `admin.js` catches and logs.
+    reloadConfig: async (identity) => {
+      const res = await post(`/internal/config/reload`, identity);
+      return res.json().catch(() => ({ ok: true }));
+    },
     // Journey report generation (docs 20 §6) — the Gateway holds the LLM
     // credential, so the actual synthesis happens there; this call is
     // awaited the same way requestMinutes is, and the row it wrote is what

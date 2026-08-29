@@ -1,5 +1,6 @@
 import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_NOTICE, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_ROSTER, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
 import { putContrib } from "./db.js";
+import { effectiveConfigNow } from "./opconfig.js";
 
 const PING_INTERVAL_MS = 25_000;
 
@@ -54,8 +55,12 @@ export function createSseHub(c) {
   // How long an identity keeps its place after its last stream closes. The same
   // window the call uses before `peer_away` (rtc/room.js), for the same reason:
   // an EventSource blip or a reload would otherwise make the headcount visibly
-  // dip and recover on every refresh.
-  const departureGraceMs = Math.max(0, (c.config.rtc?.disconnectGraceSeconds ?? 20) * 1000);
+  // dip and recover on every refresh. Published operational config (docs 23),
+  // read per departure via the sync snapshot — this runs inside a stream's
+  // `close` handler and cannot await — rather than captured at construction,
+  // which would pin the bootstrap for the task's whole life.
+  const departureGraceMsNow = () =>
+    Math.max(0, (effectiveConfigNow(c).rtc.disconnectGraceSeconds ?? 20) * 1000);
   /** kelaboId -> Map<participantId, timer>: no stream, still counted. */
   const leaving = new Map();
   /** kelaboId -> last roster fanned out, so a reconnect does not emit no-ops. */
@@ -109,6 +114,7 @@ export function createSseHub(c) {
       forgetDeparture(kelaboId, participantId);
       fanRoster(kelaboId);
     };
+    const departureGraceMs = departureGraceMsNow();
     if (departureGraceMs <= 0) {
       drop();
       return;

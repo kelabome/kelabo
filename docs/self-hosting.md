@@ -90,8 +90,8 @@ through your AWS infrastructure.
    **If that request is refused, you are not stuck.** Production access is
    granted case by case and refusals are common, and a permanently sandboxed
    account cannot run a deployment — everyone would have to be verified one at
-   a time, forever. Set `mail.provider` to another provider instead (§D2 and
-   §C5); nothing else about the deployment changes.
+   a time, forever. Switch to another provider instead (§C5) — a publish from
+   `/admin`, no deploy; nothing else about the deployment changes.
 4. One-time per account/region: bootstrap the CDK (step D3 below).
 
 ### C2. Speech-to-text: Deepgram or Soniox
@@ -141,10 +141,13 @@ key and no step here — the Lambda authenticates with its own IAM role.
    `mail_not_configured`.
 2. Create an API token with the **Email → full access** permission. Nothing
    else is used.
-3. Put it in the `mail` credential slot's `mailersend` field (step D4),
-   then set `mail.provider` in `config/kelabo.json` (§D2) and
-   `make backend env=<env>` — the provider is a deploy-time value, so that
-   redeploy is what switches the transport and its IAM grant.
+3. Put it in the `mail` credential slot's `mailersend` field — `/admin` →
+   Suppliers, or `make credential-set` (step D4) — then publish
+   `mail.provider` from `/admin` → Services. The next send picks it up; there
+   is no redeploy and no IAM change, because the SES grant is unconditional
+   rather than conditional on the provider (doc 23 §8). That is the whole
+   reason this became publishable: a refused production-access request is
+   news you get from outside, and it cannot wait for a rollout.
 
 Two things that differ from SES and are worth knowing before you debug them:
 
@@ -167,7 +170,25 @@ Two things that differ from SES and are worth knowing before you debug them:
 
 ## D. Configure the deployment
 
-All configuration is one file. Nothing anywhere else needs editing.
+Configuration comes in two tiers, and knowing which is which will save you a
+deploy later.
+
+**`config/kelabo.json` is what CDK needs to build the stack** — your account,
+region, domains, hosted zone, the WAF list, the gateway's size, secret names.
+Changing one of those is a deploy, because a value read at synth cannot follow a
+row in a table.
+
+**Everything a running deployment might want to change is published from
+`/admin` instead** — which model the assistant answers with, which speech-to-text
+engine transcribes, which transport carries a sign-in code, every rate limit and
+TTL, and the supplier keys themselves. Those values *also* appear in
+`config/kelabo.json`, and this is the part worth internalising: **there they are
+only the bootstrap.** They are what the deployment falls back to until somebody
+publishes, so a fresh deployment behaves exactly as its config file says, and
+from then on the console wins. Doc 23 is the full account.
+
+So: fill in this file to get the deployment standing up, and expect to do the
+day-to-day from the console afterwards.
 
 1. **Create your config from the template:**
 
@@ -186,14 +207,15 @@ All configuration is one file. Nothing anywhere else needs editing.
    | `environments.<env>.account` / `region` | your AWS account ID and region |
    | `environments.<env>.hostedZone.name` / `id` | the Route 53 zone from C1 |
    | `environments.<env>.subdomains.portal` / `gateway` | e.g. `kelabo` and `gw.kelabo` → `kelabo.mycompany.com`, `gw.kelabo.mycompany.com` |
-   | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation. The sign-in page names it and fills it in, so people can type just `rico`; it reaches the browser as a build-time `VITE_*` value, so changing it needs `make frontend` as well as `make backend` |
-   | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time like the domain, so changing it needs `make frontend` |
-   | `environments.<env>.stt.provider` | `deepgram` (the default) or `soniox` — which speech-to-text provider this environment uses (§C2). The key for it must be in the `stt` credential slot (step D4). Changing it needs `make backend` (and `make gateway` to update the room's capability report) |
-   | `environments.<env>.stt.providers.<id>` | per-provider tuning (model, token TTL, Soniox endpointing) — the template's values are sensible; leave them unless you know why |
+   | `rootAdminEmail` (at the **root** of the file, not inside an environment) | your own address — the one identity that may administer this deployment: grant other administrators, publish configuration, rotate supplier keys. **Deploy-time and only deploy-time**, deliberately: everything else below is editable from a web page, so the answer to *who may edit* must not be, or an administrator could lock you out of your own deployment in one request. **Empty fails closed** — nobody is root and `/admin` refuses everyone, which is safe but inert, so set it now. It must be an address that can actually sign in, i.e. one at your `allowedEmailDomain`. Per-environment override goes in the environment block |
+| `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation. Two halves with different lifetimes: the **enforcement** is publishable (`/admin` → Access), while the sign-in page's prefill reaches the browser as a build-time `VITE_*` value. So publishing a new domain admits it immediately, but the page keeps naming the old one until `make frontend` |
+   | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time, so changing it needs `make frontend` — and it is deliberately **not** publishable for exactly that reason: nothing server-side reads it, so a console field for it would look like it worked and would not (doc 23 §7.2) |
+   | `environments.<env>.stt.provider` | `deepgram` (the default) or `soniox` — which speech-to-text provider this environment uses (§C2). The key for it must be in the `stt` credential slot (step D4). Bootstrap only: publish it from `/admin` → Services instead, and the next room picks it up. Changing it here needs `make backend` and only matters until something is published |
+   | `environments.<env>.stt.providers.<id>` | per-provider tuning (model, token TTL, Soniox endpointing) — the template's values are sensible; leave them unless you know why. Bootstrap only; publishable as `stt.settings.<id>`, and a published block for one engine **merges** over the other's rather than replacing it |
    | `environments.<env>.allowIps` | empty (the default) means anyone can reach the deployment; sign-in is still the access control. A list of CIDRs closes it to those sources only — your corporate egress range while a pilot runs, say. It covers the portal, the API and the Gateway; add IPv6 ranges too if your network has them, or a browser preferring IPv6 is locked out. Manage it with `make allow-ip` / `allow-list` / `allow-rm` rather than by hand |
    | `environments.<env>.api.originSecret` | `off` (default), `send` or `require`. API Gateway also answers on its own `execute-api` URL, which reaches the same Lambda without passing CloudFront or the WAF — so with `allowIps` set and this left `off`, your portal is closed and your entire API is not. `require` makes CloudFront prove itself with a secret header. Roll it out in that order: `make origin-secret`, then `send` + deploy, then `require` + deploy. Going straight to `require` takes the API down for the length of a deploy, because the Lambda stack deploys before CloudFront |
-   | `environments.<env>.mail.fromAddress` | e.g. `kelabo@mycompany.com` — where sign-in codes and invitations come from. (Older configs say `ses.fromAddress`; that still works and means the same thing) |
-   | `environments.<env>.mail.provider` | `ses` (the default) or `mailersend`. Only worth changing if SES production access was refused (§C1.3) — see §C5, which is also where the API key comes from. A value that is not a known provider fails at config load rather than at the first sign-in |
+   | `environments.<env>.mail.fromAddress` | e.g. `kelabo@mycompany.com` — where sign-in codes and invitations come from. (Older configs say `ses.fromAddress`; that still works and means the same thing.) Bootstrap only; publishable. **Check it after publishing**: the IAM grant is fenced to the sending *domain*, so a typo in the local part sends successfully from an address that does not exist rather than failing loudly (doc 23 §8) |
+   | `environments.<env>.mail.provider` | `ses` (the default) or `mailersend`. Only worth changing if SES production access was refused (§C1.3) — see §C5, which is also where the API key comes from. A value that is not a known provider fails at config load rather than at the first sign-in. Bootstrap only: switching transport is a publish from `/admin` → Services, which is the whole reason it moved — SES production access is refused often enough that waiting for a deploy to react is not a plan |
    | `environments.<env>.ses.createIdentity` | leave unset. Set `false` only when another env in the same account already verified the sending domain (SES identities are account-scoped; two stacks can't create the same one). Any non-SES `mail.provider` turns it off regardless |
    | `environments.<env>.ses.dmarc` | omit unless your sending domain has no DMARC record yet — it is one record per domain, so publishing a second one where your mail provider already wrote one fails the deploy. `true` publishes `v=DMARC1; p=none;` beside the DKIM CNAMEs: monitor-only, which is the sole safe opening policy, since anything stricter quarantines mail from senders you have not yet inventoried. `{ "policy": "none", "rua": "mailto:…" }` to add an aggregate-report address — but only one you actually read, and if it is at another domain that domain must publish a `<sender>._report._dmarc` record or the reports go nowhere |
    | `environments.<env>.ses.mailFrom` | optional. `true` publishes a custom MAIL FROM subdomain (`mail.<your-domain>`) with its MX and SPF records, so SES's envelope sender is your own domain and mail passes DMARC on SPF *and* DKIM rather than DKIM alone — worth setting before requesting production access (§C1). A string names a different subdomain |
@@ -264,10 +286,51 @@ All configuration is one file. Nothing anywhere else needs editing.
    values. A slot you leave empty is not an error: the matching capability
    reports itself unconfigured and the rest of the product runs (docs 19).
 
+   **You only need the CLI once.** After the first deploy the same four slots
+   are settable from `/admin` → Suppliers, with the same merge rule and the
+   same refusal of unknown fields. The CLI stays because a brand-new
+   environment has nobody who can sign in yet, and because it is the only way
+   to *remove* a field — the console can write a key and never read one back,
+   so there is no reveal and no clearing (§D5, doc 23 §5).
+
    **Upgrading a deployment that predates the credentials table:**
    `make credentials-migrate env=dev` prints what it would copy out of
    Secrets Manager; add `write=1` to commit it. The source secrets are left
    in place.
+
+### D5. The `/admin` console
+
+Once the deployment is up (§E) and you can sign in, the address you put in
+`rootAdminEmail` gets an **Administration** entry in the account menu.
+Everything in it is guarded server-side; hiding the entry is a courtesy, not
+the control.
+
+| Tab | What it holds |
+|---|---|
+| **Assistant** | Provider, model, small model, endpoint; the eight gate and orchestrator knobs (sensitivity, cooldown, contributions per minute, research fan-out and deadline). Changing the model re-initialises the running agent worker within seconds |
+| **Services** | Transcription engine and language; mail provider and from-address; conference audio defaults |
+| **Suppliers** | The four credential slots: which fields are filled, when, by whom — and a box to set or rotate each |
+| **Limits** | Sign-in code and join-code limits, session/token lifetimes, retention, external contacts |
+| **Access** | The sign-in domain, and the administrator roster |
+| **History** | Every published version, newest first, with its author and note |
+
+Four things about it are worth knowing before you use it in anger:
+
+- **Every field shows the deployment's own value underneath it.** An empty box
+  means *not published — fall back to `config/kelabo.json`*, never *set to
+  empty*. That is why the fallback is displayed: without it you cannot tell "I
+  set this to `sfu`" from "`sfu` is what the config file says".
+- **Publishing needs a note, and appends a version.** Nothing is edited and
+  nothing is deleted; rolling a value back means publishing the old one again,
+  which records that too. If two administrators publish at once the second gets
+  `version_conflict` and reloads rather than overwriting the first.
+- **It tells you the truth about latency.** "Live now" means the Gateway
+  acknowledged the change; "the gateway will pick this up within a minute"
+  means it did not and the 60-second cache is carrying it. Supplier keys take
+  up to five minutes, which is their own cache.
+- **The roster is root's alone.** A granted administrator can publish and rotate
+  keys but cannot grant or revoke — otherwise they would be root after one hop.
+  Root itself is `rootAdminEmail` and changes only by a deploy.
 
 ---
 
@@ -303,6 +366,13 @@ first time.
    moment later; try the search.
 5. Create a journey, link the ended kelabo into it, and ask the journey a
    question under Reports — the answer should draw on that kelabo's minutes.
+6. Open `/admin` from the account menu and confirm the deployment recognises
+   you as root. Do this in the rehearsal rather than in production: an empty
+   or mistyped `rootAdminEmail` fails **closed**, so the symptom is a console
+   that refuses you, and the fix is a config edit plus `make backend` (§D5).
+   Publish one harmless change — bump the assistant's cooldown — and check the
+   toast says "Live now" rather than "within a minute": that is the Gateway
+   reload path working end to end.
 
 `make test` (no AWS needed) runs every package's test suite locally if you
 want the belt-and-braces check first.
@@ -317,7 +387,13 @@ When the rehearsal holds up, do the same thing at the real address:
 2. `cdk bootstrap` if prod lives in a different account/region.
 3. `make secrets env=prod` — secrets and credential slots are both per
    environment, so the §D4 `make credential-set env=prod …` writes have to be
-   repeated against `kelabo-prod-credentials`.
+   repeated against `kelabo-prod-credentials`. **Published configuration is
+   per environment too, and nothing copies it**: prod starts with nothing
+   published and runs on its own `config/kelabo.json` block, so any tuning you
+   did in the rehearsal has to be published again. `make opconfig-show
+   env=prod` tells you what it has; `make opconfig-seed env=prod` publishes
+   the config file's values in one act if you want the console to own them
+   from the start — read doc 23 §9 first, it is not the obvious default.
 4. `AWS_PROFILE=myorg make deploy env=prod`
 5. Confirm SES production access is granted (C1.3) *before* announcing it —
    sandbox mode is the classic "works for me, broken for everyone else".
@@ -355,6 +431,19 @@ Both services log single-line JSON with an `msg` field and no message
 contents — grep for `"level":"warn"` and `"level":"error"` first. For browser
 issues, the devtools console plus the failing request from the Network tab
 (status + response body) is what the issue needs.
+
+If the deployment is not behaving the way the console says it should, these are
+the lines that explain it (doc 23 §9.1):
+
+| Grep for | Means |
+|---|---|
+| `opconfig_published` | a version was published — carries who, which version, and their note |
+| `opconfig_gateway_reload_failed` | the publish saved; the Gateway did not hear about it and will catch up within a minute |
+| `opconfig_unreadable` | the config table could not be read, so the last version read successfully is still in force. **The deployment is not running what the console is showing** |
+| `credential_rotated` | a supplier key was written — carries the caller, the slot and the field *names*, never a value |
+| `admin_granted` / `admin_revoked` | the administrator roster changed |
+| `agent_model_reconfigured` | a running agent worker picked up a new model |
+| `agent_knobs_reconfigured` | a running agent worker picked up new behaviour knobs (sensitivity, cooldown, …) with the model unchanged |
 
 When you open an issue at github.com/kelabome/kelabo, include: what you did,
 what happened instead, the relevant log lines from the commands above

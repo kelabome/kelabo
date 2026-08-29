@@ -3,7 +3,8 @@
 Sequence diagrams for every key flow. Components: **SPA**, **REST** (Lambda),
 **Gateway** (ECS, hosts the server-agent worker), **agent bridge** + the developer's own coding agent (dev
 laptop), the **STT provider** (Deepgram or Soniox — [components/06-stt.md](components/06-stt.md)),
-**DynamoDB/S3**, **SES**, social **OIDC** providers.
+**DynamoDB/S3**, **SES**, social **OIDC** providers, and — in §15 — an
+**admin** (a signed-in administrator at `/admin`).
 
 Legend: `──▶` request, `◀──` response/event, `···` async/background.
 
@@ -417,3 +418,86 @@ Dev agent (bridge)                Gateway(tunnel)            DynamoDB(journeys)
 ```
 No transcript ever flows from a journey attachment; the posted outcome is
 what the journey's next kelabo — server- or dev-mode — sees in its context.
+
+---
+
+## 15. Operational configuration (docs 23)
+
+### 15a. Publishing a config version
+
+```
+ admin            SPA            REST (Lambda)          DDB config        Gateway
+ │ edit /admin ──▶│               │                      │                │
+ │ Publish + note─▶│ POST /admin/config {config, note}    │                │
+ │                │──────────────▶│ requireAdmin         │                │
+ │                │               │ zod validate ────────┤ (reject ⇒ 400, │
+ │                │               │                      │  nothing written)
+ │                │               │ Query OPCONFIG ─────▶│                │
+ │                │               │◀──── head = vN ──────│                │
+ │                │               │ PutItem V#(N+1)  ───▶│ ConditionExpression:
+ │                │               │                      │ attribute_not_exists
+ │                │               │◀── ok ───────────────│                │
+ │                │               │ opConfig.invalidate()│                │
+ │                │               │ POST /internal/config/reload ────────▶│ invalidate
+ │                │               │                      │                │ reconfigure()
+ │                │               │◀───────── {reconfigured} ─────────────│
+ │                │◀ {version, gatewayReloaded} ─────────│                │
+ │◀ "Live now" ───│               │                      │                │
+```
+
+Two things this diagram is drawn to show.
+
+**The conditional write is the append-only guarantee.** If another administrator
+published between the Query and the Put, the condition fails and the caller gets
+`409 version_conflict` — reload and publish on top of theirs. A blind retry would
+overwrite a change *and* the record of who made it.
+
+**The reload is not the mechanism.** It is best-effort: the write is already
+durable, so `gatewayReloaded: false` still means the publish succeeded, and the
+console says "the gateway will pick this up within a minute" instead of claiming
+otherwise. Other warm Lambda containers are in the same position — nothing
+signals them, and they converge on their own 60-second cache. That asymmetry
+(the publisher sees it instantly, everyone else within a minute) is the honest
+shape of this flow.
+
+### 15b. Rotating a supplier key
+
+```
+ admin            SPA            REST (Lambda)       DDB credentials
+ │ paste key ────▶│ PUT /admin/credentials/:slot {fields}
+ │                │──────────────▶│ requireAdmin      │
+ │                │               │ validateCredentialFields  (unknown ⇒ 400)
+ │                │               │ GetItem CRED#slot▶│
+ │                │               │◀── existing ──────│
+ │                │               │ MERGE {…existing, …fields}
+ │                │               │ required check on the MERGED object
+ │                │               │ PutItem ─────────▶│ (version+1, rotatedBy)
+ │                │◀ status (booleans only) ──────────│
+ │                │               │ log credential_rotated {by, slot, field NAMES}
+```
+
+No reload and no version chain: a key is not a decision anyone needs the history
+of. Both services pick it up on their **5-minute** credential cache — a different
+window from §15a's 60 seconds, and the reason "I rotated the key and it still
+fails" is usually just early.
+
+The merge is the whole point of the shape: an empty box means *leave this one
+alone*, so the form can render a slot without the operator re-pasting keys they
+are not changing, and rotating Soniox cannot silently drop Deepgram.
+
+### 15c. Granting an administrator
+
+```
+ root             SPA            REST (Lambda)          DDB config
+ │ email ────────▶│ POST /admin/roster {email}
+ │                │──────────────▶│ requireRoot ⇒ 403 for a granted admin
+ │                │               │ reject if == rootAdminEmail (already_root)
+ │                │               │ PutItem ADMIN#<email> ──▶│
+ │                │◀ {email, grantedBy} ──────────────────────│
+ │                │               │ log admin_granted
+```
+
+Root-only in both directions. A granted administrator who could grant would be
+root after one hop; one who could revoke could remove the others and then the
+record of having done so. Root itself is `rootAdminEmail` — deploy-time, and
+empty fails closed.

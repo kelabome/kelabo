@@ -8,10 +8,23 @@ credential mint + SES + OTP.
 
 ---
 
-## 1. Config file — single source of truth
+## 1. Config file — single source of truth *for CDK*
 
 `config/kelabo.json` (or `.mjs` exporting an object). CDK reads the block for
 the selected env; nothing env-specific is hard-coded.
+
+That claim is narrower than it used to be, and the narrowing is the point.
+**This file is what CloudFormation needs to build the stack.** Everything a
+running deployment might want to change — the model, the transcription engine,
+the mail transport, the agent knobs, the RTC defaults, every rate limit and TTL,
+`allowedEmailDomain`, `retentionDays` — is *published* from `/admin` into
+`kelabo-<env>-config` and appears here only as the **bootstrap** a deployment
+falls back to (docs 23). A value read at synth cannot follow a row in a table,
+which is the whole test for which side a new setting belongs on.
+
+`rootAdminEmail`, at the root of the file, is the one operational value kept
+deploy-time on purpose: it names who may publish everything else, and empty
+fails closed.
 
 ```jsonc
 {
@@ -75,9 +88,9 @@ home region + `us-east-1` (CloudFront ACM), via `crossRegionReferences: true`.
 | **DnsStack** | import existing Route53 hosted zone | creates nothing |
 | **CertStack (home region)** | ACM certs for Gateway ALB domain | DNS-validated |
 | **CertStack (us-east-1)** | ACM certs for Portal CloudFront | required in us-east-1 |
-| **DynamoDbStack** | 8 tables (kelabos, users, otp, **refresh**, history, mcp, contacts, **journeys**) + S3 archive bucket | see [08-database.md](../08-database.md) |
+| **DynamoDbStack** | 10 tables (kelabos, users, otp, **refresh**, history, mcp, contacts, **credentials** + its CMK, **journeys**, **config**) + S3 archive bucket | see [08-database.md](../08-database.md) |
 | **SesStack / config** | SES identity + from-address; (sandbox in dev). Not synthesized when `mail.provider` is not `ses` | OTP email |
-| **LambdaStack** | REST API Lambda (Node20); IAM (DynamoDB RW incl. refresh, SES send, Secrets read incl. social OIDC); **no `transcribe:*`** | control plane only |
+| **LambdaStack** | REST API Lambda (Node20); IAM (DynamoDB RW incl. refresh and **config**, credentials read+write, SES send, Secrets read incl. social OIDC); **no `transcribe:*`** | control plane only |
 | **ApiGatewayStack** | HTTP API `/{proxy+}` → Lambda | no JWT authorizer |
 | **GatewayEcsStack** | ALB + Fargate service (`desiredCount:1`, sized from `config.gateway` — **0.5 vCPU / 1 GB** by default, configurable), `/health`, ALB idle 240s, DockerImageAsset from `gateway/`; **the server-agent worker runs in this task** | the one ECS |
 | **PortalCloudFrontStack** | S3 (OAC) + CloudFront; a single **`/api*` behavior** to the HTTP API with a CloudFront function stripping the `/api` prefix; SPA-fallback function rewrites non-dotted URIs to `/index.html`; deploy `spa/dist`; A-record portal subdomain | `webAclId` when `allowIps` is set |
@@ -245,19 +258,36 @@ Dev may use inline values in local profiles; prod always references secrets.
 
 - **REST Lambda:** DynamoDB RW (kelabos/users/otp/refresh/mcp/contacts/journeys),
   read history + read S3 archive (plus narrow `dynamodb:DeleteItem` on history and
-  `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`
-  **when `mail.provider` is `ses`**, Secrets read (cookie-key, oidc-\*,
-  api-origin), and `dynamodb:GetItem` on the credentials table in **two
-  statements** — the whole item for `CRED#stt`/`CRED#mail`, whose values it
-  uses, and for `CRED#llm`/`CRED#rtc` only the non-secret attributes
+  `s3:DeleteObject` on archive objects for `/records/purge`), the **config**
+  table RW (it publishes op-config versions and owns the admin roster, docs 08
+  §6d), Secrets read (cookie-key, oidc-\*, api-origin), and the credentials
+  table in **three statements** plus encrypt **and** decrypt on its KMS key.
+
+  `ses:SendEmail` is now **unconditional**, fenced by `StringLike` on
+  `*@<sending domain>` rather than `StringEquals` on the exact address. Both
+  changed because mail became publishable, and both show the same rule: **a
+  deploy-time IAM decision cannot follow a run-time value.** A deployment whose
+  config still said `mailersend` while the published version said `ses` would
+  hold no send permission and fail every sign-in code, with the publish itself
+  reporting success (docs 23 §8).
+
+  The three credential statements: whole items for `CRED#stt`/`CRED#mail`, whose
+  values it uses; `CRED#llm`/`CRED#rtc` fenced to the non-secret attributes
   (`dynamodb:Attributes` = `CREDENTIAL_STATUS_ATTRS` +
-  `dynamodb:Select = SPECIFIC_ATTRIBUTES`), which answers "is it configured?"
-  without the key being readable here (docs 02 §6, docs 20 §6.1) — plus
-  **decrypt only** on its KMS key. Deliberately **no `Scan`** (the one call that
-  returns every credential at once, and it would bypass the attribute fence),
-  **no `DeleteItem`** (a credential is replaced, never removed) and **no
-  `PutItem`** (master has no credential-write route; the operator scripts run
-  under the operator's own credentials). No `transcribe:*`.
+  `dynamodb:Select = SPECIFIC_ATTRIBUTES`); and — since `/admin` gained a
+  Suppliers tab — whole-item `GetItem` plus `PutItem` on all four slots.
+  **IAM unions `Allow`, so the third makes the attribute fence inert.** The
+  property it describes is no longer true and cannot be while a
+  credential-write console exists; the first two are kept unchanged because they
+  are the exact description of what this role would need if the console were
+  removed.
+
+  What survives: **no `Scan`** (the one call that returns every credential at
+  once), **no `Query`**, **no `DeleteItem`** (a credential is replaced, never
+  removed), and the slots enumerated from `CREDENTIAL_SLOTS` rather than matched
+  as `CRED#*`, so an undesigned partition fails closed. Above IAM, the
+  application limit that replaced the fence: **no route returns a credential
+  value** (docs 02 §6, docs 23 §5). No `transcribe:*`.
 - **Gateway task role:** DynamoDB — kelabos RW, journeys RW (journey reports +
   context + join settling, docs 20), history RW (incl.
   `participant-index`), mcp read + narrow `dynamodb:PutItem` (persists rotated
@@ -267,8 +297,13 @@ Dev may use inline values in local profiles; prod always references secrets.
   only); `dynamodb:GetItem` on the credentials table fenced to exactly
   `CRED#llm` and `CRED#rtc` (the agent and the SFU proxy run here) plus
   **decrypt only** on its KMS key — it holds no write of any kind, so a
-  compromised task cannot overwrite a working key with a blank. No separate
-  agent role.
+  compromised task cannot overwrite a working key with a blank; and
+  `dynamodb:Query` on the **config** table fenced by `ForAllValues:StringEquals`
+  on `dynamodb:LeadingKeys = ["OPCONFIG"]`, read-only, so it consumes published
+  settings and never publishes them. `Scan` is structurally impossible there
+  rather than merely withheld — it cannot be constrained by `LeadingKeys` at
+  all, so granting it would hand this internet-facing task the admin roster that
+  shares the table. No separate agent role.
 
 ---
 

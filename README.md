@@ -116,6 +116,12 @@ lands on a filterable timeline. Full design: [docs/20-journey.md](docs/20-journe
   one. No Cloudflare creds? Peer-to-peer calling still works. The capability
   ladder is a design rule, not an accident:
   [docs/19-optional-capabilities.md](docs/19-optional-capabilities.md).
+- **An admin console, so day two is not a deploy.** `/admin` publishes the
+  model, the transcription engine, the mail transport, every rate limit and TTL,
+  and holds the supplier keys — live in seconds, versioned, with an author and a
+  note on every change. What still needs a deploy is what CloudFormation reads
+  at synth: the account, the domains, the machine sizes.
+  [docs/23-operational-configuration.md](docs/23-operational-configuration.md).
 
 ## How transcription works
 
@@ -183,10 +189,17 @@ make help             # everything is a make target
 ## Deploying for real
 
 You need an AWS account, a Route 53 domain, and API keys for an STT provider
-(Soniox or Deepgram) and an LLM provider (assistant + minutes). The
+(Soniox or Deepgram) and an LLM provider (assistant + minutes). Put your own
+address in `rootAdminEmail` — it is the one identity that can administer the
+deployment, it is deploy-time on purpose, and leaving it empty fails closed, so
+you get a console that refuses everyone. The
 [self-hosting guide](docs/self-hosting.md) walks from an empty account to
 `kelabo.mycompany.com`. Keys you skip just switch their capability off —
-the deployment tells the app what it can run, and the app offers exactly that.
+the deployment tells the app what it can run, and the app offers exactly that —
+and you can fill them in later from `/admin` without touching a terminal.
+
+From then on, upgrades are `git pull && make deploy`; changing how the
+deployment *behaves* is a page in the app.
 
 ## License
 

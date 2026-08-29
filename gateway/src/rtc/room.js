@@ -1,5 +1,6 @@
 import { RTC_MODES } from "@kelabo/contracts";
 import { getMeta, updateMeta } from "../db.js";
+import { effectiveConfig, effectiveConfigNow } from "../opconfig.js";
 import { meshHasRoom, meshUnits } from "./capacity.js";
 
 // Per-kelabo conference presence. Deliberately in-process and unpersisted, for
@@ -19,8 +20,16 @@ import { meshHasRoom, meshUnits } from "./capacity.js";
  */
 
 export function createRtcRoom(c) {
-  const meshMax = c.config.rtc.meshMaxParticipants;
-  const disconnectGraceMs = Math.max(0, (c.config.rtc.disconnectGraceSeconds ?? 0) * 1000);
+  // The mesh cap and the grace window are published operational config
+  // (docs 23), resolved per decision rather than captured here — a value
+  // captured at construction would pin the bootstrap for the task's whole
+  // life, which on a desiredCount-1 service is until the next deploy. The
+  // sync call sites (`setMedia`, `handleDisconnect` — both run inside
+  // callbacks that cannot await) read the last-known fold via
+  // `effectiveConfigNow`, which converges on the same 60-second cache.
+  const meshMaxNow = () => effectiveConfigNow(c).rtc.meshMaxParticipants;
+  const disconnectGraceMsNow = () =>
+    Math.max(0, (effectiveConfigNow(c).rtc.disconnectGraceSeconds ?? 0) * 1000);
   // `${kelaboId}\n${participantId}` -> pending eviction timer. A participant
   // whose last SSE stream closed keeps their seat for the grace window, so an
   // EventSource blip or a reload is invisible to the room instead of a full
@@ -55,7 +64,9 @@ export function createRtcRoom(c) {
       e.code = "rtc_mode_unavailable";
       throw e;
     }
-    return RTC_MODES.includes(meta?.rtcMode) ? meta.rtcMode : c.config.rtc.defaultMode;
+    // The published default, for the one case this fallback serves: a kelabo
+    // whose META predates the field. A kelabo that HAS a mode keeps it.
+    return RTC_MODES.includes(meta?.rtcMode) ? meta.rtcMode : (await effectiveConfig(c)).rtc.defaultMode;
   }
 
   function ensureRoom(kelaboId, mode) {
@@ -111,7 +122,9 @@ export function createRtcRoom(c) {
     // would revoke the peer-to-peer guarantee the host chose, so the join is
     // refused instead. Counted in units — participants plus active screen
     // shares (see capacity.js). Rejoining an existing seat never counts
-    // against it.
+    // against it. The cap is the published value, resolved here — the same one
+    // the REST entitlement told the client — not a copy captured at boot.
+    const meshMax = (await effectiveConfig(c)).rtc.meshMaxParticipants;
     if (!rejoining && !meshHasRoom({ mode: r.mode, meshMax, units: meshUnits(r.peers.values()) })) {
       return { ok: false, code: "mesh_room_full", status: 409, detail: { meshMax } };
     }
@@ -222,6 +235,7 @@ export function createRtcRoom(c) {
     const r = room(kelaboId);
     const p = r?.peers.get(participantId) ?? null;
     if (!p) return null;
+    const meshMax = meshMaxNow();
     if (
       media.screen === true &&
       !p.media.screen &&
@@ -309,6 +323,7 @@ export function createRtcRoom(c) {
       leave(kelaboId, participantId, "disconnected").catch((err) =>
         c.logError("rtc_disconnect_cleanup_failed", err, { kelaboId, participantId }),
       );
+    const disconnectGraceMs = disconnectGraceMsNow();
     if (disconnectGraceMs <= 0) {
       evict();
       return;
@@ -368,6 +383,7 @@ export function createRtcRoom(c) {
     if (r.mode === "mesh") return { ok: true, peers: r.peers.size, already: true };
 
     const units = meshUnits(r.peers.values());
+    const meshMax = (await effectiveConfig(c)).rtc.meshMaxParticipants;
     // `adding: 0` — nobody is joining. This asks whether the room as it stands
     // fits, which is a different question from the one `join` asks.
     if (!meshHasRoom({ mode: "mesh", meshMax, units, adding: 0 })) {

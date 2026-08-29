@@ -114,9 +114,18 @@ session against their private codebase.
   tagged).
 - **Stack:** Vite + React + Tailwind (frontend). **Node.js + pure JS**
   (not TS) where possible, front and back.
-- **Infra:** AWS CDK, **one config file** drives everything (no hard-coded values
-  in source). Three standalone environments: **dev / staging / prod**. Every
-  resource **tagged with the endpoint name** (e.g. `dev`).
+- **Infra:** AWS CDK, **one config file** drives the *stack* (no hard-coded
+  values in source). Three standalone environments: **dev / staging / prod**.
+  Every resource **tagged with the endpoint name** (e.g. `dev`).
+- **Operational settings are published, not deployed** (docs 23). The test is
+  whether CloudFormation needs the value at synth: an account, a region, a
+  domain, the gateway's size — config file. A model, a rate limit, a TTL, a
+  provider — a row in `kelabo-<env>-config`, changed from `/admin` in seconds.
+  Published wins, the config file is the bootstrap, so a deployment that has
+  published nothing behaves exactly as its file says.
+- **Who may publish is deploy-time and only deploy-time.** `rootAdminEmail`,
+  empty fails closed. Everything else operational is editable from a web page,
+  so the one value governing who may edit must not be.
 
 ---
 
@@ -304,7 +313,10 @@ Connector (dev laptop) ── WSS /rig ──────────►   · ca
   bounded — the 15-minute cap is irrelevant here. It reaches the Gateway through
   authenticated internal endpoints (`POST /internal/kelabos/:id/end`,
   `/internal/kelabos/:id/minutes`) so kelabo lifecycle and agent jobs signaled via
-  REST take effect on the stateful data plane.
+  REST take effect on the stateful data plane. `POST /internal/config/reload` is
+  the one that is not about a kelabo: it tells the Gateway an administrator
+  published operational config, and is best-effort — the task converges on the
+  60-second cache anyway (docs 23 §6.1).
 - **Data plane (Gateway, the one ECS):** holds the in-process `kelaboId→WS/SSE`
   maps, terminates long-lived WSS tunnels + SSE streams, runs the server-agent in an
   in-task worker with no time cap, writes archives. `desiredCount:1` — see
@@ -318,8 +330,9 @@ Connector (dev laptop) ── WSS /rig ──────────►   · ca
 
 DynamoDB tables (full schema: `docs/08-database.md`): `kelabos` (single-table per
 kelabo: `META` + `UTT#` / `CONTRIB#` / `MINUTES` / `PROMOTION`), `users`, `otp`,
-`refresh`, `history`, `mcp`; an S3 archive bucket holds full transcripts past the
-400KB item cap. Every item carries `tenantId`.
+`refresh`, `history`, `mcp`, `contacts`, `credentials`, `journeys`, `config`
+(published operational settings + the admin roster); an S3 archive bucket holds
+full transcripts past the 400KB item cap. Every item carries `tenantId`.
 
 ---
 
@@ -341,10 +354,18 @@ changing callers.
 
 ---
 
-## 11. Config: one file, no hard-coding, dev/staging/prod, tagged
+## 11. Config: two tiers — what CDK builds, what the deployment publishes
 
 `config/kelabo.json` (or `.mjs` exporting an object) is the single source of
-truth consumed by CDK. Nothing environment-specific is hard-coded in source.
+truth **consumed by CDK**. Nothing environment-specific is hard-coded in source.
+
+It is no longer the single source of truth for the *running* deployment. Every
+value below that application code reads at request time — `llm`, `stt`, `mail`,
+the agent knobs, `rtc`, `otp`, `joinCode`, `auth`, `allowedEmailDomain`,
+`retentionDays` — is **publishable operational config** (docs 23) and appears
+here only as the bootstrap a deployment falls back to until somebody publishes.
+What genuinely stays deploy-time is what CloudFormation reads at synth, plus
+`rootAdminEmail`.
 
 ```jsonc
 {
@@ -368,8 +389,11 @@ Rules baked into CDK:
 - **Every resource tagged** `endpoint=<env>` (plus `app=kelabo`) via
   `Tags.of(app).add(...)` at the app root.
 - Secrets are **referenced by name**, never inlined. Supplier keys are not in
-  config at all — the config picks the *provider*, the key is a row in the
-  credentials table addressed by slot (`make credential-set`, docs 08 §6c).
+  config at all — a *publish* picks the provider, and the key is a row in the
+  credentials table addressed by slot, set from `/admin` → Suppliers or, for a
+  deployment nobody can sign in to yet, `make credential-set` (docs 08 §6c).
+- **`rootAdminEmail`** at the root of the file: the one identity that may
+  administer the deployment. Empty fails closed.
 - Multi-tenant slots in by promoting `tenantId` from constant to per-user.
 
 ---
@@ -728,7 +752,7 @@ guarantee people joined under):
 ### The three decisions worth restating
 
 1. **The mesh cap refuses; it does not downgrade.** Past
-   `rtc.meshMaxParticipants` (default 6) a joiner gets `409 mesh_room_full` and
+   `rtc.meshMaxParticipants` (default 5, publishable) a joiner gets `409 mesh_room_full` and
    keeps the board and transcript. Spilling over to the SFU would quietly break
    the promise the host chose.
 2. **`mesh` secures media only.** Transcription, the board, the agent and persistence
@@ -763,4 +787,8 @@ in-process (`state.rtcRooms`), like `sseSubscribers`; the durable half is
 single insertion point on both transports, the SFU proxy is track-generic,
 `ParticipantTile` reserves a fixed media box, and `config.rtc.video` is plumbed
 end-to-end. Video was added exactly this way — camera and screen share are each
-one more published track, and `config.rtc.video` now defaults to `true`.
+one more published track, and `rtc.video` defaults to `true`. It is publishable
+op-config now (docs 23) — and the canonical reason that fold's "unset" sentinel
+is `null` rather than falsiness: `false` means *audio only* and a truthiness
+check would discard it. Like every `rtc.*` default it applies to a **new**
+kelabo; an existing one keeps the `rtcMode` stamped on its META.

@@ -12,6 +12,7 @@ import { ensureConfig } from "../src/config.js";
 import { createDb } from "../src/db.js";
 import { createRecords } from "../src/records.js";
 import { createSecrets } from "../src/secrets.js";
+import { createOpConfig } from "../src/opconfig.js";
 import { createCloseAccount } from "../src/closeAccount.js";
 
 const args = process.argv.slice(2);
@@ -27,7 +28,11 @@ const config = await ensureConfig();
 const db = createDb({ config });
 const records = createRecords({ config, db });
 const secrets = createSecrets({ region: config.region });
-const closeAccount = createCloseAccount({ config, db, records, secrets });
+// The retention window a cancelled kelabo is stamped with is published
+// operational config (docs 23); without this the script would stamp the
+// bootstrap value on a deployment whose console says otherwise.
+const opConfig = createOpConfig({ config, db });
+const closeAccount = createCloseAccount({ config, db, records, secrets, opConfig });
 
 try {
   const report = await closeAccount.close({ identity, dryRun: !apply });

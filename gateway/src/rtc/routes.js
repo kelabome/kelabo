@@ -14,6 +14,7 @@ import {
 import { parseCookies, verifyParticipantCookie } from "../cookies.js";
 import { readJson, send } from "../caption.js";
 import { getMeta } from "../db.js";
+import { effectiveConfig } from "../opconfig.js";
 import { RtcError, STUN_ONLY } from "./cloudflare.js";
 
 // SDP payloads are much larger than a caption; 512 KiB comfortably fits a
@@ -162,11 +163,17 @@ async function join(c, req, res) {
     return send(res, result.status, { error: result.code, ...(result.detail ?? {}) });
   }
 
+  // Published operational config folded over this task's own (docs 23) —
+  // never `c.config.rtc` directly, or the published values would reach the
+  // REST-side entitlement while this task kept answering with the bootstrap,
+  // and the two would disagree about the same room.
+  const { rtc } = await effectiveConfig(c);
+
   // ICE is best-effort: without it the SFU still works on most networks over
   // STUN, and a mesh call on a permissive network still connects directly.
   let ice = STUN_ONLY;
   try {
-    ice = await c.rtc.iceServers(c.config.rtc.iceTtlSeconds);
+    ice = await c.rtc.iceServers(rtc.iceTtlSeconds);
   } catch (err) {
     c.logError("rtc_ice_failed", err, { kelaboId });
   }
@@ -180,9 +187,9 @@ async function join(c, req, res) {
     // it the credentials minted here silently expire mid-call, and the first
     // ICE restart past the hour gathers with dead TURN and fails on exactly
     // the networks that needed the relay.
-    ttlSeconds: c.config.rtc.iceTtlSeconds,
-    meshMax: c.config.rtc.meshMaxParticipants,
-    video: c.config.rtc.video,
+    ttlSeconds: rtc.iceTtlSeconds,
+    meshMax: rtc.meshMaxParticipants,
+    video: rtc.video,
   });
 }
 
@@ -197,8 +204,9 @@ async function ice(c, req, res) {
   const ctx = await context(c, req, res, rtcIceBodySchema);
   if (!ctx) return undefined;
   try {
-    const out = await c.rtc.iceServers(c.config.rtc.iceTtlSeconds);
-    return send(res, 200, { iceServers: out.iceServers, ttlSeconds: c.config.rtc.iceTtlSeconds });
+    const { rtc } = await effectiveConfig(c);
+    const out = await c.rtc.iceServers(rtc.iceTtlSeconds);
+    return send(res, 200, { iceServers: out.iceServers, ttlSeconds: rtc.iceTtlSeconds });
   } catch (err) {
     return fail(c, res, err, "ice", { kelaboId: ctx.kelaboId });
   }

@@ -65,8 +65,12 @@ export function normalizeJoinCode(raw) {
   return clean;
 }
 
-export function createJoinCodes({ config, db }) {
-  const dials = config.joinCode;
+export function createJoinCodes({ config, db, opConfig }) {
+  // Published operational config (contracts/src/opconfig.js), resolved per
+  // call. `redeemPerIp*` is the control that actually bounds guessing, so it is
+  // also the one an operator most needs to tighten *while* a deployment is
+  // being fished — which is precisely what waiting for a redeploy prevented.
+  const dialsNow = async () => (opConfig ? (await opConfig.effective()).joinCode : config.joinCode);
 
   /**
    * Mint a code for a kelabo. The caller holds a participant cookie for it —
@@ -83,6 +87,7 @@ export function createJoinCodes({ config, db }) {
     // Minting does not invalidate the previous code, so without this a room
     // could hold hundreds of live codes at once and widen the guess surface by
     // exactly that factor.
+    const dials = await dialsNow();
     const counter = await db.bumpJoinCodeCounter(`k:${kelaboId}`, 3600);
     if ((counter?.count || 0) > dials.mintPerKelaboPerHour) throw err(429, "rate_limited");
 
@@ -117,6 +122,7 @@ export function createJoinCodes({ config, db }) {
    * the person holding it is by definition someone who does not have a link.
    */
   async function redeem({ code: raw, ip }) {
+    const dials = await dialsNow();
     // Counted before the code is even parsed: an attacker who could spend
     // malformed guesses for free would simply send malformed guesses.
     const counter = await db.bumpJoinCodeCounter(`ip:${ip || "unknown"}`, dials.redeemPerIpWindowSeconds);

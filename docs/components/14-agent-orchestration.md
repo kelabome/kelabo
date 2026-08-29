@@ -586,7 +586,11 @@ Model routing by ROLE: **main = `modelConfig.smallModel`**; **sub-agents =
 stays regardless of which models are configured — today **both are
 `deepseek-v4-flash`**, which is cheap enough to run the orchestrator on every
 trigger and fast enough for the worker loop; pointing `model` at a stronger
-model is a config change, not a code change. Sub-agent context is never shared
+model is a **publish**, not a code change and not a deploy — `/admin` →
+Assistant, applied to a running worker in seconds (docs 23). `smallModel` left
+empty means "use `model`", and `llm.baseUrl` moves with the provider:
+`resolveModelConfig` reads both it and the gateway's older `openaiBaseUrl`, so
+either name resolves. Sub-agent context is never shared
 between sub-agents — only each one's `SubAgentResult` returns to the main thread.
 
 ---

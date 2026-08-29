@@ -80,8 +80,10 @@ The client must never *infer* a capability from a sibling component's failure �
 that is how a Deepgram error became a frozen mic. The decision has three
 inputs, and all three live server-side:
 
-1. **Deployment config** — is the credential slot filled, is the feature
-   compiled in (`rtcMode`, `mcpEnabled`, …).
+1. **Resolved configuration** — is the credential slot filled, is the feature
+   compiled in (`rtcMode`, `mcpEnabled`, …). "Resolved", not "deployment":
+   published operational config folded over the deployment's own (docs 23), so
+   which STT engine a room reports is whatever was last published.
 2. **Policy** — what this tier/room/participant is allowed
    (`guestTranscriptAccess`, guest rooms with no assistant, quotas).
 3. **Runtime health** — the token mint failed, the provider is down.
@@ -97,15 +99,26 @@ Anything short of a definitive "no such item" answers `on` — a
 probe hiccup must never switch a working feature off.
 
 That probe reads the row through a **projection that cannot contain the
-credential** (`CREDENTIAL_STATUS_ATTRS`, docs 08 §6c), and for `assistant` and
-`rtc` that is the only read the control plane's IAM role is permitted at all —
-so "is this configured?" is answerable here without the LLM key or the
-Cloudflare app secret being readable here (docs 02 §6, docs 20 §6.1). The
-question a capability map asks is deliberately smaller than the permission to
-read the answer. New capabilities join
+credential** (`CREDENTIAL_STATUS_ATTRS`, docs 08 §6c). It used to be the *only*
+read the control plane's IAM role was permitted for `assistant` and `rtc`; since
+`/admin` gained a credential-write console that fence no longer binds (docs 02
+§6, docs 23 §5). The probe stays on the projected path anyway, and now by
+choice: a capability map must not read a live key to answer a yes/no, and
+keeping it there is what keeps that path exercised. The question a capability map
+asks is deliberately smaller than the permission to read the answer. New capabilities join
 this map rather than inventing parallel booleans; `transcriptAccess` (a
 per-participant *policy*, not a deployment capability) stays on
 `/caption/history` beside the data it governs.
+
+### 3.1 A capability can be switched on without a deploy
+
+Filling a credential slot from `/admin` → Suppliers moves a rung from `off` to
+`on` at run time. Two windows apply and they are different: the credential caches
+are **5 minutes**, the operational-config cache is **60 seconds**. The map itself
+is computed per `GET /kelabos/:id`, so the change appears the next time somebody
+opens a room rather than in one already open — which is the right granularity,
+since a capability that appeared mid-kelabo would change what the room can do
+without anyone in it deciding to.
 
 ## 4. Public repo = mechanism, private repo = policy
 

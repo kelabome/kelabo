@@ -158,6 +158,42 @@ export function createCredentials({ db, now = () => Date.now(), ttlMs = 5 * 60_0
   }
 
   /**
+   * The same status, derived from the **whole** row — so `fields` and `unknown`
+   * are populated.
+   *
+   * This exists because of the cost `describe()` documents above: read through
+   * the projection and `fields` comes back all-false, so the Suppliers console
+   * would render "soniox: not set, deepgram: not set" over a slot that is
+   * correctly filled. That is worse than showing nothing — it is the exact
+   * misreading per-field detail was added to prevent, and an operator acting on
+   * it would paste a key over a working one.
+   *
+   * It is only answerable because this deployment has a credential-write
+   * console, and the grant that serves it (`infra/lib/lambda-stack.js`, the
+   * third statement) gives this role whole-item `GetItem` on every slot. On a
+   * build with no such console the attribute fence binds and this read is
+   * AccessDenied on `llm` and `rtc` — which is why it degrades to the blank
+   * status rather than throwing, and why `exists()` and `describe()` stay on
+   * the projected path regardless: the capability map must not read a live key
+   * to answer a yes/no, and keeping them there is what keeps that path
+   * exercised.
+   *
+   * **Still never returns the value.** `credentialStatus` derives booleans from
+   * it and discards it; there is no path from here to key material.
+   */
+  async function describeFull(slot) {
+    try {
+      return credentialStatus(slot, await getItem(slot));
+    } catch {
+      return credentialStatus(slot, null);
+    }
+  }
+
+  async function describeAllFull() {
+    return Promise.all(CREDENTIAL_SLOTS.map((slot) => describeFull(slot)));
+  }
+
+  /**
    * Write a credential.
    *
    * A plain overwrite, and the version is read-then-incremented rather than
@@ -189,5 +225,5 @@ export function createCredentials({ db, now = () => Date.now(), ttlMs = 5 * 60_0
     return credentialStatus(slot, item);
   }
 
-  return { get, getRaw, exists, describe, describeAll, put, forget };
+  return { get, getRaw, exists, describe, describeAll, describeFull, describeAllFull, put, forget };
 }

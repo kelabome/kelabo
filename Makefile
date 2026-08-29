@@ -14,6 +14,7 @@ STACK_PREFIX := kelabo-$(env)
 
 .PHONY: help deploy infra docker gateway restart backend frontend synth secrets bootstrap test check \
 	origin-secret credential-set credentials-migrate credentials-show \
+	opconfig-seed opconfig-show \
 	allow-list allow-ip allow-rm \
 	agent-login agent-pack agent-publish agent-release agent-tarball connector-install install-connector install-oc-connector \
 	install-cc-connector uninstall-connector uninstall-oc-connector uninstall-cc-connector
@@ -37,7 +38,7 @@ help: ## show this help
 	@awk 'BEGIN{FS=":.*## "} /^(agent-login|agent-pack|agent-publish|agent-release):.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "deploy (needs AWS creds + config/kelabo.json):"
-	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets|credential-set|credentials-migrate|credentials-show):.*## /{printf "  %-19s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets|credential-set|credentials-migrate|credentials-show|opconfig-seed|opconfig-show):.*## /{printf "  %-19s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "access control (allowIps — empty means open):"
 	@awk 'BEGIN{FS=":.*## "} /^(allow-list|allow-ip|allow-rm):.*## /{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -106,6 +107,27 @@ credentials-show: ## print which credential slots this env has set (never the va
 	@aws dynamodb scan --table-name kelabo-$(env)-credentials --region $(REGION) \
 	  --projection-expression "slot,version,rotatedAt,rotatedBy" \
 	  --query "Items[].{slot:slot.S,version:version.N,rotatedBy:rotatedBy.S}" --output table
+
+# Publish this env's CURRENT config/kelabo.json values as an op-config version,
+# handing ownership of them to /admin. Dry until write=1.
+#
+# Most deployments should NOT run this: an unpublished field already falls back
+# to kelabo.json and /admin already displays it. What this buys is the console
+# owning the values from then on — and the cost is that kelabo.json stops
+# affecting whatever it publishes. The script says so again before it writes.
+#
+#   make opconfig-seed env=dev                                # dry run
+#   make opconfig-seed env=dev groups="llm,agent" write=1     # part of it
+#   make opconfig-seed env=dev write=1 by=you@example.com     # all of it
+opconfig-seed: ## publish current kelabo.json values as an op-config version (dry unless write=1)
+	@cd rest-api && node scripts/seed-opconfig.mjs $(env) $(if $(write),--write,) \
+	  $(if $(by),--by=$(by),) $(if $(groups),--groups=$(groups),)
+
+opconfig-show: ## print the op-config versions this env has published
+	@aws dynamodb query --table-name kelabo-$(env)-config --region $(REGION) \
+	  --key-condition-expression "PK = :pk" \
+	  --expression-attribute-values '{":pk":{"S":"OPCONFIG"}}' \
+	  --query "Items[].{version:version.N,by:publishedBy.S,note:note.S}" --output table
 
 synth: ## cdk synth (offline-safe)
 	cd infra && npx cdk synth -c env=$(env)

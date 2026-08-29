@@ -56,6 +56,7 @@ SSE subscriber sets); (b) it terminates **long-lived WSS + SSE**; (c) it runs th
 | `/internal/kelabos/:id/cancel`, `.../reschedule` | POST | REST Lambda signals a scheduled kelabo cancelled / rescheduled | internal app JWT |
 | `/internal/kelabos/:id/ring`, `.../ring/answer`, `.../ring/cancel` | POST | REST Lambda asks the Gateway to deliver / answer / cancel a ring over presence streams (docs 18 §6) | internal app JWT |
 | `/internal/journeys/:id/report` | POST | REST Lambda asks for a journey report to be generated (docs 20 §6.1) — §6a | internal app JWT |
+| `/internal/config/reload` | POST | REST Lambda signals that operational config was published: re-read it and re-init the agent worker (§6b, docs 23) | internal app JWT |
 
 That's the whole surface. Board history backfill is served by the **REST API**
 (`GET /kelabos/:id/board`), not here — the Gateway only streams the live tail. The
@@ -75,7 +76,12 @@ Lambda); anything else gets 401.
 | `promotedByKelabo` | `Map<kelaboId, {runtime, sessionRef, workspace, …}>` | which local agent session is bound (dev mode); runtime-agnostic |
 | `agentWorkers` | `Map<kelaboId, WorkerHandle>` | in-task agent context per active server-mode kelabo |
 
-All ephemeral; durable state lives in DynamoDB/S3. On task restart, agent bridges
+All ephemeral; durable state lives in DynamoDB/S3.
+
+One further piece of in-process state is **not** per-kelabo: `c.opConfig`, the
+60-second cache over the published operational configuration (§6b). Unlike
+everything above it survives a kelabo ending, and unlike everything above a
+failed read keeps serving the last good value rather than emptying. On task restart, agent bridges
 reconnect (`register`), browsers re-open EventSource + backfill via REST, and
 agent context reloads from the kelabos table.
 
@@ -196,7 +202,11 @@ Tests: `gateway/test/roster.mjs`.
 - One worker context per active server-mode kelabo (`agentWorkers`); holds the
   rolling transcript window and can keep an in-flight search alive (no 15-min cap).
 - Streams partial Contributions to the SSE hub as they arrive (direct local call).
-- Concurrency cap per task; if exceeded, runs queue. Interface + internals in
+- Concurrency cap per task; if exceeded, runs queue. The cap itself is a
+  published value now (`agent.maxConcurrentRuns`, `0` = unlimited).
+- `ensureWorker()` resolves the model **and** the gate/orchestrator knobs from
+  published config on every call and re-inits the worker when either changed;
+  `reconfigure()` pushes a change into a *running* worker on demand (§6b). Interface + internals in
   [05-agent-mcp.md](./05-agent-mcp.md).
 - **Scale-out (future):** the worker moves to a dedicated agent ECS service sharded by the same
   kelabo affinity as the Gateway; the Gateway then only fans out. Same
@@ -218,11 +228,12 @@ the LLM secret, the live agent context, the tunnel, and the archive hook.
   caps and limits, docs 20 §6.2, unlike the unbounded main-agent thread), calls
   the LLM via `agent/llm.js`, and writes the `REPORT#` row back `ready` or
   `failed` — never left `pending`. This runs here and not in rest-api because
-  only this task role can read the LLM key: rest-api's role may `GetItem`
-  `CRED#llm` **only** through the non-secret `CREDENTIAL_STATUS_ATTRS`
-  projection (a `dynamodb:Attributes` + `dynamodb:Select` fence, the DynamoDB
-  equivalent of `DescribeSecret` without `GetSecretValue`), which answers "is
-  the assistant configured?" and nothing else — docs 20 §6.1.
+  the LLM credential is used where the call is made. rest-api's role *could*
+  read `CRED#llm` in fact since it gained a credential-write console (docs 08
+  §6c, docs 23 §5) — the attribute fence that once made this a hard boundary no
+  longer binds — but the arrangement stands on its own terms, and reversing it
+  to follow a grant that widened for an unrelated reason would be the wrong
+  lesson. docs 20 §6.1.
 - **Agent context push** — `agent/journeyContext.js`, sibling to `history.js`,
   loaded in `runner.js`'s `ensureContext()` on every turn, no opt-in flag. For
   up to `JOURNEY_LIMIT = 3` linked journeys (found via the kelabo's own
@@ -252,6 +263,42 @@ the LLM secret, the live agent context, the tunnel, and the archive hook.
   (`archivePending`/`resuming`): a `SETTLED#<kelaboId>` marker written with
   `attribute_not_exists(SK)` means a resumed end bumps nobody twice
   (docs 20 §10).
+
+---
+
+## 6b. Operational configuration (docs 23)
+
+`gateway/src/opconfig.js`. One cache per task over `PK = OPCONFIG` in
+`kelabo-<env>-config`, 60-second TTL, `Query` only and fenced in IAM to that one
+partition — the admin roster shares the table and is the control plane's alone.
+`Scan` is not merely withheld: it cannot be constrained by
+`dynamodb:LeadingKeys`, so a Scan grant would hand this internet-facing task the
+list of every identity that may reconfigure the deployment.
+
+**Read `resolved()`, never `current()`.** `current()` is the published document,
+in which every unpublished field is `""` or `null`; reading a field off it
+directly is how a deployment that published only its model ends up running with
+no cooldown and no deadline. `resolved()` folds it over this task's own
+environment config, which is what every consumer wants. Consumers go through
+`effectiveConfig(c)` — or `effectiveConfigNow(c)`, the last-known fold, for the
+few call sites that live inside a callback and cannot await (a stream's `close`
+handler scheduling an eviction) — and **never** `c.config.rtc.x` directly:
+a direct read does not fail, it silently pins the bootstrap, and
+`gateway/test/opconfig.mjs` reads the sources to keep that from regressing.
+
+A read that fails serves the **last version read successfully**, never the seeded
+defaults — a task that silently reverted to bootstrap values mid-call would be
+far harder to diagnose than one running slightly stale settings.
+
+**The reload is an optimisation of the wait, not the mechanism.**
+`POST /internal/config/reload` invalidates the cache and calls
+`agentDispatcher.reconfigure()`. The task converges within the TTL whether or not
+that call arrives, which is why the control plane treats a failure as a log line.
+What it buys is the case the TTL covers badly: `ensureWorker` only reconfigures
+when it is called, so in a **quiet kelabo** a published model change would sit
+unapplied for as long as nobody spoke. The route carries no body — it is a "look
+again", not a value — so nothing an administrator typed reaches this task except
+through the table.
 
 ---
 

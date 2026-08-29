@@ -14,8 +14,8 @@ installs nothing but esbuild.
 
 | Dir | What | Runtime |
 |---|---|---|
-| `config/` | `loadConfig.mjs` — single source of truth for every env-specific value | build/deploy time |
-| `contracts/` | `@kelabo/contracts`: constants, zod schemas, WSS frames, `[LLM_CON]` parsing | shared |
+| `config/` | `loadConfig.mjs` — everything CDK needs at synth, and the **bootstrap** for everything else (docs 23) | build/deploy time |
+| `contracts/` | `@kelabo/contracts`: constants, zod schemas, WSS frames, `[LLM_CON]` parsing, supplier credential slots, the published-config schema (`opconfig.js`) | shared |
 | `rest-api/` | control plane (auth/OTP/OIDC, kelabos, records, STT credential mint — `stt-token`) | Lambda + API GW |
 | `gateway/` | caption ingest, SSE hub, `/rig` WSS tunnel, in-task agent worker | ECS Fargate ×1 |
 | `connector/` | the agent bridge: an MCP server a developer's own coding agent spawns, which tunnels to the Gateway (docs 16). `private`; publishes as `@kelabome/agents` via `build/pack.mjs` (docs 17) | dev laptop |
@@ -30,6 +30,16 @@ installs nothing but esbuild.
 - **No hard-coded env values.** Domains, table names, bucket names, ECR URIs and
   the gateway image URI are all *derived* in `config/loadConfig.mjs`. Add new
   derived values there, not in consumers.
+- **A new setting goes to `config/kelabo.json` only if CDK needs it at synth**
+  (docs 23). An account, a region, a domain, a WAF list, the gateway's size, a
+  secret *name* — yes. Anything read by application code at request time — a
+  model, a rate limit, a TTL, a provider — is a field in `opConfigSchema`
+  (`contracts/src/opconfig.js`), published from `/admin`, with the config file
+  as its bootstrap. A value read at synth cannot follow a row in a table.
+- **`rootAdminEmail` is deploy-time and only deploy-time**, and empty **fails
+  closed**. Everything else operational is editable from a web page, so who may
+  edit must not be — otherwise an administrator can lock the operator out of
+  their own deployment in one request.
 - Target runtimes are **Node 20** (Lambda) and **Node 22** (containers) even though
   local Node may be newer.
 - Every AWS resource is tagged `app=kelabo` + `endpoint=<env>` at the CDK app root.
@@ -61,9 +71,9 @@ There is **no linter, formatter, typechecker, or CI**. The only gates are:
 ```
 make check                       # node --check over every .js/.mjs (syntax only)
 make test                        # rest-api + gateway + connector smoke, spa test + build, cdk synth
-cd contracts && npm test         # node test/frames.mjs (the agent wire protocol) && node test/mention.mjs
-cd gateway  && npm test          # node test/agent.mjs && node test/rtc.mjs && node test/presence.mjs && node test/smoke.mjs
-cd rest-api && npm test          # node test/smoke.mjs && node test/reserved.mjs && node test/otpMail.mjs
+cd contracts && npm test         # frames (the agent wire protocol), mention, speaker, orgs, credentials, entitlement, opconfig
+cd gateway  && npm test          # agent, mcp, rtc, roster, presence, repairJson, minutesAnswer, cors, opconfig, smoke, journeys, journeyLegs
+cd rest-api && npm test          # smoke, wiring, reserved, admin, mail, otpMail, journeys, closeAccount
 cd connector && npm test         # queue + envelope + persona + cards + install + runtimes + launch + channel + control (pure), smoke, pack
 cd spa && npm test               # test/transcript.mjs (compose + project) + test/rtc.mjs (pull reconcile, retry policy) + test/presence.mjs
 cd spa && npm run build          # the only syntax gate for JSX
@@ -129,12 +139,29 @@ Supplier credentials (LLM/STT/RTC/mail) are **not** secrets any more — they ar
 rows in the credentials table (`CRED#<slot>`, docs 08 §6c), under their own
 customer-managed key.
 
+**The normal way to set one is now `/admin` → Suppliers.** The `make` targets
+below remain the first-run path — a brand-new environment has nobody who can
+sign in yet — and are the only way to *remove* a field, since the console writes
+a key and never reads one back.
+
 ```
 make credential-set env=dev slot=llm            # what the slot takes
 make credential-set env=dev slot=llm fields="apiKey=…" write=1
 make credentials-migrate env=dev write=1        # or copy them out of Secrets Manager
 make credentials-show env=dev                   # which slots are set, never the values
 ```
+
+Operational configuration (docs 23) is published from `/admin`, not deployed:
+
+```
+make opconfig-show env=dev                      # which versions this env has published
+make opconfig-seed env=dev                      # dry run; write=1 publishes kelabo.json's values
+```
+
+`opconfig-seed` hands ownership of the config file's values to the console.
+**Most deployments should not run it** — an unpublished field already falls back
+and `/admin` already shows it — and it must never be run against an environment
+already configured from the console, because it publishes over what is there.
 
 `credential-set` is the first-run path (`rest-api/scripts/put-credential.mjs`):
 it merges the named fields into the slot, refuses a field name the slot does not
@@ -174,15 +201,21 @@ Order matters and is non-obvious:
   `lambda-stack.js` grants access — deploying the Lambda alone gives it an env
   var pointing at a table that does not exist, and the failure is a runtime
   `ResourceNotFoundException` on the first request, not a deploy error.
-- **`make restart` rolls the image, never the config.** On ECS the gateway never
-  reads `config/` at all: `loadGatewayConfig()` returns `fromEnv()` the moment
-  `KELABO_TABLE_KELABOS` is set, and CDK sets it. Every `config/kelabo.json`
-  value reaches the task as a `KELABO_*` environment variable written into the
-  **task definition** by `infra/lib/gateway-ecs-stack.js`. `make restart` forces
-  a new deployment of the *same* task-definition revision, so changing a config
-  value and restarting silently keeps the old one. Config changes need
-  `make gateway` (docker + `cdk deploy <prefix>-gateway`) or `make deploy`.
-  The same applies to the Lambda via `infra/lib/lambda-stack.js`.
+- **`make restart` rolls the image, never the config** — but read docs 23
+  first, because for most settings the answer is now "do not deploy at all".
+  Model, STT engine, mail transport, agent knobs, RTC defaults, every rate limit
+  and TTL, `allowedEmailDomain` and `retentionDays` are **published** from
+  `/admin` and take effect in seconds. What is left in the task definition is
+  the bootstrap.
+  For a genuinely deploy-time value (account, region, domains, `allowIps`,
+  gateway size, log retention, secret names, `rootAdminEmail`): on ECS the
+  gateway never reads `config/` at all — `loadGatewayConfig()` returns
+  `fromEnv()` the moment `KELABO_TABLE_KELABOS` is set, and CDK sets it — so
+  every value reaches the task as a `KELABO_*` variable written into the **task
+  definition** by `infra/lib/gateway-ecs-stack.js`. `make restart` forces a new
+  deployment of the *same* revision, so editing the config and restarting
+  silently keeps the old value. Those need `make gateway` or `make deploy`. The
+  same applies to the Lambda via `infra/lib/lambda-stack.js`.
 - The gateway Docker build context is the **repo root** (`gateway/Dockerfile` copies
   `contracts/` and `config/`), not `gateway/`.
 - The Lambda is bundled by CDK's `NodejsFunction` **from `rest-api/src/index.js`**
@@ -202,7 +235,20 @@ Order matters and is non-obvious:
 - **Gateway config** (`gateway/src/config.js`): if `KELABO_TABLE_KELABOS` is set it
   reads everything from env (the ECS path); otherwise it imports
   `config/loadConfig.mjs` (the local path). Add new settings to *both* `fromEnv()`
-  and `fromBase()`, and to the task env in `infra/lib/gateway-ecs-stack.js`.
+  and `fromBase()`, and to the task env in `infra/lib/gateway-ecs-stack.js`. If
+  the setting is operational rather than structural it also needs a field in
+  `opConfigSchema` and a line in `resolveOpConfig`/`applyOpConfig`, or it is
+  deploy-only forever (docs 23 §10).
+- **Operational configuration** (`contracts/src/opconfig.js`, docs 23): the
+  model, the STT engine, the mail transport, the agent knobs, every rate limit
+  and TTL are **published** from `/admin` into `kelabo-<env>-config`
+  (append-only, `PK=OPCONFIG`), not deployed. `resolveOpConfig` folds a published
+  version over the service's own config — published wins, the environment is the
+  bootstrap — so a deployment that has published nothing behaves exactly as
+  before. Both services read through a 60 s cache;
+  `POST /internal/config/reload` makes a publish land at once and re-inits the
+  agent worker. Consumers resolve **per request** (`await settings()`), never at
+  construction: a warm Lambda container would otherwise never see a publish.
 - **REST API** is served under `/api` on the portal host; CloudFront strips the
   prefix before forwarding.
 - **Agent bridge** (`connector/`, docs 16): the interface between Kelabo and a
@@ -262,9 +308,14 @@ Order matters and is non-obvious:
   credential slot is filled — a table row now, like every supplier key.
 - **Outbound mail** (`rest-api/src/mail/`): `messages.js` says what a mail
   contains, a transport (`ses.js`, `mailersend.js`) says how it travels, and
-  `index.js` picks one per send. `mail.provider` in config selects it — SES is
-  the default and needs no key (IAM role), everything else reads the `mail`
-  credential slot, a supplier key like any other. The boundary between the two
+  `index.js` picks one per send. `mail.provider` and `mail.fromAddress` are
+  **published** op-config resolved per send — SES is the floor and needs no key
+  (IAM role), everything else reads the `mail` credential slot. Because the
+  provider is a run-time value the Lambda's `ses:SendEmail` grant is
+  unconditional and fenced by sending *domain* rather than exact address: a
+  deploy-time IAM decision cannot follow a published one, and the cost is that a
+  typo'd local part sends successfully from an address that does not exist
+  (docs 23 §8). The boundary between the two
   halves is a *message object*, never a MIME string: MIME is an SES workaround
   for `Simple` content not carrying a part, and MailerSend takes the same inline
   logo as a JSON attachment. `mime.js` is therefore SES-only. Adding a provider is one file
@@ -314,6 +365,22 @@ Order matters and is non-obvious:
 - **Three token families share one signing key** (browser cookies, the internal
   REST→Gateway JWT, agent tokens). `aud` is the only thing separating them, so
   every verifier must check it.
+- **In the published-config fold, `null` means unset — not falsiness.** `0`
+  (`agent.maxConcurrentRuns` = unlimited, `turnDeadlineSeconds` = no deadline)
+  and `false` (`rtc.video` = audio only) are real published values that a
+  `published || fallback` check silently discards, restoring the deployment's
+  value with nothing in any log. Strings keep empty-means-unset, so a cleared box
+  hands the field back instead of naming a provider `""`.
+- **A published field that nothing reads is worse than an absent one** — the
+  operator edits it, saves, and cannot tell "no effect" from "failed save". A
+  consumer reads `(await settings()).x`, never `config.x`; `rest-api/test/admin.mjs`
+  reads the sources and fails if one regresses.
+- **No route returns a supplier credential value.** `credentials.getRaw` exists
+  and `admin.js` deliberately never calls it. A key is written from `/admin` and
+  never read back, so a stolen admin session can break a deployment but not
+  exfiltrate the keys it runs on. That application limit is what replaced the IAM
+  attribute fence, which no longer binds now the Lambda holds `PutItem` on the
+  `CRED#` partitions (docs 23 §5).
 - Speaker is either an authenticated identity or an STT diarization label
   (`A`/`B`/`C`); both are treated identically downstream.
 - **One `getUserMedia` per kelabo.** `spa/src/rtc/useMicStream.js` owns the

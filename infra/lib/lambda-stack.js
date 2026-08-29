@@ -4,7 +4,9 @@ import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-import { CREDENTIAL_STATUS_ATTRS } from "@kelabo/contracts/credentials";
+// `CREDENTIAL_SLOTS`/`credentialPk` serve the third credentials statement — the
+// console widening at the foot of that block.
+import { CREDENTIAL_SLOTS, CREDENTIAL_STATUS_ATTRS, credentialPk } from "@kelabo/contracts/credentials";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logRetention } from "./log-retention.js";
@@ -83,6 +85,17 @@ export class LambdaStack extends Stack {
         // most recent) is no longer a change to this stack.
         KELABO_TABLE_CREDENTIALS: names.credentials,
         KELABO_TABLE_JOURNEYS: names.journeys,
+        // Operational config + the admin roster (contracts/src/opconfig.js).
+        // This is the component that publishes both.
+        KELABO_TABLE_CONFIG: names.config,
+        // Who may administer this deployment: the one identity that can grant
+        // further admins and, through them, publish everything in the table
+        // above. Deploy-time and only deploy-time — see `rootAdminEmail` in
+        // `config/loadConfig.mjs` for why the value governing "who may publish"
+        // must not itself be publishable. Empty fails closed: nobody is root,
+        // nobody can grant, and a fresh deployment's `/admin` refuses everyone
+        // until an operator puts their own address in `config/kelabo.json`.
+        KELABO_ROOT_ADMIN_EMAIL: cfg.rootAdminEmail ?? "",
         KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
         KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
         KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
@@ -177,22 +190,28 @@ export class LambdaStack extends Stack {
     //     attribute fence: `dynamodb:Attributes` restricts the attributes a
     //     request *names*, so a call that names none is unrestricted.)
     //   - **No `DeleteItem`.** A credential is replaced, never removed.
-    //   - **No `PutItem` any more, either.** Master has no credential-write
-    //     route: nothing under `rest-api/src/` calls `credentials.put()`. The
-    //     operator scripts that do (`rest-api/scripts/put-credential.mjs`,
-    //     `migrate-credentials.mjs`) run on a laptop under the operator's own
-    //     AWS credentials, not under this role. A `PutItem` here would be a
-    //     permission with no caller — and `PutItem` replaces the whole item, so
-    //     holding it would let this role overwrite `CRED#llm` with a key of its
-    //     choosing, which is a different way of ending up in possession of the
-    //     one it is not allowed to read.
     //
-    // **The private SaaS branch will widen this, and that split is deliberate.**
-    // It has a root-only credential reveal console, so its Lambda genuinely
-    // needs whole-item reads and a write path, and it will add them on its own
-    // side. Master does not have that console, so master does not carry the
-    // grant for it: the open-core deployment's control plane cannot read the
-    // LLM key, full stop, and that is the property four documents describe.
+    // **`PutItem` came back, and with it the fence stopped binding.** These two
+    // statements once stood alone, and the argument for them was that nothing
+    // under `rest-api/src/` called `credentials.put()` — the operator scripts
+    // that do (`rest-api/scripts/put-credential.mjs`, `migrate-credentials.mjs`)
+    // run on a laptop under the operator's own AWS credentials, so a write here
+    // was a permission with no caller. That stopped being true when `/admin`
+    // gained a Suppliers tab: a self-hoster with no shell cannot run a `make`
+    // target, and a console that configures everything except the four keys the
+    // product needs is not a console.
+    //
+    // Statement 3 below therefore grants whole-item `GetItem` and `PutItem` on
+    // every slot, and because IAM unions `Allow`, **the attribute fence in
+    // statement 2 no longer restricts anything.** These two are kept exactly as
+    // they were, and this note kept with them, for two reasons: they are the
+    // precise description of what this role would need if the console were
+    // removed — delete statement 3 and the boundary returns with nothing else
+    // to unpick — and they name the property that was given up, which is worth
+    // more written down than quietly deleted.
+    //
+    // What replaced it is an application-level limit rather than an IAM one:
+    // **no route returns a credential value.** See statement 3.
 
     // 1. The two slots whose VALUES this component legitimately uses: `stt`
     //    (minting a short-lived browser transcription credential,
@@ -244,11 +263,74 @@ export class LambdaStack extends Stack {
       }),
     );
 
-    // The table's customer-managed key: decrypt only. This component no longer
-    // writes a credential (see above), and an encrypt grant it cannot use is
-    // the same kind of leftover the `CRED#*` statement was.
+    // 3. **The widening the comment above predicts, and the one place in this
+    //    file where the deployment is deliberately less restricted than the two
+    //    statements before it.**
+    //
+    //    `/admin` (Suppliers tab) sets and rotates every supplier credential:
+    //    `rest-api/src/admin.js` `saveCredential` calls `credentials.put()`, and
+    //    `listCredentials` calls `describeAllFull()`, which reads whole items so
+    //    the console can show which FIELDS of a slot are filled. Both need the
+    //    whole slot list, not a subset.
+    //
+    //    **What that costs, stated plainly:** statements 1 and 2 above are a
+    //    union with this one, and IAM unions `Allow` — so the attribute fence on
+    //    `CRED#llm`/`CRED#rtc` **does not bind** any more. The property those
+    //    statements describe (the control plane can know the LLM key exists but
+    //    not read it) is NOT true in this build and cannot be while a
+    //    credential-write console exists. They are kept above, unchanged,
+    //    because they are the honest statement of what this role would need if
+    //    the console were removed: delete this third statement and the boundary
+    //    is back, with nothing else to unpick.
+    //
+    //    **What is NOT conceded.** Still no `Scan` — the one call that returns
+    //    every credential in the deployment in a single response, and the
+    //    accident this whole design exists to prevent. Still no `Query`. Still
+    //    no `DeleteItem`: a credential is replaced, never removed, so a
+    //    compromised admin session cannot take transcription down with no way
+    //    back. And the slots are enumerated from `CREDENTIAL_SLOTS` rather than
+    //    matched as `CRED#*`, so this fails closed on a partition key nobody has
+    //    designed yet instead of silently covering it.
+    //
+    //    Above IAM, the application adds the limit that actually bounds this:
+    //    **there is no route that returns a credential value.** A key can be
+    //    written from the console and never read out of it, so a stolen admin
+    //    session can break this deployment but cannot exfiltrate the supplier
+    //    keys it runs on. Every write logs `credential_rotated` naming the
+    //    caller, the slot and the field names — never the values.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+        resources: [tables.credentials.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": CREDENTIAL_SLOTS.map(credentialPk) },
+        },
+      }),
+    );
+
+    // Decrypt to read a slot; encrypt because this component now writes one.
     tables.credentials.encryptionKey?.grantDecrypt(this.fn);
+    tables.credentials.encryptionKey?.grantEncrypt(this.fn);
     tables.journeys.grantReadWriteData(this.fn);
+
+    // Operational config and the admin roster (contracts/src/opconfig.js).
+    //
+    // The full grant, and this is the component that should have it: publishing
+    // a version, reading the history and maintaining the roster are all this
+    // Lambda's, and the gateway's access to the same table is narrowed below to
+    // a read of one partition.
+    //
+    // Append-only is a property of the **code**, not of this grant. `PutItem`
+    // here is conditional on the key not existing (`db.putOpConfig`), so a
+    // published version cannot be overwritten even though IAM would allow the
+    // call. The one `DeleteItem` this role makes is a revoked administrator —
+    // access control, not configuration, and root-only. Expressing "delete an
+    // ADMIN row but never an OPCONFIG one" in IAM would need a per-partition
+    // split of a table with two partitions, which buys a condition that the
+    // route-level root check already enforces and that no other caller can
+    // reach.
+    tables.config.grantReadWriteData(this.fn);
+
     archiveBucket.grantRead(this.fn);
 
     // Retention purge (POST /records/purge). Deliberately DeleteItem/DeleteObject
@@ -282,15 +364,39 @@ export class LambdaStack extends Stack {
     // credential slot instead. Granting both would leave a function that can
     // still send from the SES identity long after the deployment stopped
     // meaning to.
-    if (cfg.mail.provider === "ses") {
-      this.fn.addToRolePolicy(
-        new iam.PolicyStatement({
-          actions: ["ses:SendEmail", "ses:SendRawEmail"],
-          resources: ["*"],
-          conditions: { StringEquals: { "ses:FromAddress": cfg.mail.fromAddress } },
-        }),
-      );
-    }
+    //
+    // **Unconditional, and fenced by sending domain rather than by exact
+    // address** — both changed when mail became publishable
+    // (contracts/src/opconfig.js), and both for the same reason: a deploy-time
+    // IAM decision cannot follow a run-time value.
+    //
+    // Granting this only when `cfg.mail.provider === "ses"` was right while the
+    // provider was a deploy-time fact. It is not one any more: an administrator
+    // publishes it, and a deployment whose `kelabo.json` still says
+    // `mailersend` while the published version says `ses` would hold no send
+    // permission and fail every sign-in code — with nothing on the page to
+    // explain it, because the publish itself succeeded. So the grant has to
+    // cover both, and the provider selection is left to the code that resolves
+    // it per send.
+    //
+    // The from-address is publishable too, which is why the condition matches
+    // the sending DOMAIN. `StringEquals` on one address would turn "publish a
+    // new sender" into an AccessDenied on every send.
+    //
+    // The narrowing that matters survives: this function still cannot send as
+    // another verified identity in the account, and SES independently refuses
+    // any domain it has not verified — so the worst a published from-address
+    // can do is fail.
+    const sendingDomain = String(cfg.mail.fromAddress || "").split("@")[1] || "";
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: ["*"],
+        conditions: sendingDomain
+          ? { StringLike: { "ses:FromAddress": `*@${sendingDomain}` } }
+          : { StringEquals: { "ses:FromAddress": cfg.mail.fromAddress } },
+      }),
+    );
 
     for (const [id, secretName] of Object.entries({
       CookieKey: cfg.secrets.cookieSigningKey,

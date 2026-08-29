@@ -8,6 +8,7 @@ import { createCloudflareRtc } from "./rtc/cloudflare.js";
 import { getCredential as readCredential } from "./db.js";
 import { LLM_CONFIG, llmApiKeyFrom } from "@kelabo/contracts/credentials";
 import { createLlmProvider, resolveModelConfig } from "./agent/llm.js";
+import { createOpConfig } from "./opconfig.js";
 import { log, logError } from "./log.js";
 
 export async function createContainer(overrides = {}) {
@@ -144,6 +145,16 @@ export async function createContainer(overrides = {}) {
   // (docs 18 §5) can be asserted without a 25-second wait.
   if (overrides.presencePingMs) c.presencePingMs = overrides.presencePingMs;
 
+  // Operational configuration, published from `/admin` rather than deployed
+  // (contracts/src/opconfig.js). One cache per task, read on a 60-second timer,
+  // invalidated by `POST /internal/config/reload` when someone publishes.
+  //
+  // Overridable so a test can pin a configuration without a table — and note
+  // that a container built with no `config` table name resolves entirely to
+  // this task's own environment config, which is exactly how every existing
+  // test and every local run keeps behaving as it did.
+  c.opConfig = overrides.opConfig ?? createOpConfig(c);
+
   c.llm = overrides.llm ?? {
     async completeRaw(req) {
       const apiKey = llmApiKeyFrom(await getCredential("llm"));
@@ -157,7 +168,13 @@ export async function createContainer(overrides = {}) {
       // Resolved, never `config.llm` raw. A deployment that sets the model in
       // the environment rather than in `config/kelabo.json` leaves that object
       // with a blank `model`, and the provider will faithfully post `""`.
-      const modelConfig = resolveModelConfig(config);
+      //
+      // Resolved through `opConfig` for the same reason it is resolved at all:
+      // this is the *second* caller of the model, and the whole point of that
+      // shared resolution is that a published change reaches both. A journey
+      // report still answering on the previous model after an administrator
+      // switched it would be the original bug in a new place.
+      const modelConfig = resolveModelConfig(await c.opConfig.resolved());
       if (!modelConfig.model) {
         // Nothing named a model — not the config file, not the environment.
         // Refused here rather than sent, because a provider handed `""`

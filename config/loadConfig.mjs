@@ -96,6 +96,18 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     // script that walks the other tables can ever emit a credential.
     credentials: `kelabo-${block.endpoint}-credentials`,
     journeys: `kelabo-${block.endpoint}-journeys`,
+    // Operational configuration and the admin roster
+    // (`contracts/src/opconfig.js`). Its own table because the two things in it
+    // are the only records a deployment changes *while running* and never
+    // expires: every other table either holds kelabo material that ages out, or
+    // holds credentials under a key this one deliberately does not share.
+    //
+    // Not a partition of the kelabos table, which is where it would have been
+    // cheapest to put it. That table expires partitions and is the one a reset
+    // script walks; an operational config that vanished with a TTL sweep would
+    // silently revert the whole deployment to its bootstrap values, and the
+    // failure would look like a deploy nobody made.
+    config: `kelabo-${block.endpoint}-config`,
   };
 
   // Close the whole deployment to everything but a list of source addresses —
@@ -363,6 +375,35 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   // fine and falls back to generic wording.
   const organizationName = String(block.organizationName ?? "").trim();
 
+  // The deployment's root administrator: the one identity that may grant
+  // further admins, and the seed from which the whole roster grows
+  // (`rest-api/src/admin.js`).
+  //
+  // Deployment config rather than something the API can change, and that is the
+  // entire point. Every other operational parameter moved OUT of this file and
+  // into a table so it can be republished from `/admin` without a deploy — so
+  // *who may publish* must be the one thing that cannot be, or the boundary is
+  // circular: an admin who could edit the roster from the console could lock
+  // the operator out of their own deployment with a single request.
+  //
+  // Declared at the root of `kelabo.json`, not per environment: it is a fact
+  // about whoever runs this deployment, not about a stage, and dev and prod
+  // having different roots by accident is a way to be locked out of one of
+  // them. An environment that genuinely needs its own still names it in its
+  // own block, which is why the block is read first.
+  //
+  // Lower-cased once, here, because every comparison downstream lower-cases the
+  // caller's identity and a capital letter typed into config would otherwise
+  // silently match nobody.
+  //
+  // Empty is allowed and fails **closed**: with no root, nobody can grant, and
+  // the roster is whatever `ADMIN#` rows already exist (on a fresh deployment,
+  // none — so `/admin` refuses everyone). That is the safe direction. The
+  // alternative to a config typo must never be an open console.
+  const rootAdminEmail = String(block.rootAdminEmail ?? raw.rootAdminEmail ?? "")
+    .trim()
+    .toLowerCase();
+
   // The API's own front door. CloudFront is not the only way in: API Gateway
   // always answers on its own `https://<id>.execute-api.<region>.amazonaws.com`
   // URL, which reaches the same Lambda while passing neither the distribution
@@ -415,6 +456,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...block,
     env,
     organizationName,
+    rootAdminEmail,
     // Resolved, not passed through: the default belongs to the one file that
     // owns env-specific values, so a deployment that omits the block and one
     // that names deepgram explicitly are the same thing by the time anyone

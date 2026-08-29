@@ -17,7 +17,9 @@ import { err } from "./errors.js";
  * ever gave a name. One query over the prefix lists everybody, whichever they
  * are.
  */
-export function createScheduling({ config, db, mailer, internal }) {
+export function createScheduling({ config, db, mailer, internal, opConfig }) {
+  // Conference default and retention, published (contracts/src/opconfig.js).
+  const settings = async () => (opConfig ? await opConfig.effective() : config);
   const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
 
   // A conditional write that lost its guard surfaces either as a bare
@@ -79,7 +81,7 @@ export function createScheduling({ config, db, mailer, internal }) {
       historyEnabled: body.historyEnabled === true,
       // Same promise as an instant kelabo's, made before anyone is invited.
       private: body.private === true,
-      rtcMode: RTC_MODES.includes(body.rtcMode) ? body.rtcMode : config.rtc.defaultMode,
+      rtcMode: RTC_MODES.includes(body.rtcMode) ? body.rtcMode : (await settings()).rtc.defaultMode,
       tenantId,
       tenantStatus: `${tenantId}#scheduled`,
     };
@@ -265,7 +267,7 @@ export function createScheduling({ config, db, mailer, internal }) {
     if (meta.status !== "scheduled") throw err(409, "not_scheduled");
 
     const cancelledAt = Date.now();
-    const ttl = Math.floor(cancelledAt / 1000) + config.retentionDays * 86400;
+    const ttl = Math.floor(cancelledAt / 1000) + (await settings()).retentionDays * 86400;
     try {
       await db.cancelScheduledKelabo({ kelaboId, tenantId: meta.tenantId, cancelledAt, reason, ttl });
     } catch (e) {

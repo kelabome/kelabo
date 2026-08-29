@@ -70,7 +70,7 @@ about.
 | 16 | [16-agent-bridge.md](./components/16-agent-bridge.md) | Agent bridge — the interface between Kelabo and a developer's **own** coding agent: the KAP wire protocol, the MCP tool surface, the opencode and Claude Code adapters, device-code pairing, kelabo prep | dev laptop, spawned by the agent |
 | 17 | [17-agent-distribution.md](./components/17-agent-distribution.md) | Distributing the bridge as `@kelabome/agents` on npm — one package and one `kelabo` for every runtime, the runtime registry, the invertible key-only install, `setup`/`status`/`uninstall`/`reset`, and what the build does with `@kelabo/contracts` | dev laptop, `npm i -g` |
 
-### Cross-cutting docs (this folder) — 08–10, 13, 18–21
+### Cross-cutting docs (this folder) — 08–10, 13, 18–23
 | # | Doc | Covers |
 |---|-----|--------|
 | 08 | [08-database.md](./08-database.md) | DynamoDB tables, keys, GSIs, TTLs, S3 layout, every access pattern, item shapes |
@@ -82,6 +82,7 @@ about.
 | 20 | [20-journey.md](./20-journey.md) | **Journey** — a persistent container linking related kelabos so decisions, documents and Q&A history carry from one meeting to the next, for people and the agent: data model, visibility/permissions, timeline, reports, message board, documents, contributor stats, agent context injection |
 | 21 | [21-agent-behaviour.md](./21-agent-behaviour.md) | **Agent behaviour** — what the assistant actually does, as opposed to how it is designed (05/14): the life of a question through gate → queue → orchestrator → workers → board, the life of the minutes, a table of what is **enforced in code** versus what is only a sentence in a prompt, and the known failure modes (long search then nothing; answers and minutes in the wrong language) with the file and line where each ends |
 | 22 | [22-capacity-and-scaling.md](./22-capacity-and-scaling.md) | **Capacity and scaling** — the deployed infrastructure in one diagram, why `desiredCount` is 1 (and why 2 would be a bug, not a scale-out), what "capacity reached" means for the single Gateway task, and the growth phases: observability → vertical (config-only, ~30×) → kelabo-affinity sharding (per-kelabo state, URL-per-kelabo hook, presence home) → shared-state replicas (avoid) |
+| 23 | [23-operational-configuration.md](./23-operational-configuration.md) | **Operational configuration** — the settings a running deployment may change without a deploy: the CloudFormation test that decides what stays in `config/kelabo.json`, the published-wins fold and why its "unset" sentinel is `null` rather than falsiness, append-only versions with an author and a note, the admin roster and why root is deploy-time and only deploy-time, supplier keys from the console and the IAM fence that was traded for them, the 60-second caches and `POST /internal/config/reload`, and the two asymmetries (`retentionDays` stamps at write time; `organizationName` is deliberately absent) |
 
 ## Conventions across all docs
 
@@ -113,5 +114,16 @@ about.
   post-back is the value); dev-mode tunnel is caption-only.
 - **Env/tag:** every AWS resource tagged `app=kelabo` and `endpoint=<env>`,
   `<env> ∈ {dev, staging, prod}`.
+- **Published config wins (doc 23):** every operational value — the model, the
+  transcription engine, the mail transport, every rate limit and TTL — is a row in
+  `kelabo-<env>-config`, published from `/admin`, and only *falls back* to
+  `config/kelabo.json`. A doc that says "changing X needs `make backend`" is
+  talking about the bootstrap. What stays deploy-time is what CDK reads at synth.
+- **`null` is "unset", not falsiness:** in the published-config fold, `0`
+  (`maxConcurrentRuns` = unlimited) and `false` (`rtc.video` = audio only) are
+  real published values. Only strings use empty-means-unset.
+- **Who may publish is not publishable:** `rootAdminEmail` is deploy-time and
+  empty fails closed. And no route returns a supplier credential value — keys are
+  written from the console and never read back.
 - **`tenantId = verified email domain`:** on every persisted item; single tenant for
   self-host; a multi-domain deployment scopes listing/isolation by it.

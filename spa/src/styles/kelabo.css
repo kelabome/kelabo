@@ -2627,6 +2627,20 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    flex sizing consults. Full width, natural height, and the control's own
    height declaration gets to mean something. */
 .settings-row-stacked > .input { flex: 0 0 auto; width: 100%; }
+/* A named run of fields inside a section (the /admin console's groups). A
+   heading with only a rule under it reads as a paragraph break rather than a
+   container, which is why this is a bordered box and not just a title. */
+.settings-group {
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  padding: 0 var(--space-4); margin-bottom: var(--space-4);
+}
+.settings-group-head { padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.settings-group-head .sr-sub { margin-top: 1px; }
+/* What the deployment falls back to when a field is left unpublished, shown
+   beside the field so an operator can tell "I set this" from "this is the
+   default showing through" — the one distinction the effective value alone
+   cannot express. */
+.settings-fallback { font-size: var(--text-xs); color: var(--text-dim); margin-top: 2px; }
 /* a note or preview panel that follows a settings row */
 .settings-note { margin-top: var(--space-4); }
 .mcp-warn { color: var(--warn); }

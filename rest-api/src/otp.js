@@ -2,25 +2,45 @@ import { randomInt, randomUUID } from "node:crypto";
 import { hmacSha256 } from "./jwt.js";
 import { err } from "./errors.js";
 
-export function createOtp({ config, db, mailer }) {
+export function createOtp({ config, db, mailer, opConfig }) {
+  // The sign-in gate and its rate limits are published operational config
+  // (contracts/src/opconfig.js), resolved per request. `effective()` returns
+  // this service's own config shape with published values folded in, so every
+  // read below is the expression it always was.
+  //
+  // Falling back to `config` when nothing was injected keeps the existing tests
+  // and a deployment with no config table behaving exactly as before.
+  const settings = async () => (opConfig ? await opConfig.effective() : config);
+
   // Tenant = the verified email's own domain (ARCHITECTURE §1). With an
   // allow-list configured (self-host) that is the one allowed domain; with the
   // allow-list empty, registration is open and every org lands in its own
   // tenant — the multi-domain mode the schema always reserved space for.
   const tenantOf = (email) => email.split("@")[1]?.toLowerCase();
 
-  function assertDomainAllowed(email) {
+  /**
+   * Async now, because the allowed domain is publishable.
+   *
+   * Note which direction is reachable by mistake: publishing an EMPTY domain
+   * falls back to the deployment's configured one (`resolveOpConfig`), so
+   * clearing the field in the console cannot open the deployment to every
+   * address on the internet. Widening it is only possible by typing a
+   * different domain, and that publish is an append-only version naming who
+   * did it.
+   */
+  async function assertDomainAllowed(email) {
     const domain = tenantOf(email);
     if (!domain) throw err(403, "domain_not_allowed");
-    if (config.allowedEmailDomain && domain !== config.allowedEmailDomain.toLowerCase()) {
+    const allowed = (await settings()).allowedEmailDomain;
+    if (allowed && domain !== allowed.toLowerCase()) {
       throw err(403, "domain_not_allowed");
     }
   }
 
   async function request({ email, ip }) {
-    assertDomainAllowed(email);
+    await assertDomainAllowed(email);
     const now = Date.now();
-    const o = config.otp;
+    const o = (await settings()).otp;
 
     if (ip) {
       const counter = await db.bumpIpCounter(ip, o.perIpWindowSeconds);
@@ -61,14 +81,14 @@ export function createOtp({ config, db, mailer }) {
   }
 
   async function verify({ email, code }) {
-    assertDomainAllowed(email);
+    await assertDomainAllowed(email);
     const item = await db.getOtp(email);
     if (!item) throw err(401, "invalid_code");
     if (item.expiresAt <= Date.now()) {
       await db.deleteOtp(email);
       throw err(401, "code_expired");
     }
-    if ((item.attempts || 0) >= config.otp.maxAttempts) throw err(429, "too_many_attempts");
+    if ((item.attempts || 0) >= (await settings()).otp.maxAttempts) throw err(429, "too_many_attempts");
     if (hmacSha256(code, email) !== item.codeHash) {
       await db.incrementOtpAttempts(email);
       throw err(401, "invalid_code");

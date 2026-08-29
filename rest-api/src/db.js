@@ -15,6 +15,7 @@ import {
   credentialPk,
   mcpSecretSk,
 } from "@kelabo/contracts/credentials";
+import { ADMIN_PK, OPCONFIG_PK, adminSk } from "@kelabo/contracts/opconfig";
 
 // The status projection, precomputed once. Every attribute goes through
 // `ExpressionAttributeNames` rather than only the ones that happen to be
@@ -1572,6 +1573,80 @@ export function createDb({ config, client } = {}) {
     await doc.send(new PutCommand({ TableName: T.credentials, Item: item }));
   }
 
+  // --- operational config and the admin roster ------------------------------
+  //
+  // Two partitions of one small table (contracts/src/opconfig.js): `OPCONFIG`
+  // holds the append-only version chain, `ADMIN` holds one row per granted
+  // administrator.
+  //
+  // A missing table name degrades rather than throws, exactly like the
+  // credentials table above: an environment deployed before this table existed
+  // must keep serving on its bootstrap config, with `/admin` refusing everyone,
+  // instead of failing every request in the deployment.
+
+  async function listOpConfigs() {
+    if (!T.config) return [];
+    // Query, never Scan: the roster lives in the same table and a Scan would
+    // read it too — and would grow into a full-table read as versions
+    // accumulate, for a value that is fetched on a 60-second timer.
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.config,
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: { ":pk": OPCONFIG_PK },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /**
+   * Append one version.
+   *
+   * Conditional on the key not existing, which is what makes the chain
+   * append-only in fact rather than by convention: two administrators who hit
+   * Publish at the same moment both computed the same next version, and without
+   * this the second would overwrite the first — losing a change and, worse,
+   * losing the record of who made it. The loser retries against the new head.
+   */
+  async function putOpConfig(item) {
+    if (!T.config) throw new Error("no config table configured");
+    await doc.send(
+      new PutCommand({
+        TableName: T.config,
+        Item: item,
+        ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",
+      })
+    );
+  }
+
+  async function listAdmins() {
+    if (!T.config) return [];
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.config,
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: { ":pk": ADMIN_PK },
+      })
+    );
+    return res.Items || [];
+  }
+
+  async function putAdmin({ email, grantedBy, at }) {
+    if (!T.config) throw new Error("no config table configured");
+    await doc.send(
+      new PutCommand({ TableName: T.config, Item: { PK: ADMIN_PK, SK: adminSk(email), grantedBy, at } })
+    );
+  }
+
+  // The one delete in this module's config half, and it is access control
+  // rather than configuration: a granted administrator is revoked, a published
+  // version never is. Rolling back a setting is publishing the old value again,
+  // which keeps the record of both acts.
+  async function deleteAdmin(email) {
+    if (!T.config) throw new Error("no config table configured");
+    await doc.send(new DeleteCommand({ TableName: T.config, Key: { PK: ADMIN_PK, SK: adminSk(email) } }));
+  }
+
   // One dynamic client registration per authorization server, shared by every
   // user of this deployment — RFC 7591 registers a redirect_uri, not a user, so
   // re-registering per user would be both wasteful and (for some servers) rate
@@ -1801,6 +1876,11 @@ export function createDb({ config, client } = {}) {
     getCredential,
     getCredentialStatus,
     putCredential,
+    listOpConfigs,
+    putOpConfig,
+    listAdmins,
+    putAdmin,
+    deleteAdmin,
     getMcpClient,
     putMcpClient,
     createJourney,

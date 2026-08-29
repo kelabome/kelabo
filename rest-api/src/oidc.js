@@ -24,7 +24,11 @@ const PROVIDERS = {
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const OIDC_COOKIE_TTL = 600;
 
-export function createOidc({ config, secrets, fetchImpl = fetch }) {
+export function createOidc({ config, secrets, opConfig, fetchImpl = fetch }) {
+  // The allowed sign-in domain is published operational config, resolved per
+  // callback — the same source the OTP path reads, so the two cannot disagree
+  // about who may hold an account here.
+  const settings = async () => (opConfig ? await opConfig.effective() : config);
   function providerConfig(provider) {
     const p = PROVIDERS[provider];
     if (!p || !config.auth.socialProviders.includes(provider)) {
@@ -116,7 +120,8 @@ export function createOidc({ config, secrets, fetchImpl = fetch }) {
     const domain = email.split("@")[1];
     // Empty allow-list = open registration (tenant = the email's own domain),
     // matching the OTP path.
-    if (config.allowedEmailDomain && domain !== config.allowedEmailDomain.toLowerCase()) {
+    const allowed = (await settings()).allowedEmailDomain;
+    if (allowed && domain !== allowed.toLowerCase()) {
       throw err(403, "domain_not_allowed");
     }
     return { email, clearCookie: clear };

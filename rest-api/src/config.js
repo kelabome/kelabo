@@ -95,7 +95,14 @@ function fromEnv() {
       contacts: env.KELABO_TABLE_CONTACTS,
       credentials: env.KELABO_TABLE_CREDENTIALS,
       journeys: env.KELABO_TABLE_JOURNEYS,
+      // Operational config + the admin roster (contracts/src/opconfig.js).
+      config: env.KELABO_TABLE_CONFIG,
     },
+    // Who may administer this deployment. Deploy-time and only deploy-time —
+    // see the comment on `rootAdminEmail` in `config/loadConfig.mjs` for why
+    // the one value governing "who may publish" must not itself be publishable.
+    // Empty fails closed: `requireAdmin` refuses everyone.
+    rootAdminEmail: (env.KELABO_ROOT_ADMIN_EMAIL || "").trim().toLowerCase(),
     contacts: { external: env.KELABO_CONTACTS_EXTERNAL === "true" },
     archiveBucket: env.KELABO_ARCHIVE_BUCKET,
     archiveKeyPrefix: env.KELABO_ARCHIVE_KEY_PREFIX || "archives",
@@ -190,6 +197,8 @@ function fromLoadConfig(c) {
     joinUrl: c.joinUrl,
     inviteUrl: c.inviteUrl,
     tableNames: c.tableNames,
+    rootAdminEmail: c.rootAdminEmail || "",
+    organizationName: c.organizationName || "",
     contacts: { external: !!c.contacts?.external },
     archiveBucket: c.archiveBucket,
     archiveKeyPrefix: c.archiveKeyPrefix,

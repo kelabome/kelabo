@@ -3,19 +3,23 @@ import { mintCookie, readCookie, serializeCookie } from "./cookies.js";
 import { generateGuestIdentity } from "./otp.js";
 import { err } from "./errors.js";
 
-export function createJoin({ config, db, secrets }) {
+export function createJoin({ config, db, secrets, opConfig }) {
+  // The guest participant lifetime, and the default transport a joiner is told
+  // about — both published operational config (contracts/src/opconfig.js).
+  const settings = async () => (opConfig ? await opConfig.effective() : config);
   async function mintParticipantCookie({ kelaboId, identity, tenantId, isGuest }) {
     const key = await secrets.getCookieKey(config);
+    const participantTtlSeconds = (await settings()).auth.participantTtlSeconds;
     const payload = {
       kind: "participant",
       kelaboId,
       identity,
       tenantId,
       isGuest,
-      exp: Math.floor(Date.now() / 1000) + config.auth.participantTtlSeconds,
+      exp: Math.floor(Date.now() / 1000) + participantTtlSeconds,
     };
     return serializeCookie(COOKIE_PARTICIPANT, mintCookie(payload, key), {
-      maxAgeSeconds: config.auth.participantTtlSeconds,
+      maxAgeSeconds: participantTtlSeconds,
       domain: config.cookieDomain,
     });
   }
@@ -95,7 +99,11 @@ export function createJoin({ config, db, secrets }) {
       body: {
         kelaboId,
         gatewayBaseUrl: config.gatewayBaseUrl,
-        rtcMode: meta.rtcMode || config.rtc.defaultMode,
+        // The kelabo's own stamped mode wins, always: a kelabo's transport
+        // never changes after creation, so a newly published default must not
+        // move a call in progress. This fallback is only for a kelabo created
+        // before the field existed.
+        rtcMode: meta.rtcMode || (await settings()).rtc.defaultMode,
         participant: { identity, displayName, isGuest },
       },
       cookies: [cookie],

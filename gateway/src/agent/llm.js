@@ -145,7 +145,13 @@ export function resolveModelConfig(config) {
     provider: config?.llm?.provider || LLM_CONFIG.provider,
     model: config?.llm?.model || LLM_CONFIG.model,
     smallModel: config?.llm?.smallModel || LLM_CONFIG.smallModel,
-    baseUrl: config?.openaiBaseUrl || LLM_CONFIG.baseUrl,
+    // Two names for one value, and both are read so this takes either shape.
+    // A published op-config carries it as `llm.baseUrl`
+    // (`resolveOpConfig` in contracts); the gateway's own environment config
+    // has always called it `openaiBaseUrl`. Accepting both is what lets the
+    // caller hand this the *resolved* config without either side renaming a
+    // field, and keeps the local path working when nothing is published.
+    baseUrl: config?.llm?.baseUrl || config?.openaiBaseUrl || LLM_CONFIG.baseUrl,
   };
 }
 

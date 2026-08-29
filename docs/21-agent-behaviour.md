@@ -510,9 +510,20 @@ ignored.
 
 ## 6. Knobs
 
+**All eight are published from `/admin` → Assistant** (docs 23) and apply to a
+*running* worker: `ensureWorker()` re-initialises it when the model or the knobs
+changed, and `POST /internal/config/reload` pushes that immediately rather than
+waiting for the next caption — which matters most in a quiet room, where
+`ensureWorker` is not called again until somebody speaks.
+
+The env vars below are the **bootstrap**: they are what a deployment falls back
+to until something is published, and a published value wins over every one of
+them. Tuning these against a live room, and waiting for a docker build between
+attempts, is what made them the first thing anyone asked to publish.
+
 Gateway env, all in `gateway/src/config.js` under `gateway.agent`:
 
-| Setting | Env | Default |
+| Setting | Env (bootstrap) | Default |
 |---|---|---|
 | `sensitivity` | `KELABO_AGENT_SENSITIVITY` | `medium` (confidence ≥ 0.5) |
 | `cooldownSeconds` | `KELABO_AGENT_COOLDOWN_SECONDS` | 45 |

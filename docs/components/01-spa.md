@@ -63,6 +63,7 @@ board = REST backfill + SSE tail. No opencode collaboration tab. Contract detail
 /journeys/:id        One journey: tabs, timeline, board, documents (registered)
 /contacts            Contacts (registered)
 /settings            Personal settings (registered)
+/admin               Deployment administration (administrators; guarded in-component)
 /pair                Agent device pairing
 /records, /records/:id      → redirect to /kelabos, the record
 /meetings, /meetings/:id    → redirect to /kelabos, the record  (old term)
@@ -91,6 +92,14 @@ Kelabo --leave--> Home or Login
 | Registered | OTP login (allowed domain) | + create kelabo, records, settings |
 | Host | created the kelabo | + end, minutes, MCP override, manage participants |
 | Developer | running a bound Rig/agent bridge | contributions from local opencode appear on board |
+| Administrator | on the `ADMIN#` roster, or root | `/admin`: publish operational config, rotate supplier keys |
+| Root | the deploy-time `rootAdminEmail` | all of the above, plus the only one who may grant or revoke administrators |
+
+**`/admin` is registered for every signed-in user and guarded inside the
+component**, deliberately: a route that exists only for some users 404s for
+everyone else, which reads as a broken link rather than as a refusal. The menu
+entry is gated on `GET /admin/whoami` and is cosmetic — it fails to `false` on
+error, and every route re-checks server-side.
 
 Roles are additive; host controls are hidden from non-hosts, records/settings from
 guests.
@@ -118,7 +127,11 @@ guests.
 - **OTP:** email → code. States `idle → sending → code_sent → verifying →
   success|error`. Errors: wrong/expired code, domain not allowed, rate-limited. OTP
   inputs support paste-to-fill; resend countdown.
-- **The allowed domain is named, and optional to type.** `config.allowedEmailDomain`
+- **The allowed domain is named, and optional to type.** This is a **build-time**
+  value and the enforcement is not, which is a real seam: the server-side check in
+  `otp.js`/`oidc.js` reads the *published* domain (docs 23), so a deployment that
+  publishes a new one and does not run `make frontend` will admit the new domain
+  while this page still names the old. `config.allowedEmailDomain`
   reaches the bundle as `VITE_ALLOWED_EMAIL_DOMAIN` (from `deploy-frontend.sh`), so
   the copy above renders the real domain instead of `company.com`, and `rico`
   submits as `rico@mycompany.com`. The field stays a real `type="email"` input
@@ -500,6 +513,45 @@ a journeys tab is not built.)*
 
 ---
 
+### 5.10 Administration (`/admin`) — docs 23
+
+Six tabs, mirrored into `?tab=` with `replace: true` so a section is linkable and
+survives a reload: **Assistant**, **Services**, **Suppliers**, **Limits**,
+**Access**, **History**.
+
+**Every field shows three things, not one.** What is published, what this
+deployment falls back to, and therefore what is in effect. Showing only the
+effective value would make the page unusable for the thing it exists for: an
+operator seeing `sfu` cannot tell whether they published it or whether it is the
+config file's default showing through, so clearing a field they believed they
+had set would change nothing while looking as though it should. An empty box
+means *not published*, never *set to empty*.
+
+**One publish for the whole document, and a note is required.** The config is
+versioned atomically, so a form per group would mint a version per field and
+lose the single note that explains the change. Two administrators publishing at
+once: the second gets `version_conflict`, reloads, and republishes on top —
+never a blind retry.
+
+**It reports latency honestly.** "Live now" when the Gateway acknowledged the
+reload; "the gateway will pick this up within a minute" when it did not. Saying
+"live" when it is not is how an operator ends up debugging the wrong thing.
+
+**Suppliers is not config and has no publish bar.** Each slot saves itself,
+immediately, with no version and no note — a key is not a decision anyone needs
+the history of. Boxes are password fields that always start empty, because
+**there is no route that returns a credential**: nothing exists to prefill with,
+and a masked placeholder over a value that was never fetched would imply
+otherwise. Empty means "leave this one alone" and the server merges, so rotating
+one engine's key cannot wipe the other's.
+
+A failed load renders an error with a retry, not a skeleton. That distinction
+was learned the hard way: `.catch(() => setState(null))` left the tab
+indistinguishable from still-loading, and a 500 span forever with the actual
+error only in CloudWatch.
+
+---
+
 ## 6. Capture behavior (interface to the STT provider)
 
 The capture pipeline lives in `src/capture/` (`useCapture.js`, `vad.js`):
@@ -581,7 +633,9 @@ REST API — never in JS-readable storage. The SPA can't read them; it relies on
 
 ## 10. Global UI elements
 
-Top bar (logo→Home, identity menu, theme), Toaster (transient status), Confirm
+Top bar (logo→Home, identity menu, theme — the menu carries an **Administration**
+entry when `GET /admin/whoami` says so, cosmetic only and failing to hidden on
+error), Toaster (transient status), Confirm
 dialog (destructive), Skeletons (all lists/details), app-wide insecure-context
 banner when `!window.isSecureContext`.
 

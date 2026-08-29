@@ -1,5 +1,7 @@
 {
   "app": "kelabo",
+  "_rootAdminEmail": "who may administer this deployment: the one identity that can grant further admins from /admin. Empty (or omitted) fails closed — nobody is root and the console refuses everyone, which is what a fresh deployment wants until you put your own address here. Deploy-time on purpose: every other operational value below is only a BOOTSTRAP and can be republished from /admin without a deploy, so who may publish must not itself be publishable. Per-environment override goes in the environment block.",
+  "rootAdminEmail": "",
   "environments": {
     "dev": {
       "endpoint": "dev",

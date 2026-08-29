@@ -193,7 +193,27 @@ export class DynamoDbStack extends Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts, credentials, journeys };
+    // Operational configuration and the admin roster (contracts/src/opconfig.js).
+    // Two partitions and nothing else: `PK = OPCONFIG` holds the append-only
+    // version chain (`SK = V#000001`), `PK = ADMIN` holds one row per granted
+    // administrator.
+    //
+    // Tiny, hot, and read by everything — so it is on-demand like the rest and
+    // cached for 60 s in each service rather than queried per request.
+    //
+    // **No `ttl` attribute, deliberately.** Everything else here either expires
+    // or is a credential; this is the deployment's own settings, and a TTL
+    // sweep that removed a version would revert live behaviour to the bootstrap
+    // config with nothing to say why. Point-in-time recovery is on for the same
+    // reason: the version chain is append-only, so the only way to lose one is
+    // an accident at the table level.
+    const config = table("ConfigTable", names.config, {
+      partitionKey: { name: "PK", type: S },
+      sortKey: { name: "SK", type: S },
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts, credentials, journeys, config };
 
     this.archiveBucket = new s3.Bucket(this, "ArchiveBucket", {
       bucketName: cfg.archiveBucket.toLowerCase().replace(/[^a-z0-9.-]/g, "-"),

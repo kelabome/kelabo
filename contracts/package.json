@@ -19,11 +19,12 @@
     "./org-domains": "./src/orgDomains.js",
     "./credentials": "./src/credentials.js",
     "./versioned": "./src/versioned.js",
+    "./opconfig": "./src/opconfig.js",
     "./entitlement": "./src/entitlement.js",
     "./money": "./src/money.js"
   },
   "scripts": {
-    "test": "node test/frames.mjs && node test/mention.mjs && node test/speaker.mjs && node test/orgs.mjs && node test/credentials.mjs && node test/entitlement.mjs"
+    "test": "node test/frames.mjs && node test/mention.mjs && node test/speaker.mjs && node test/orgs.mjs && node test/credentials.mjs && node test/entitlement.mjs && node test/opconfig.mjs"
   },
   "dependencies": {
     "zod": "^3.23.8"

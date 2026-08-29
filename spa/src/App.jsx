@@ -24,6 +24,7 @@ import Journeys from './routes/Journeys'
 import JourneyDetail from './routes/JourneyDetail'
 import Contacts from './routes/Contacts'
 import Settings from './routes/Settings'
+import Admin from './routes/Admin'
 
 /**
  * The signed-in application: everything inside the left rail.
@@ -84,6 +85,14 @@ export default function App() {
                   <Route path="/meetings" element={<Navigate to="/kelabos" replace />} />
                   <Route path="/meetings/:id" element={<RecordRedirect />} />
                   <Route path="/settings" element={<Settings />} />
+                  {/* Registered for every signed-in user, and guarded inside:
+                      the component asks `/admin/whoami` and shows a refusal to
+                      anyone who is not an administrator. Not registering it
+                      conditionally on purpose — a route that exists only for
+                      some users makes a shared link 404 for everyone else,
+                      which reads as a broken link rather than as a refusal.
+                      Every call the page makes is re-checked in the Lambda. */}
+                  <Route path="/admin" element={<Admin />} />
                   {/* Overlay-provided pages, inside the shell — which is the
                       default, because it is the guarded one. A route that
                       forgets to declare itself gets the sidebar and the

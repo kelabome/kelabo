@@ -18,9 +18,13 @@ import { err } from "./errors.js";
  * A favourite is only valid for a same-tenant identity. Favouriting an outside
  * address is `not_a_colleague` — that is what external contacts are for.
  */
-export function createContacts({ config, db }) {
+export function createContacts({ config, db, opConfig }) {
   const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
-  const externalEnabled = () => !!config.contacts?.external;
+  // Published operational config (contracts/src/opconfig.js). Async now, so
+  // turning external contacts on or off takes effect on the next request
+  // rather than the next deploy.
+  const externalEnabled = async () =>
+    !!(opConfig ? (await opConfig.effective()).contacts?.external : config.contacts?.external);
 
   /**
    * The Contacts screen's data: the caller's favourites, resolved to display
@@ -49,7 +53,7 @@ export function createContacts({ config, db }) {
 
     return {
       favourites,
-      externalEnabled: externalEnabled(),
+      externalEnabled: await externalEnabled(),
       // External sections are empty in self-host mode. Present so the SPA shape
       // never changes between deployments.
       external: [],

@@ -21,6 +21,7 @@ where it fits (ARCHITECTURE §15.8), add OTP + MCP.
 | `kelabo-<env>-contacts` | `CONTACT#<owner>` | `SK` | — | on external decline-cleanup | favourites (`FAV#`) + external links (`PEER#`) — docs 18 §4 |
 | `kelabo-<env>-credentials` | `CRED#<slot>` | `META` | — | **none, deliberately** | supplier keys (LLM, STT, Cloudflare Realtime, mail) — §6c |
 | `kelabo-<env>-journeys` | `PK` | `SK` | `tenant-status-index`, `accessor-index` | **none, deliberately** | journeys: container linking related kelabos — docs 20, §6b |
+| `kelabo-<env>-config` | `PK` | `SK` | — | **none, deliberately** | operational configuration versions + the admin roster — §6d, docs 23 |
 
 S3: `kelabo-<env>-archives-<acct>` — full transcript/board JSON.
 
@@ -409,13 +410,37 @@ single `PK = CRED` partition would make "list every slot" one Query — and woul
 make every slot readable by anything that can read one. Per-slot partitions are
 what let `dynamodb:LeadingKeys` name exactly the credentials a component may
 reach, which is the shape the Secrets Manager prefix grants had. The gateway
-gets `CRED#llm` and `CRED#rtc`, read-only. The REST API gets `GetItem` only, in
-two statements: the **values** of `CRED#stt` and `CRED#mail` (it mints STT
-tokens and sends mail with them), and `CRED#llm`/`CRED#rtc` fenced to the
-non-secret attributes. No `Scan` (the one call that returns every credential in
-one response), no `DeleteItem` (a credential is replaced, never removed) and no
-`PutItem` — master has no credential-write route, and the operator scripts that
-write one run under the operator's own AWS credentials.
+gets `CRED#llm` and `CRED#rtc`, read-only, and holds no write of any kind.
+
+The REST API's grant is **three** statements, and the third one changed what the
+first two mean. It gets the **values** of `CRED#stt` and `CRED#mail` (it mints
+STT tokens and sends mail with them); `CRED#llm`/`CRED#rtc` fenced to the
+non-secret attributes; and — since `/admin` gained a Suppliers tab — whole-item
+`GetItem` plus `PutItem` on all four slots.
+
+**IAM unions `Allow`, so that third statement makes the attribute fence
+inert.** The property the second statement describes — the control plane can
+know the LLM key exists but cannot read it — is **no longer true**. It was
+traded deliberately: a self-hoster with no shell cannot run `make
+credential-set`, and a console that configures everything except the four keys
+the product needs is not a console. The two original statements are kept in
+`infra/lib/lambda-stack.js` unchanged, because they are the exact description of
+what this role would need if the console were removed.
+
+What survives: no `Scan` (the one call that returns every credential in one
+response, and the accident this design exists to prevent), no `Query`, no
+`DeleteItem` (a credential is replaced, never removed, so a compromised admin
+session cannot take transcription down with no way back), and the slots
+enumerated from `CREDENTIAL_SLOTS` rather than matched as `CRED#*`, so an
+undesigned partition key fails closed instead of being silently covered.
+
+**What replaced the fence is an application limit, not an IAM one: no route
+returns a credential value.** `credentials.getRaw` exists and `admin.js`
+deliberately never calls it — `rest-api/test/admin.mjs` asserts that by reading
+the source. A key can be written from the console and never read back, so a
+stolen admin session can break the deployment without exfiltrating the supplier
+keys it runs on. Every write logs `credential_rotated` naming the caller, the
+slot and the field *names*.
 
 **A non-secret `configured` marker, beside the value.** Always `true` —
 `credentialItem` refuses an empty value, so writing the row is what it records.
@@ -430,6 +455,21 @@ the `dynamodb:Attributes` + `dynamodb:Select = SPECIFIC_ATTRIBUTES` condition in
 `infra/lib/lambda-stack.js`, so a projection and a policy cannot drift apart.
 It includes `PK`/`SK` because a `dynamodb:Attributes` condition that omits a
 table's key attributes denies the request outright.
+
+The projected read is still what `exists()` and `describe()` use, and now by
+choice rather than by necessity: the capability map must not read a live key to
+answer a yes/no, and keeping those two on that path is what keeps it exercised.
+The Suppliers console needs the other half — *which fields* of a slot are
+filled — which is derived from the value, so `describeFull`/`describeAllFull`
+(`rest-api/src/credentials.js`) read the whole item. They still return only
+booleans: `credentialStatus` derives them and discards the value. They degrade
+to a blank status rather than throwing, so a build without the console's grant
+sees "not set" instead of an exception.
+
+The Gateway keeps synthesising journey reports (docs 20 §6.1) even though the
+Lambda could now read `CRED#llm` in fact. The arrangement was right on its own
+terms — the credential is used where the call is made — and reversing it to
+follow a grant that widened for an unrelated reason would be the wrong lesson.
 
 Rows written before the marker existed still read correctly: `credentialStatus`
 falls back to the value when the row carries one, and — for a legacy row seen
@@ -466,6 +506,72 @@ sessions already minted with it.
 
 Migration for an existing deployment: `make credentials-migrate env=<env>`
 (dry by default, `write=1` to commit). The source secrets are never deleted.
+
+---
+
+## 6d. `config` table (operational configuration + the admin roster)
+
+`kelabo-<env>-config`. Two partitions and nothing else. Full design: docs 23.
+
+| PK | SK | Item |
+|---|---|---|
+| `OPCONFIG` | `V#000001` … | one published version of the operational configuration |
+| `ADMIN` | `<lowercased email>` | one granted administrator — `grantedBy`, `at` |
+
+**Its own table, not a partition of `kelabos`.** That would have been the
+cheapest place to put it and is the wrong one: the kelabos table expires
+partitions and is what a reset script walks. An operational configuration that
+vanished with a TTL sweep would silently revert the whole deployment to its
+bootstrap values, and the failure would look like a deploy nobody made.
+
+**No `ttl` attribute at all, and PITR on.** Everything else here either expires
+or is a credential; this is the deployment's own settings, and the only way to
+lose a version should be an accident at the table level.
+
+**Append-only, enforced by a condition and not by convention.** A publish is a
+`PutItem` with `attribute_not_exists(PK) AND attribute_not_exists(SK)`. Two
+administrators pressing Publish in the same second both computed the same next
+version; without the condition the second would overwrite the first, losing a
+change *and* the record of who made it. The loser gets `409 version_conflict`
+and republishes against the new head.
+
+**Six-digit zero-padded version in the sort key,** so a string sort is a version
+sort — `V#000010` must not precede `V#000009`. The key is authoritative:
+`parseOpConfig` reads the version from `SK` rather than trusting the `version`
+attribute, so a row whose attribute drifted is still read correctly.
+
+**The roster lives here because it exists only to say who may publish the
+config.** Splitting them would put an access-control decision one table away
+from the thing it controls, and a reader and a writer that disagreed about a
+prefix would be a security bug rather than a lookup miss. `rootAdminEmail` is
+*not* here — it is deployment config, deliberately, so that the one value
+governing who may change everything else cannot itself be changed from a web
+page (docs 23 §4).
+
+**Two IAM shapes, and the asymmetry is the point.** The Lambda holds
+`grantReadWriteData` — it publishes versions and maintains the roster. The
+Gateway holds `dynamodb:Query` **fenced to `LeadingKeys = ["OPCONFIG"]`** with
+`ForAllValues:` (without which a request naming several partitions passes if
+*any* one matches), and no write of any kind. `Scan` is structurally impossible
+there rather than merely withheld: it cannot be constrained by
+`dynamodb:LeadingKeys` at all, so a Scan grant would hand the internet-facing
+task the list of every identity that may reconfigure the deployment.
+
+**One `DeleteItem`, and it is not a version.** The Lambda deletes a revoked
+`ADMIN#` row — access control, not configuration, and root-only. Rolling a
+setting back is publishing the old value again, which records that act too.
+
+**No key material, ever.** This is an ordinary item with no customer-managed key
+over it, in a table admin tooling scans and PITR copies. Supplier keys are §6c,
+under their own CMK; there is not even a secret *name* here to point at one,
+because the slot is the address.
+
+**Read through a 60-second cache in each service** (`contracts/src/versioned.js`,
+shared machinery). A read that fails keeps serving the last version read
+successfully — never the seeded defaults, because a deployment that silently
+reverted to bootstrap values mid-call is far harder to diagnose than one running
+slightly stale settings. An empty partition is not a failure: it is a deployment
+where nobody has published yet.
 
 ---
 
@@ -512,6 +618,10 @@ Migration for an existing deployment: `make credentials-migrate env=<env>`
 | 19b | Journeys in my tenant (list, public discovery) | journeys `tenant-status-index` (`<tenant>#<status>`) |
 | 19c | Private journeys I can access | journeys `accessor-index` (`accessorIdentity`) |
 | 19d | Which journeys is this kelabo in? (purge guard, "Part of:") | kelabos `KELABO#<id>`, `begins_with(SK, "JOURNEY#")` |
+| 20 | Read the operational configuration (both services, 60 s cache) | config `PK = OPCONFIG` Query — never Scan; the Gateway's grant is fenced to this partition |
+| 21 | Publish a configuration version | config conditional `PutItem` on `OPCONFIG`/`V#<n+1>` (§6d) |
+| 22 | Is this caller an administrator? | config `PK = ADMIN` Query, plus the deploy-time `rootAdminEmail` |
+| 23 | Grant / revoke an administrator | config `PutItem` / `DeleteItem` on `ADMIN`/`<email>` — root only |
 
 ---
 
@@ -549,6 +659,13 @@ Migration for an existing deployment: `make credentials-migrate env=<env>`
 | guest identities | ephemeral (cookie only) |
 | journeys | permanent — no TTL attribute at all; deletion is always an explicit owner act (docs 20 §14) |
 | supplier credentials | permanent — no TTL attribute at all; a rotation overwrites, and the previous value is not kept (§6c) |
+| operational config + admin roster | permanent — no TTL attribute at all, deliberately: a sweep that removed a version would silently revert the deployment to its bootstrap values (§6d) |
+
+`retentionDays` is itself publishable now (docs 23), with one asymmetry worth
+stating here: it is **stamped on items as they are written**, so a change
+reaches new material only. Lengthening it does not resurrect what has already
+expired, and shortening it does not reach back to shorten what is already
+stored.
 
 Ephemeral-by-default posture for privacy (ARCHITECTURE §14.3): only registered
 participants retain access; guests leave no durable identity.

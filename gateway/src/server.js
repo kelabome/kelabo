@@ -173,6 +173,42 @@ async function route(c, req, res) {
     return send(res, result.status, result.body);
   }
 
+  // An administrator published new operational configuration
+  // (contracts/src/opconfig.js). Re-read it now instead of at the end of the
+  // 60-second cache window, and push it at the agent worker.
+  //
+  // The reload is an **optimisation of the wait, not the mechanism**: this task
+  // converges on the published config on its own within the TTL whether or not
+  // this call ever arrives, which is why the control plane treats a failure
+  // here as a log line rather than a failed publish. What it buys is the case
+  // the TTL does not cover well — a quiet kelabo, where `ensureWorker` is not
+  // called again until somebody speaks, so a model change would otherwise sit
+  // unapplied for as long as the room stayed silent.
+  //
+  // Same internal JWT as every other `/internal/*` route: minted by the Lambda
+  // from the shared signing key with `aud` = internal, and verified here. It
+  // carries no body — it is a "look again", not a value — so nothing an
+  // administrator typed reaches this task except through the table.
+  if (method === "POST" && path === "/internal/config/reload") {
+    const key = await c.getCookieKey();
+    const payload = verifyInternalJwt(bearerToken(req), key);
+    if (!payload) return send(res, 401, { error: "unauthenticated" });
+    c.opConfig?.invalidate();
+    // Awaited so the response tells the truth about whether the running worker
+    // has the new settings, rather than reporting a reload that is still in
+    // flight. Failure is reported, not thrown: the config is already
+    // invalidated by this point, so the next turn picks it up regardless.
+    let agent = { reconfigured: false, reason: "no_dispatcher" };
+    try {
+      if (c.agentDispatcher?.reconfigure) agent = await c.agentDispatcher.reconfigure();
+    } catch (err) {
+      c.logError("opconfig_reconfigure_failed", err);
+      agent = { reconfigured: false, reason: "error" };
+    }
+    c.log("internal_request", { action: "config_reload", sub: payload.sub, ...agent });
+    return send(res, 200, { ok: true, ...agent });
+  }
+
   // Journey reports (docs 20 §6) — a bounded synthesis over rows already in
   // DynamoDB, run inline (no worker leg, no dev-tunnel): the LLM
   // credential lives here, which is the entire reason this call exists.

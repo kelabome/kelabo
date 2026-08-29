@@ -3,7 +3,12 @@ import { RTC_MODES } from "@kelabo/contracts";
 import { entitlementFor } from "@kelabo/contracts/entitlement";
 import { err } from "./errors.js";
 
-export function createKelabos({ config, db, internal, credentials }) {
+export function createKelabos({ config, db, internal, credentials, opConfig }) {
+  // Conference defaults and the retention window are published operational
+  // config (contracts/src/opconfig.js), read per request. What is stamped on a
+  // kelabo at creation stays stamped: publishing a new default changes what the
+  // NEXT kelabo is created with, never a call already running.
+  const settings = async () => (opConfig ? await opConfig.effective() : config);
   // Is this optional supplier configured at all? Existence of its credential
   // row is the signal (docs 19 §3). Anything short of a definitive "no" — no
   // credentials module wired (tests), a read error — answers "on": a
@@ -33,6 +38,9 @@ export function createKelabos({ config, db, internal, credentials }) {
     const tenantId = identity.split("@")[1].toLowerCase();
     const now = Date.now();
     const kelaboId = randomUUID();
+    // Read once, here: whatever this kelabo is created with is stamped on it
+    // for its whole life.
+    const { rtc } = await settings();
     const meta = {
       kelaboId,
       status: "active",
@@ -57,7 +65,7 @@ export function createKelabos({ config, db, internal, credentials }) {
       // Conference transport, fixed for the life of the kelabo (docs 15). It
       // cannot change mid-kelabo: switching a `mesh` room to `sfu` would revoke
       // the peer-to-peer guarantee participants joined under.
-      rtcMode: RTC_MODES.includes(body.rtcMode) ? body.rtcMode : config.rtc.defaultMode,
+      rtcMode: RTC_MODES.includes(body.rtcMode) ? body.rtcMode : rtc.defaultMode,
       // Unlisted (a private call): excluded from the tenant's public active
       // list for everyone not in it. Not part of the public create schema —
       // only internal callers (huddle.create) can set it.
@@ -128,10 +136,13 @@ export function createKelabos({ config, db, internal, credentials }) {
       // against this and not against the signed-in address, which guests lack.
       body.me = participant.identity;
       body.isDeveloperPresent = !!meta.isDeveloperPresent;
+      const { rtc } = await settings();
       // Kelabos created before conference audio existed have no rtcMode; they
-      // fall back to the environment default rather than losing the call.
-      body.rtcMode = meta.rtcMode || config.rtc.defaultMode;
-      body.rtcVideo = config.rtc.video;
+      // fall back to the published/configured default rather than losing the
+      // call. A kelabo that HAS one keeps it — publishing a new default must
+      // never move a call in progress.
+      body.rtcMode = meta.rtcMode || rtc.defaultMode;
+      body.rtcVideo = rtc.video;
       // Told to everyone in the room, not just the host. The assistant reading
       // the host's past kelabos can put another kelabo's contents in front of
       // a guest who was not at it — so the room says so, in the same strip as
@@ -155,7 +166,11 @@ export function createKelabos({ config, db, internal, credentials }) {
       // `on: false` means OFF — the UI shows no trace of the capability;
       // runtime failures of an `on` capability are the client's `degraded`
       // path and are not represented here.
-      const [stt, assistant, rtc] = await Promise.all([
+      // `rtcConfigured` — whether the rtc credential slot is filled — as
+      // distinct from `rtc`, the published conference settings resolved above.
+      // They were both called `rtc`, which was survivable while one of them was
+      // a constant read off `config` and is not now that both are in scope.
+      const [stt, assistant, rtcConfigured] = await Promise.all([
         providerOn("stt"),
         providerOn("llm"),
         providerOn("rtc"),
@@ -180,9 +195,9 @@ export function createKelabos({ config, db, internal, credentials }) {
       const grant = entitlementFor({
         options: {
           rtcMode: body.rtcMode,
-          meshMaxParticipants: config.rtc.meshMaxParticipants,
+          meshMaxParticipants: rtc.meshMaxParticipants,
         },
-        providers: { stt, assistant, rtc, video: !!config.rtc.video },
+        providers: { stt, assistant, rtc: rtcConfigured, video: !!rtc.video },
       });
       body.entitlement = grant;
       /**
@@ -259,7 +274,7 @@ export function createKelabos({ config, db, internal, credentials }) {
     const resuming = meta.status === "ended" && meta.archivePending === true;
     if (meta.status !== "active" && !resuming) throw err(409, "already_ended");
     const endedAt = resuming ? (meta.endedAt ?? Date.now()) : Date.now();
-    const ttl = Math.floor(endedAt / 1000) + config.retentionDays * 86400;
+    const ttl = Math.floor(endedAt / 1000) + (await settings()).retentionDays * 86400;
     // Call the gateway FIRST while the kelabo is still "active": the gateway's
     // endKelabo writes the S3 archive + history row (and kicks off summary/minutes
     // generation asynchronously). If we marked it ended here first, the gateway

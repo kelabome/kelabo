@@ -37,6 +37,11 @@ function fromEnv() {
       // itself, and the contributor rollup counters — both land here because
       // the Gateway is the one place the LLM credential is readable at all.
       journeys: e.KELABO_TABLE_JOURNEYS,
+      // Operational config (contracts/src/opconfig.js). Read-only here, and
+      // fenced in IAM to the `OPCONFIG` partition: this task consumes published
+      // settings and never publishes them, and the admin roster in the same
+      // table is the control plane's alone.
+      config: e.KELABO_TABLE_CONFIG,
     },
     contacts: { external: e.KELABO_CONTACTS_EXTERNAL === "true" },
     // May a link-joined guest receive the spoken transcript? Default yes: on a
@@ -117,6 +122,7 @@ function fromBase(base) {
       contacts: base.tableNames.contacts,
       credentials: base.tableNames.credentials,
       journeys: base.tableNames.journeys,
+      config: base.tableNames.config,
     },
     contacts: { external: !!base.contacts?.external },
     guestTranscriptAccess: base.guestTranscriptAccess !== false,

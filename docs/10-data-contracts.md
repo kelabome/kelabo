@@ -345,6 +345,23 @@ before the client ever mints (06-stt.md §2). The journey REST bodies
 `contracts/src/schemas.js`; endpoint catalog in
 [components/02-rest-api.md](./components/02-rest-api.md) §3.5c.
 
+Administration payloads (docs 23, catalog in §3.7):
+
+```js
+/** @typedef {{admin:boolean, root:boolean, rootConfigured:boolean}} AdminWhoami */
+/** @typedef {{published:Object, effective:Object, status:{source:string,version:number},
+ *             versions:{version:number,effectiveFrom:number,publishedBy:string,note:string}[]}} AdminConfigView */
+/** @typedef {{config:Object, note:string}} PublishConfigBody */   // the WHOLE document, not a patch
+/** @typedef {{version:number, publishedBy:string, note:string, gatewayReloaded:boolean}} PublishResult */
+/** @typedef {{fields:Object<string,string>}} SaveCredentialBody */ // merged; empty = leave alone
+```
+
+`published` and `effective` are both returned deliberately: the console renders
+three columns (published / deployment default / in effect), and an operator who
+saw only the effective value could not tell a setting they published from a
+config-file default showing through. **No admin payload ever carries a
+credential value** — `/admin/credentials` returns per-field booleans only.
+
 ---
 
 ## 6. Cookies & sessions
@@ -465,7 +482,13 @@ Effective config (server mode) = the host's `MCP#host#<hostIdentity>` set
 /** @typedef {{kelaboId:string, trigger:Utterance, window:Utterance[],
  *             capabilities:string[], mcp:McpConfig, model:ModelConfig}} AgentContext */
 /** @typedef {{run:(ctx:AgentContext)=>AsyncIterable<Contribution>}} AgentRunner */
-/** @typedef {{provider:string, model:string, smallModel:string}} ModelConfig */
+/** @typedef {{provider:string, model:string, smallModel:string, baseUrl:string}} ModelConfig */
+// `baseUrl` is load-bearing, not decoration: `sameModelConfig` compares all four
+// fields. It is one of the two comparisons that decide whether a running agent
+// worker is re-initialised after a publish — the gate/orchestrator knobs are
+// compared separately (`sameKnobs`, the eight named keys), because the
+// motivating publish is a sensitivity change that touches no model field at
+// all (docs 23 §6.1).
 ```
 
 ---
@@ -475,6 +498,7 @@ Effective config (server mode) = the host's `MCP#host#<hostIdentity>` set
 | Boundary | Validate |
 |----------|----------|
 | REST request bodies | zod schemas per endpoint |
+| Published operational config | `opConfigSchema` (`contracts/src/opconfig.js`) — validated on **write** at publish time *and* on **read**, because a stored version outlives the code that wrote it. `parseOpConfig` takes the version from the sort key rather than the attribute, so a row whose attribute drifted is still read correctly (docs 23) |
 | `POST /caption` | `CaptionPost` zod; reject non-final; clamp text length |
 | WSS frames (both directions) | discriminated-union zod on `type` |
 | SSE payloads | serialized `Contribution`; client tolerates unknown fields |

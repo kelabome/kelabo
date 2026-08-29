@@ -1,4 +1,5 @@
 import { queryAcceptedContacts } from "./db.js";
+import { effectiveConfig } from "./opconfig.js";
 
 /**
  * Contact presence (docs 18 §5) — the first non-kelabo-scoped browser stream on
@@ -80,7 +81,9 @@ export function createPresence(c) {
    *  of: same-tenant colleagues plus accepted external contacts. */
   async function audienceFor(identity, tenantId) {
     const set = new Set(c.state.presenceByTenant.get(tenantId) || []);
-    if (c.config.contacts?.external) {
+    // Published operational config (docs 23): turning external contacts on
+    // must widen presence on the next event, not on the next deploy.
+    if ((await effectiveConfig(c)).contacts.external) {
       // The people `identity` has accepted see them, and they see those people.
       // Presence is symmetric for an accepted pair, so the same peer list serves
       // both "whom I notify" and "whose snapshot includes me".

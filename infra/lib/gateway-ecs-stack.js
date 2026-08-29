@@ -136,6 +136,15 @@ export class GatewayEcsStack extends Stack {
           // (docs 20 §10) the contributor rollup counters — the only table
           // besides its own kelabos/history the Gateway needs read+write on.
           KELABO_TABLE_JOURNEYS: names.journeys,
+          // Operational config (contracts/src/opconfig.js). Read-only, and
+          // fenced below to the `OPCONFIG` partition — the admin roster shares
+          // this table and is the control plane's alone.
+          //
+          // Note what this means for every OTHER value in this task definition:
+          // they are now the **bootstrap**, not the setting. A published
+          // version wins at run time, so changing e.g. KELABO_LLM_MODEL here
+          // only affects a deployment that has published nothing.
+          KELABO_TABLE_CONFIG: names.config,
           KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
           KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
           KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
@@ -313,6 +322,30 @@ export class GatewayEcsStack extends Stack {
     // access to the material independent of who holds `GetItem`; granting
     // encrypt here would hand back the write path the condition above removes.
     tables.credentials.encryptionKey?.grantDecrypt(taskRole);
+
+    // Operational config, read-only, one partition (contracts/src/opconfig.js).
+    //
+    // `Query`, not `Scan`, and the condition is what forces it: `Scan` cannot
+    // be constrained by `dynamodb:LeadingKeys` at all, so a Scan grant here
+    // would hand the internet-facing task the **admin roster** that shares this
+    // table — the list of every identity that may reconfigure the deployment.
+    // Naming the partition is what keeps this a read of settings rather than a
+    // read of the table.
+    //
+    // `ForAllValues:` is required, not politeness: without it a request naming
+    // several partitions passes the condition if *any* one of them matches.
+    //
+    // No write of any kind. Publishing is the control plane's, and a task that
+    // cannot publish cannot be made to publish itself a new model — which
+    // matters more here than for most grants, because this is the component
+    // that runs untrusted transcript through an LLM.
+    taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [tables.config.tableArn],
+        conditions: { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["OPCONFIG"] } },
+      }),
+    );
 
     new route53.ARecord(this, "GatewayARecord", {
       zone,

@@ -37,8 +37,10 @@ const JOURNEY_REFRESH_MS = 60_000;
 export function createAgentDispatcher(c) {
   let worker = null;
   // What the running worker was last configured with, so a published change can
-  // be told from a no-op.
+  // be told from a no-op. Both halves of the init payload are tracked: the
+  // model AND the knobs, because either one changing must reach the worker.
   let activeModelConfig = null;
+  let activeKnobs = null;
   let workerReady = false;
   let reqSeq = 0;
   let initInfo = { llmApiKey: null, webSearchKey: null };
@@ -72,31 +74,70 @@ export function createAgentDispatcher(c) {
    * blank model wherever the deployment sets it in the environment instead of
    * the file. Moving it is the fix: one resolution, so the claim is structural
    * rather than a thing this comment asserts.
+   *
+   * Async now, because the answer comes from the *published* operational config
+   * folded over this task's environment (contracts/src/opconfig.js) rather than
+   * from the environment alone. It is a cached read — one Query a minute for
+   * the whole task — so this stays cheap enough to call on the path it is
+   * called on.
    */
-  const resolveModelConfig = () => resolveModel(c.config);
+  const resolveEffective = async () => (c.opConfig ? await c.opConfig.resolved() : c.config);
+  const resolveModelConfig = async () => resolveModel(await resolveEffective());
+
+  // The trigger-gate and orchestrator knobs, published or configured. The
+  // worker holds these; they only ever arrive with `init`, so a knob change
+  // has to be *detected* here and re-init the running worker exactly as a
+  // model change does — which is what makes tuning sensitivity against a live
+  // room possible at all. Comparing only the model was the original bug: a
+  // published sensitivity change with the model untouched reached no running
+  // worker until the next task restart, precisely the wait publishing exists
+  // to remove.
+  const resolveKnobs = async () => (await resolveEffective())?.agent ?? c.config.gateway.agent;
 
   const sameModelConfig = (a, b) =>
     !!a && !!b && a.provider === b.provider && a.model === b.model && a.smallModel === b.smallModel && a.baseUrl === b.baseUrl;
+
+  // Named keys rather than a JSON compare, so a helper field on one side's
+  // object (the resolved fold carries exactly these eight; a config file may
+  // carry a comment key) cannot make every comparison read "changed".
+  const KNOB_KEYS = [
+    "maxConcurrentRuns",
+    "maxDispatchPerTurn",
+    "sensitivity",
+    "maxContributionsPerMinute",
+    "cooldownSeconds",
+    "rollingWindowSize",
+    "turnTimeoutSeconds",
+    "turnDeadlineSeconds",
+  ];
+  const sameKnobs = (a, b) => !!a && !!b && KNOB_KEYS.every((k) => a[k] === b[k]);
 
   async function ensureWorker() {
     if (worker) {
       // A configuration change reaches a *running* task. The worker is
       // long-lived — without this, swapping the model would take effect on the
-      // next deploy, exactly the wait this replaced.
-      const next = resolveModelConfig();
-      if (next && !sameModelConfig(next, activeModelConfig)) {
-        const keys = await resolveLlmKeys(next);
+      // next deploy, exactly the wait this replaced. The knobs are compared
+      // independently of the model: an operator turning sensitivity down on a
+      // room that will not shut up has usually not touched the model at all.
+      const next = await resolveModelConfig();
+      const nextKnobs = await resolveKnobs();
+      const modelChanged = !!next && !sameModelConfig(next, activeModelConfig);
+      const knobsChanged = !sameKnobs(nextKnobs, activeKnobs);
+      if (next && (modelChanged || knobsChanged)) {
+        const keys = modelChanged ? await resolveLlmKeys(next) : initInfo;
         activeModelConfig = next;
+        activeKnobs = nextKnobs;
         initInfo = keys;
         worker.postMessage({
           type: "init",
           modelConfig: next,
-          knobs: c.config.gateway.agent,
+          knobs: nextKnobs,
           llmApiKey: keys.llmApiKey,
           webSearchKey: keys.webSearchKey,
           openaiBaseUrl: next.baseUrl,
         });
-        c.log("agent_model_reconfigured", { provider: next.provider, model: next.model });
+        if (modelChanged) c.log("agent_model_reconfigured", { provider: next.provider, model: next.model });
+        else c.log("agent_knobs_reconfigured", { sensitivity: nextKnobs?.sensitivity });
       }
       return worker;
     }
@@ -117,14 +158,16 @@ export function createAgentDispatcher(c) {
     });
     worker = w;
 
-    const modelConfig = resolveModelConfig();
+    const modelConfig = await resolveModelConfig();
+    const knobs = await resolveKnobs();
     const keys = await resolveLlmKeys(modelConfig);
     activeModelConfig = modelConfig;
+    activeKnobs = knobs;
     initInfo = keys;
     w.postMessage({
       type: "init",
       modelConfig,
-      knobs: c.config.gateway.agent,
+      knobs,
       llmApiKey: keys.llmApiKey,
       webSearchKey: keys.webSearchKey,
       openaiBaseUrl: modelConfig.baseUrl,
@@ -371,5 +414,29 @@ export function createAgentDispatcher(c) {
     if (worker) worker.postMessage({ type: "rename", kelaboId, from, to });
   }
 
-  return { handleCaption, summarize, drop, ensureContext, renameSpeaker };
+  /**
+   * Re-read the operational config and push it at the running worker.
+   *
+   * Called by `POST /internal/config/reload` the moment an administrator
+   * publishes, so a model or sensitivity change is live in seconds instead of
+   * at the end of the cache window — and, more importantly, without waiting for
+   * the next caption: `ensureWorker` only reconfigures when it is called, so a
+   * quiet kelabo would otherwise keep the old model for as long as nobody
+   * spoke.
+   *
+   * A no-op when no worker is running. There is nothing to reconfigure, and the
+   * next one to start will read the published config on its way up.
+   */
+  async function reconfigure() {
+    if (!worker) return { reconfigured: false, reason: "no_worker" };
+    const beforeModel = activeModelConfig;
+    const beforeKnobs = activeKnobs;
+    await ensureWorker();
+    // Either half counts: a knobs-only publish is a real reconfiguration and
+    // the console reporting it as a no-op would read as a failed save.
+    const reconfigured = !sameModelConfig(beforeModel, activeModelConfig) || !sameKnobs(beforeKnobs, activeKnobs);
+    return { reconfigured, model: activeModelConfig?.model ?? "" };
+  }
+
+  return { handleCaption, summarize, drop, ensureContext, renameSpeaker, reconfigure };
 }

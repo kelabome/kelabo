@@ -17,6 +17,7 @@ import {
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
 import { languageName } from "./agent/language.js";
 import { settleKelaboJoin, markLinkEnded } from "./journeys.js";
+import { effectiveConfig } from "./opconfig.js";
 
 export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   const meta = await getMeta(c, kelaboId);
@@ -146,7 +147,10 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
     c.logError("history_write_failed", err, { kelaboId });
   }
 
-  const ttl = Math.floor(endedAt / 1000) + (c.config.retentionDays ?? 30) * 86400;
+  // Published retention (docs 23 §7.1), the same value the REST side stamps at
+  // kelabo end — resolved rather than read off `config`, or one kelabo's
+  // material would expire on two different clocks after a publish.
+  const ttl = Math.floor(endedAt / 1000) + (await effectiveConfig(c)).retentionDays * 86400;
   try {
     await updateMeta(c, kelaboId, {
       status: "ended",

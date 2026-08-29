@@ -70,7 +70,8 @@ actions that touch live state must reach it synchronously:
 | `POST <gatewayBase>/internal/kelabos/:id/cancel` | notify a scheduled kelabo's cancellation |
 | `POST <gatewayBase>/internal/kelabos/:id/reschedule` | notify a schedule change |
 | `POST <gatewayBase>/internal/kelabos/:id/ring(/answer\|/cancel)` | deliver / answer / cancel a ring over the targets' presence streams (docs 18 §6) |
-| `POST <gatewayBase>/internal/journeys/:id/report` | generate a journey report (docs 20 §6.1) — the LLM key is Gateway-only (this role can read only *that* `CRED#llm` exists, §6), so the synthesis cannot run here |
+| `POST <gatewayBase>/internal/journeys/:id/report` | generate a journey report (docs 20 §6.1) — the credential is used where the call is made, so the synthesis runs there rather than here |
+| `POST <gatewayBase>/internal/config/reload` | an administrator published operational config: re-read it now and re-init the agent worker (docs 23 §6.1). **The one call here that is best-effort** — the write is already durable and the Gateway converges on its 60-second cache anyway, so a failure is logged and the publish still succeeds |
 
 All are authenticated with an **internal app JWT** minted by the Lambda (HS256,
 Secrets Manager key, short exp, `aud:"gateway-internal"`); the Gateway rejects them
@@ -90,7 +91,9 @@ Legend: 🔓 no auth · 🔑 session cookie · 🎟 participant cookie · 👑 h
 Request an OTP for an email.
 - **Body:** `{ email }`
 - **Behavior:** validate email; check `email` domain against
-  `config.allowedEmailDomain` (self-host: exactly one). If allowed, generate a
+  the **resolved** allowed domain — published op-config folded over
+  `config.allowedEmailDomain`, so widening it is a publish and not a deploy
+  (docs 23) — self-host: exactly one. If allowed, generate a
   6-digit code, store `OTP#<email>` with TTL (e.g. 10 min) + attempt counter, send
   via SES. Always return 200 with a generic body to avoid email enumeration *unless*
   the domain is disallowed (then explicit).
@@ -118,7 +121,8 @@ Begin social login.
 #### `GET /auth/oidc/:provider/callback` 🔓
 - **Behavior:** verify state; exchange code at the provider token endpoint; verify
   the ID token; extract **verified email**; **enforce the domain allow-list**
-  (reject if the email domain ∉ `allowedEmailDomain` — a random gmail on a
+  (reject if the email domain ∉ the resolved allowed domain, the same value the
+  OTP path reads so the two cannot disagree — a random gmail on a
   `@company.com` self-host is rejected); upsert `USER#<email>`;
   `establishSession(email)`; 302 → `/`.
 - **Errors:** `domain_not_allowed` (403 page), `oidc_failed` (401 page).
@@ -364,6 +368,44 @@ the client re-fetches the finished row via GET.
 
 #### `GET /health` 🔓 → `{ ok: true, version }`
 
+### 3.7 Deployment administration (docs 23)
+
+Seven routes. Every one re-checks the caller server-side; the SPA hides its menu
+entry as a courtesy, not as the control.
+
+| Route | Who | Notes |
+|---|---|---|
+| `GET /admin/whoami` | any session | `{ admin, root, rootConfigured }` |
+| `GET /admin/config` | admin | `{ published, effective, status, versions[] }` |
+| `POST /admin/config` | admin | body `{ config, note }` → `{ version, publishedBy, note, gatewayReloaded }` |
+| `GET /admin/credentials` | admin | slot status + field descriptors. **Never a value** |
+| `PUT /admin/credentials/:slot` | admin | body `{ fields }`; merges |
+| `GET /admin/roster` | **root** | `{ root, admins[] }` |
+| `POST /admin/roster`, `DELETE /admin/roster/:email` | **root** | grant / revoke |
+
+**`whoami` answers a non-admin instead of refusing them.** It is what the app
+asks on load to decide whether to render the menu entry, so a 403 there would be
+a 403 on every page load for every ordinary user. It discloses nothing but
+whether *you* are an administrator.
+
+**The publish body is the whole document, not a patch.** A patch needs a way to
+say "unset this field", which is exactly the `null`-versus-absent distinction the
+fold turns on (docs 23 §2.1); sending the complete document means the console's
+form state *is* the version. `note` is required by the route rather than the
+schema — the seeded default has nothing to explain, a human always does.
+
+There is no `GET /admin/config/history`: history is the `versions` array inside
+`GET /admin/config`, because the console renders both on one screen and two
+round trips would let them disagree.
+
+**Failure modes worth knowing:** `409 version_conflict` when two administrators
+publish at once (reload and publish on top of theirs — a blind retry would
+overwrite); `400 note_required` / `invalid_config`; `400 unknown_field` /
+`no_fields` / `missing_field` and `404 unknown_slot` on a credential write.
+Everything refuses with `403 forbidden` when the caller is not an administrator,
+including when the roster simply could not be read — "we could not check"
+resolves to "no".
+
 ---
 
 ## 4. Internal modules (Lambda)
@@ -388,8 +430,10 @@ the client re-fetches the finished row via GET.
 | `records` | archive read + access control; S3 fetch for large transcripts |
 | `journeys` | the docs 20 surface: lifecycle, access checks, link/unlink, description/status versions, board, documents, reports (pending row + Gateway dispatch), timeline, contributor rollups |
 | `stt/` | STT credential minting: provider-neutral core (`index.js`) + one mint per provider (`deepgram.js`, `soniox.js`) — [06-stt.md](./06-stt.md) |
+| `admin` | the docs 23 control plane: the roster (root-only), publishing config versions, and writing supplier credentials. Holds the only `credentials.put()` call in `src/` |
+| `opconfig` | one 60-second cache per container over `PK = OPCONFIG`. `resolved()` / `effective()` fold a published version over `config`; handlers call them **per request**, never at construction |
 | `db` | DynamoDB access (see [08-database.md](../08-database.md)) |
-| `config` | load env-injected config (allowed domain, table names, secrets ARNs) |
+| `config` | load env-injected config (table names, secrets ARNs, `rootAdminEmail`) — the **bootstrap** half of a two-tier resolution; the published half is `opconfig` |
 
 Auth backends live behind the `AuthProvider` interface so **social OIDC** and **OTP**
 share one path, and **enterprise SSO** / Cognito can be added without
@@ -404,7 +448,10 @@ invalid_email, invalid_code, code_expired, too_many_attempts, kelabo_not_found,
 kelabo_ended, not_host, already_ended, name_required, not_a_participant,
 record_not_found, stt_unavailable, kelabo_in_journey` — plus the journey codes
 of docs 20 (`not_journey_owner`, `journey_completed`,
-`not_message_author_or_lead`, `not_document_owner_or_lead`, …).
+`not_message_author_or_lead`, `not_document_owner_or_lead`, …) and the admin
+codes of docs 23 (`forbidden`, `bad_email`, `already_root`, `cannot_revoke_root`,
+`note_required`, `invalid_config`, `version_conflict`, `unknown_slot`,
+`unknown_field`, `no_fields`, `missing_field`).
 
 ---
 
@@ -414,13 +461,30 @@ of docs 20 (`not_journey_owner`, `journey_completed`,
   history; read S3 archive bucket. Plus a deliberately narrow `dynamodb:DeleteItem` on
   history and `s3:DeleteObject` on archive objects (for `POST /records/purge`) —
   the API still cannot *write* history rows or archives, which stay gateway-owned.
-- SES: `ses:SendEmail`, fenced by a `ses:FromAddress` condition — and granted
-  **only when `mail.provider` is `ses`**. A deployment sending through another
-  provider gets nothing here and reads its API key from the `mail` credential
-  slot instead, so it cannot still send from the SES identity long after it
-  stopped meaning to.
-- Credentials table: `dynamodb:GetItem` only, in **two statements**, plus
-  `kms:Decrypt` on the table's customer-managed key.
+- DynamoDB, the `config` table: `grantReadWriteData` — this is the component
+  that publishes operational-config versions and maintains the admin roster
+  (docs 08 §6d, docs 23). Append-only is a property of the *code*: the publish
+  `PutItem` is conditional on the key not existing, so a version cannot be
+  overwritten even though IAM would allow it. The one `DeleteItem` this role
+  makes here is a revoked administrator — access control, not configuration.
+- SES: `ses:SendEmail`, **unconditional**, fenced by a `ses:FromAddress`
+  `StringLike` condition on `*@<sending domain>`.
+
+  Both of those changed when mail became publishable, and for one reason: **a
+  deploy-time IAM decision cannot follow a run-time value.** Granting this only
+  when `mail.provider === "ses"` was right while the provider was a deploy-time
+  fact; now an administrator publishes it, and a deployment whose config still
+  said `mailersend` while the published version said `ses` would hold no send
+  permission and fail every sign-in code — with the publish itself having
+  reported success. `StringEquals` on the exact address had the same problem:
+  publishing a new sender would become an AccessDenied on every send.
+
+  What survives: this function still cannot send as another verified identity in
+  the account, and SES independently refuses any domain it has not verified. The
+  cost is that a typo in the local part now sends successfully from an address
+  that does not exist (docs 23 §8).
+- Credentials table: `dynamodb:GetItem` and `PutItem`, in **three statements**,
+  plus `kms:Decrypt` **and `kms:Encrypt`** on the table's customer-managed key.
 
   | Slots | Grant | What this role can learn |
   |---|---|---|
@@ -438,16 +502,34 @@ of docs 20 (`not_journey_owner`, `journey_completed`,
   `dynamodb:Attributes` fences the attributes a request *names*, so a `GetItem`
   naming none would return everything and satisfy `ForAllValues` vacuously.
 
-  Deliberately **no `Scan`** — a scan is the one call that returns every
-  credential in the deployment at once, and it would bypass the attribute fence
-  for the same reason — **no `DeleteItem`** (a credential is replaced, never
-  removed), and **no `PutItem`**: master has no credential-write route, and
-  `rest-api/scripts/put-credential.mjs` runs under the operator's own AWS
-  credentials rather than this role. `PutItem` replaces a whole item, so holding
-  it would let this role overwrite `CRED#llm` with a key of its choosing — a
-  different route to possessing the one it may not read. (The private SaaS
-  branch has a root-only credential reveal console and widens this grant on its
-  own side; the split is deliberate.)
+  **The third statement makes the second one inert, and that was a deliberate
+  trade.** `/admin` → Suppliers sets and rotates every slot, so this role now
+  holds whole-item `GetItem` plus `PutItem` on all four `CRED#` partitions — and
+  IAM unions `Allow`, so the attribute fence above no longer restricts anything.
+  The property it describes (this role can know the LLM key exists but not read
+  it) is **not true** in this build and cannot be while a credential-write
+  console exists. The first two statements are kept in
+  `infra/lib/lambda-stack.js` unchanged, because they are the exact description
+  of what this role would need if the console were removed: delete the third and
+  the boundary returns with nothing else to unpick. The reason it went is that a
+  self-hoster with no shell cannot run `make credential-set`, and a console that
+  configures everything except the four keys the product needs is not a console.
+
+  Still deliberately **no `Scan`** — the one call that returns every credential
+  in the deployment at once — **no `Query`**, and **no `DeleteItem`** (a
+  credential is replaced, never removed, so a compromised admin session cannot
+  take transcription down with no way back). The slots are enumerated from
+  `CREDENTIAL_SLOTS` rather than matched as `CRED#*`, so an undesigned partition
+  key fails closed instead of being silently covered.
+
+  **What replaced the fence is an application limit: no route returns a
+  credential value.** `credentials.getRaw` exists and `src/admin.js` never calls
+  it — `test/admin.mjs` asserts that by reading the source. A key is written from
+  the console and never read back, so a stolen admin session can break this
+  deployment without exfiltrating the supplier keys it runs on. Every write logs
+  `credential_rotated` naming the caller, the slot and the field *names*.
+  (The private SaaS branch additionally has a root-only reveal route; master
+  deliberately does not.)
 - Secrets Manager: read the cookie/JWT signing key, the social OIDC client
   secrets (Google/Apple) and the CloudFront→API origin secret. Nothing else —
   the supplier keys (llm/stt/rtc/mail) and the host-pasted MCP bearer tokens

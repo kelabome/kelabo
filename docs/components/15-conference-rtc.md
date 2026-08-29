@@ -29,7 +29,7 @@ direction: see [§1.1](#11-demotion-sfu--mesh-mid-call).
 | Media path | browser → Cloudflare Realtime SFU → browsers | browser ↔ browser, direct |
 | Who can decrypt media | Cloudflare (an SFU terminates DTLS-SRTP) | **only the participants** |
 | Uplink per participant | 1 stream | N−1 streams |
-| Practical size | large | `rtc.meshMaxParticipants` (default 6) |
+| Practical size | large | `rtc.meshMaxParticipants` (default 5, publishable) |
 | Cloudflare's role | media relay + STUN/TURN | STUN/TURN only |
 | Kelabo's role | signalling relay | signalling relay |
 
@@ -408,20 +408,23 @@ microphone adds nothing and waits to be dialled.
   makes `useRtc` publish `null` regardless — the policy is enforced at the
   transport, not only in the UI.
 
-  Deploying that flag is the one trap here. On ECS the gateway does not read
-  `config/` at all — `loadGatewayConfig()` takes the `fromEnv()` branch whenever
-  `KELABO_TABLE_KELABOS` is set — so the value arrives as `KELABO_RTC_VIDEO` in
-  the **task definition**, written by `infra/lib/gateway-ecs-stack.js`. Rebuilding
-  the image and running `make restart` re-pulls `:latest` against the *same*
-  task-definition revision and the old value survives. Use `make gateway` or
-  `make deploy`. To check what a running task actually believes:
+  **Publish it; do not deploy it.** `rtc.video` is operational config now
+  (docs 23) — `/admin` → Services, in effect within a minute. It is also the
+  canonical reason that fold's "unset" sentinel is `null` rather than falsiness:
+  `false` means *audio only*, and a `published || fallback` check would discard
+  it and hand the deployment's `true` straight back.
 
-  ```
-  aws ecs describe-task-definition --task-definition "$(aws ecs describe-services \
-    --cluster kelabo-<env> --services kelabo-<env>-gateway \
-    --query 'services[0].taskDefinition' --output text)" \
-    --query "taskDefinition.containerDefinitions[0].environment[?name=='KELABO_RTC_VIDEO']"
-  ```
+  The old trap survives only for a deployment that has published nothing. There,
+  the gateway does not read `config/` at all on ECS — `loadGatewayConfig()` takes
+  the `fromEnv()` branch whenever `KELABO_TABLE_KELABOS` is set — so the value
+  arrives as `KELABO_RTC_VIDEO` in the **task definition**, and `make restart`
+  re-pulls `:latest` against the *same* revision while the old value survives.
+  Use `make gateway` or `make deploy` for that case.
+
+  Reading the task definition is no longer a way to find out what a task
+  believes, and is now actively misleading: it reports the bootstrap while the
+  task may be running something published over it. Ask the console, or
+  `make opconfig-show env=<env>`.
 - **Tiles are size-agnostic.** A `<video>` fills the same box the avatar sits in,
   at grid, rail or stage size, so video changed no layout code.
 - **The speaker is selectable too** (`useSpeakerDevice` + `setSinkId` on the
@@ -471,8 +474,10 @@ mesh_room_full`). Stopping a share, leaving, or being evicted frees the unit at
 once; a rejoin onto a seat that already holds a share keeps both units and is
 never refused. SFU rooms are not capped. The SPA disables the share button when
 its local count says the room is full (advisory — the Gateway re-checks), and
-the value remains config: raise it for a deployment whose uplinks can carry
-more, or set it `<= 0` to uncap.
+the value is publishable (docs 23): raise it from `/admin` → Services for a
+deployment whose uplinks can carry more. One gap worth knowing — the schema
+requires a positive integer, so the `<= 0` uncap is reachable from
+`config/kelabo.json` but **not** from a publish.
 
 ---
 
@@ -491,9 +496,19 @@ for slightly *less* (15s, `STREAM_GRACE_MS` in `useRtc.js`) — the two windows
 move together, and the client must always give up first, or it becomes a ghost
 holding a session the server has already evicted.
 
+Every field of that block except `provider` is **publishable** (docs 23) — the
+JSON above is the bootstrap a deployment falls back to. Two consequences worth
+stating: they are defaults for a **new** kelabo, and a kelabo keeps the
+`rtcMode` stamped on its META, so publishing a new default is not a way around
+the rule that a kelabo's transport never changes after creation (§1.1); and
+`video: false` is a real published value, which is why the fold's "unset"
+sentinel is `null` rather than falsiness.
+
 `config/loadConfig.mjs` derives `rtcApiBase` (`https://rtc.live.cloudflare.com/v1`)
 and defaults the whole `rtc` block, so a `kelabo.json` predating conference audio
-still loads. The credential is the `rtc` slot of the credentials table:
+still loads — and, one layer up, a deployment that has published nothing behaves
+exactly as it did before. The credential is the `rtc` slot of the credentials
+table:
 
 ```json
 { "sfuAppId": "…", "sfuAppSecret": "…", "turnKeyId": "…", "turnKeyApiToken": "…" }
@@ -501,6 +516,8 @@ still loads. The credential is the `rtc` slot of the credentials table:
 
 Like every supplier credential, it is a table row now, not a Secrets Manager
 entry, and the gateway's five-minute cache picks a change up without a redeploy.
+It is settable from `/admin` → Suppliers as well as `make credential-set`, so
+turning conference audio on no longer needs a shell.
 Set it with `make credential-set env=dev slot=rtc write=1`; an existing
 deployment's `kelabo/<env>/cloudflare-realtime` secret is copied across by
 `make credentials-migrate` instead. It is deliberately optional: without it

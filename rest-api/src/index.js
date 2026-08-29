@@ -57,6 +57,8 @@ import { createRecords } from "./records.js";
 import { createJourneys } from "./journeys.js";
 import { createSttToken } from "./stt/index.js";
 import { createInternal } from "./internal.js";
+import { createOpConfig } from "./opconfig.js";
+import { createAdmin } from "./admin.js";
 import { createAgent } from "./agent.js";
 import { parseCookies, readCookie, mintCookie, serializeCookie } from "./cookies.js";
 import { ApiError, err } from "./errors.js";
@@ -110,7 +112,7 @@ function htmlErrorPage(status, code) {
 }
 
 export function createApp(deps) {
-  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, credentials, mcpOauth, scheduling, contacts, huddle, agent, journeys } = deps;
+  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, credentials, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin } = deps;
 
   /**
    * Best-effort link into the journeys named at kelabo creation/schedule time
@@ -241,6 +243,98 @@ export function createApp(deps) {
             tenantId: session.tenantId,
           },
         };
+      },
+    },
+    // --- deployment administration (contracts/src/opconfig.js) ---------------
+    //
+    // Every one of these re-checks server-side. The console hides its menu entry
+    // for a non-admin, which is cosmetic and treated as such: hiding a button is
+    // not access control, and a hand-made request from a signed-in ordinary user
+    // is refused here.
+    {
+      method: "GET",
+      pattern: "/admin/whoami",
+      handle: async (req) => {
+        // The one route that answers a non-admin rather than refusing them: it
+        // is what the app asks on load to decide whether to show the entry at
+        // all, so a 403 here would be a 403 on every page load for every
+        // ordinary user. It discloses nothing but whether *you* are an admin.
+        const session = await requireSession(req);
+        return { status: 200, body: await admin.whoami(session.identity) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/admin/config",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await admin.getConfig({ identity: session.identity }) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/admin/config",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = await admin.publishConfig({ identity: session.identity, body: req.body });
+        return { status: 200, body };
+      },
+    },
+    // Supplier credentials. Status only on the way out — there is no route in
+    // this file that returns key material, deliberately (see admin.js).
+    {
+      method: "GET",
+      pattern: "/admin/credentials",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await admin.listCredentials({ identity: session.identity }) };
+      },
+    },
+    {
+      method: "PUT",
+      pattern: "/admin/credentials/:slot",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = await admin.saveCredential({
+          identity: session.identity,
+          slot: req.params.slot,
+          body: req.body,
+        });
+        return { status: 200, body };
+      },
+    },
+    // The roster is root-only, both directions. A granted admin who could grant
+    // would be root after one hop, and one who could revoke could remove the
+    // others and then the record of having done so.
+    {
+      method: "GET",
+      pattern: "/admin/roster",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await admin.listAdmins({ identity: session.identity }) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/admin/roster",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = await admin.grantAdmin({ identity: session.identity, body: req.body });
+        log("warn", "admin_granted", { by: session.identity, email: body.email });
+        return { status: 200, body };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/admin/roster/:email",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = await admin.revokeAdmin({
+          identity: session.identity,
+          email: decodeURIComponent(req.params.email),
+        });
+        log("warn", "admin_revoked", { by: session.identity, email: body.email });
+        return { status: 200, body };
       },
     },
     {
@@ -1500,6 +1594,13 @@ export function composeApp(config) {
   // moves them across once with `scripts/migrate-credentials.mjs`, which is
   // also how a fresh self-host fills the slots the first time.
   const credentials = createCredentials({ db });
+  // Operational configuration (contracts/src/opconfig.js), constructed early
+  // because most of what follows consumes it. One cache per container, shared
+  // by every handler — but note that consumers must call `opConfig.resolved()`
+  // per request rather than capturing the result here: a Lambda container is
+  // reused for minutes, and a captured value would never see a publish, which
+  // is the entire failure this replaced.
+  const opConfig = createOpConfig({ config, db });
   // Mail is a supplier like the rest: the key is the `mail` credential slot,
   // read per send rather than captured here. That is what makes rotating it a
   // console operation instead of a redeploy, and the 5-minute credential cache
@@ -1507,36 +1608,50 @@ export function composeApp(config) {
   // when a provider needs one: SES authenticates with this Lambda's own IAM
   // role, so an SES deployment never fills the slot and does not have to.
   const mailer = createMailer({
-    resolve: async () =>
-      mailSettingsFromConfig(
-        config,
+    resolve: async () => {
+      // Provider and from-address are published operational config
+      // (contracts/src/opconfig.js), resolved here — per send, because
+      // `createMailer` calls `resolve` per send and that is exactly what makes
+      // switching transport a publish rather than a redeploy.
+      //
+      // The key is looked up for the RESOLVED provider, not the configured one.
+      // Reading it for `config.mail.provider` would hand a published MailerSend
+      // deployment the SES branch's empty key and fail every sign-in code, with
+      // the publish itself having reported success.
+      const { mail } = await opConfig.resolved();
+      const merged = { ...config, mail: { ...config.mail, ...mail } };
+      return mailSettingsFromConfig(
+        merged,
         // Empty for SES, which takes no key. `mailKeyFrom` returns "" rather
         // than throwing for exactly that reason; a provider that needs one
         // refuses the send itself, with a message naming the problem.
-        mailKeyFrom(await credentials.get("mail").catch(() => null), config.mail.provider)
-      ),
+        mailKeyFrom(await credentials.get("mail").catch(() => null), mail.provider)
+      );
+    },
   });
-  const otp = createOtp({ config, db, mailer });
-  const sessions = createSessions({ config, db, secrets });
-  const oidc = createOidc({ config, secrets });
+  const otp = createOtp({ config, db, mailer, opConfig });
+  const sessions = createSessions({ config, db, secrets, opConfig });
+  const oidc = createOidc({ config, secrets, opConfig });
   const auth = createAuthProvider({ otp, oidc, sessions });
   const mcpOauth = createMcpOauth({ config, db, secrets });
   const internal = createInternal({ config, secrets });
-  const kelabos = createKelabos({ config, db, internal, credentials });
-  const scheduling = createScheduling({ config, db, mailer, internal });
-  const contacts = createContacts({ config, db });
+  const kelabos = createKelabos({ config, db, internal, credentials, opConfig });
+  const scheduling = createScheduling({ config, db, mailer, internal, opConfig });
+  const contacts = createContacts({ config, db, opConfig });
   const huddle = createHuddle({ config, db, internal, kelabos });
-  const join = createJoin({ config, db, secrets });
-  const joinCodes = createJoinCodes({ config, db });
+  const join = createJoin({ config, db, secrets, opConfig });
+  const joinCodes = createJoinCodes({ config, db, opConfig });
   const records = createRecords({ config, db });
-  const sttToken = createSttToken({ config, db, credentials });
-  const agent = createAgent({ config, db, secrets });
+  const sttToken = createSttToken({ config, db, credentials, opConfig });
+  const agent = createAgent({ config, db, secrets, opConfig });
   // Journey (docs 20) — a persistent container linking related kelabos.
   // Only needs `internal` beyond config/db: a report's LLM call is a
   // synchronous HTTP round trip to the Gateway, the same shape every other
   // rest-api -> Gateway call already uses.
   const journeys = createJourneys({ config, db, internal });
-  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys });
+  // The roster that says who may publish the configuration above.
+  const admin = createAdmin({ config, db, opConfig, credentials, internal, log });
+  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin });
 }
 
 export async function handler(event, context) {

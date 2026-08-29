@@ -44,8 +44,11 @@ export function normalizeUserCode(raw) {
   return `${clean.slice(0, 4)}-${clean.slice(4)}`;
 }
 
-export function createAgent({ config, db, secrets }) {
-  const ttlDays = config.auth.agentTokenTtlDays;
+export function createAgent({ config, db, secrets, opConfig }) {
+  // Published operational config, read when a token is minted — so a shortened
+  // lifetime applies to the next pairing and never to a bridge already paired.
+  const ttlDaysNow = async () =>
+    (opConfig ? (await opConfig.effective()).auth : config.auth).agentTokenTtlDays;
 
   async function requestDeviceCode({ runtime, label }) {
     const now = Date.now();
@@ -133,7 +136,7 @@ export function createAgent({ config, db, secrets }) {
   async function mintAgentToken({ identity, tenantId, runtime, label }) {
     const key = await secrets.getCookieKey(config);
     const now = Date.now();
-    const expiresAt = now + ttlDays * 86400 * 1000;
+    const expiresAt = now + (await ttlDaysNow()) * 86400 * 1000;
     const jti = randomUUID();
     const jwt = signJwt(
       {
