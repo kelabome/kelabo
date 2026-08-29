@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { Tabs } from '../components/ui/Tabs'
 import { SkeletonRows, Skeleton } from '../components/ui/Skeleton'
@@ -124,6 +124,7 @@ function durationMin(start, end) {
 
 export default function RecordDetail() {
   const { id } = useParams()
+  const [searchParams] = useSearchParams()
   const [record, setRecord] = useState(null)
   const [error, setError] = useState(null)
   const [tab, setTab] = useState('transcript')
@@ -228,12 +229,33 @@ export default function RecordDetail() {
 
       {record && (
         <>
-          <Crumbs
-            className="crumbs-head"
-            to="/kelabos"
-            backLabel="Kelabos"
-            here={`${record.title} · ${fmtDateLong(record.endedAt || record.startedAt)}`}
-          />
+          {/* Where you came from, not where this record "belongs".
+              A kelabo can be linked to several journeys, so there is no such
+              thing as its parent — the only journey worth naming is the one
+              whose page you clicked through from, and that is a fact about the
+              click. It rides in `?journey=` (JourneyDetail's kelaboHref) so it
+              survives a refresh, a bookmark and a pasted link, which router
+              state would not.
+
+              Matched against this record's own links before it is shown:
+              the id came out of a URL anyone can edit, and a crumb reading
+              "Acme Q3" on a record that has nothing to do with it would be a
+              lie the page told on a stranger's behalf. Unmatched, or arrived
+              at from the kelabo list, falls back to the list — which is where
+              you came from, so it is not a fallback so much as the other true
+              answer. Either way the chips below name every journey. */}
+          {(() => {
+            const from = searchParams.get('journey')
+            const via = from && (record.journeys || []).find(j => j.id === from)
+            return (
+              <Crumbs
+                className="crumbs-head"
+                to={via ? `/journeys/${via.id}` : '/kelabos'}
+                backLabel={via ? (via.title || 'Untitled journey') : 'Kelabos'}
+                here={`${record.title} · ${fmtDateLong(record.endedAt || record.startedAt)}`}
+              />
+            )
+          })()}
           <div className="title-row">
             <h1 className="page-title">{record.title}</h1>
             <span className="chip chip-ended">ended</span>

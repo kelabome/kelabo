@@ -32,10 +32,21 @@ import { timeAgo } from '../timeAgo'
 // current status actually is, and `/join/:id` redirects an ended kelabo to
 // `/kelabos/:id` itself (which also rescues rows linked before the end
 // stamp existed).
-function kelaboHref(kelaboId, status) {
-  if (status === 'active') return `/join/${kelaboId}`
-  if (status === 'ended') return `/kelabos/${kelaboId}`
-  return `/scheduled/${kelaboId}`
+//
+// `?journey=` records which journey the click came from, so the page you land
+// on can say where you were. It rides in the URL rather than in router state
+// because state does not survive a refresh, a bookmark or a pasted link — and
+// a kelabo can belong to more than one journey, so "which one did you come
+// from" is a fact only the click knows and nothing on the record can re-derive.
+//
+// Added to all three destinations even though only `/kelabos/:id` reads it
+// today: provenance is a fact about the click, not about where it landed, and
+// the other two ignore unknown query params.
+function kelaboHref(kelaboId, status, journeyId) {
+  const from = journeyId ? `?journey=${encodeURIComponent(journeyId)}` : ''
+  if (status === 'active') return `/join/${kelaboId}${from}`
+  if (status === 'ended') return `/kelabos/${kelaboId}${from}`
+  return `/scheduled/${kelaboId}${from}`
 }
 
 const TABS = [
@@ -463,7 +474,7 @@ function TimelineTab({ journeyId, isMember, onOpenDocument }) {
         const docId = e.type === 'document' ? e.detail?.docId : null
         const RowTag = kelaboId ? Link : 'div'
         const rowProps = kelaboId
-          ? { to: kelaboHref(kelaboId, e.detail?.statusSnapshot) }
+          ? { to: kelaboHref(kelaboId, e.detail?.statusSnapshot, journeyId) }
           : docId
             ? { onClick: () => onOpenDocument(docId), style: { cursor: 'pointer' } }
             : {}
@@ -590,7 +601,7 @@ function KelabosTab({ journeyId, isMember, isActive }) {
       {items === null && <SkeletonRows n={2} />}
       {items && items.length === 0 && <div className="empty">No kelabos linked yet.</div>}
       {(items || []).map(k => (
-        <Link className="row row-removable" to={kelaboHref(k.kelaboId, k.statusSnapshot)} key={k.kelaboId}>
+        <Link className="row row-removable" to={kelaboHref(k.kelaboId, k.statusSnapshot, journeyId)} key={k.kelaboId}>
           <Icon name="archive" size={15} className="kind-icon" />
           <div className="row-main">
             <div className="row-title">{k.title}</div>
