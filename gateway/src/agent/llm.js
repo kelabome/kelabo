@@ -1,3 +1,5 @@
+import { LLM_CONFIG } from "@kelabo/contracts/credentials";
+
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -112,6 +114,39 @@ export function addUsage(...records) {
     }),
     { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 }
   );
+}
+
+/**
+ * Which model this deployment answers with — the one resolution, for every
+ * caller.
+ *
+ * `LLM_CONFIG` supplies the default for each field, so no path can end up with
+ * one nobody set. On ECS the two sources are the same thing (`LLM_CONFIG`
+ * reads the `KELABO_LLM_*` the task definition writes); a self-hosted operator
+ * running from `config/kelabo.json` has provider and model there and nothing
+ * in the environment at all. Either way the answer is the same object.
+ *
+ * It lived in `agent/runner.js`, private, and its own comment claimed that
+ * "the worker, the reconfigure check and the journey-report path all agree on
+ * what the model is". Two of those three did. `container.js` built `c.llm`
+ * straight from `config.llm` and substituted only `baseUrl`, so the two
+ * callers that go through it — a journey report, and an `@kelabo` answered in
+ * a leg — sent whatever `config.llm.model` happened to be.
+ *
+ * Blank, on a deployment that sets the model in the environment rather than in
+ * the file. The provider then posted `"model": ""` and DeepSeek answered
+ * `The supported API model names are …, but you passed .` — a 400, retried
+ * once, surfaced to the room as "I couldn't reach the model just now", which
+ * reads as a network blip and is the one thing it was not. Every kelabo turn
+ * kept working throughout, because those go through the runner.
+ */
+export function resolveModelConfig(config) {
+  return {
+    provider: config?.llm?.provider || LLM_CONFIG.provider,
+    model: config?.llm?.model || LLM_CONFIG.model,
+    smallModel: config?.llm?.smallModel || LLM_CONFIG.smallModel,
+    baseUrl: config?.openaiBaseUrl || LLM_CONFIG.baseUrl,
+  };
 }
 
 export function createLlmProvider(modelConfig, { apiKey, openaiBaseUrl, log } = {}) {

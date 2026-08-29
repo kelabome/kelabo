@@ -6,6 +6,7 @@ import { loadEffectiveMcp } from "./mcp.js";
 import { WEB_SEARCH_ENABLED } from "./subagents.js";
 import { languageName } from "./language.js";
 import { LLM_CONFIG, llmApiKeyFrom } from "@kelabo/contracts/credentials";
+import { resolveModelConfig as resolveModel } from "./llm.js";
 
 /**
  * How long the minutes may take before the request is abandoned.
@@ -62,29 +63,17 @@ export function createAgentDispatcher(c) {
   }
 
   /**
-   * Which model answers.
+   * Which model answers — `agent/llm.js`, shared with `container.js`.
    *
-   * This was two sources with a resolution order and the endpoint coming from a
-   * third, and the value actually in force could not be read off any one of
-   * them. One object now, with the same four fields `LLM_CONFIG` names, so the
-   * worker, the reconfigure check below and the journey-report path all agree
-   * on what "the model" is.
-   *
-   * Sourced from this deployment's own config rather than from `LLM_CONFIG`
-   * directly: on ECS the two are the same thing (`LLM_CONFIG` reads the
-   * `KELABO_LLM_*` the task definition sets), but a self-hosted operator
-   * running from `config/kelabo.json` has the provider and model there and
-   * nowhere in the environment at all. `LLM_CONFIG` supplies the defaults, so
-   * neither path can end up with a field nobody set.
+   * It used to live here, private, and the comment on it claimed the worker,
+   * the reconfigure check below and the journey-report path all agreed on what
+   * "the model" is. The first two did. The journey paths go through `c.llm`,
+   * which built its provider from `config.llm` directly and so answered with a
+   * blank model wherever the deployment sets it in the environment instead of
+   * the file. Moving it is the fix: one resolution, so the claim is structural
+   * rather than a thing this comment asserts.
    */
-  function resolveModelConfig() {
-    return {
-      provider: c.config.llm?.provider || LLM_CONFIG.provider,
-      model: c.config.llm?.model || LLM_CONFIG.model,
-      smallModel: c.config.llm?.smallModel || LLM_CONFIG.smallModel,
-      baseUrl: c.config.openaiBaseUrl || LLM_CONFIG.baseUrl,
-    };
-  }
+  const resolveModelConfig = () => resolveModel(c.config);
 
   const sameModelConfig = (a, b) =>
     !!a && !!b && a.provider === b.provider && a.model === b.model && a.smallModel === b.smallModel && a.baseUrl === b.baseUrl;

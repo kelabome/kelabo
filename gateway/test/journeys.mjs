@@ -665,6 +665,97 @@ await test("the container supplies an LLM for journey questions, from the creden
   await assert.rejects(() => c.llm.completeRaw({ messages: [] }), /llm_not_configured/);
 });
 
+await test("a journey question names a real model even when the config leaves it blank", async () => {
+  // The bug: `container.js` built its provider from `config.llm` directly and
+  // resolved only `baseUrl` against LLM_CONFIG, so a deployment that sets the
+  // model in the environment rather than in `config/kelabo.json` — which
+  // leaves that object's `model` an empty string on purpose — posted
+  // `"model": ""`. DeepSeek answered
+  //   The supported API model names are …, but you passed .
+  // a 400, retried once, and the leg was told "I couldn't reach the model just
+  // now": indistinguishable from a network blip, and the one thing it was not.
+  //
+  // Kelabo turns were unaffected throughout, because those resolve through
+  // agent/runner.js — which is why this went unnoticed. Asserted on the wire
+  // rather than on the config object, since the config was never the thing
+  // that was wrong.
+  const { createContainer } = await import("../src/container.js");
+  const { LLM_CONFIG } = await import("@kelabo/contracts/credentials");
+  const db = {
+    send: async (cmd) =>
+      String(cmd.input?.Key?.PK ?? "").startsWith("CRED#")
+        ? { Item: { value: JSON.stringify({ apiKey: "sk-test" }) } }
+        : {},
+  };
+  const c = await createContainer({
+    config: {
+      region: "us-east-1",
+      secrets: { cookieSigningKey: "k" },
+      // Exactly the shape the ECS task definition produces: every field blank,
+      // because the values live in KELABO_LLM_* and LLM_CONFIG reads them.
+      llm: { provider: "deepseek", model: "", smallModel: "", baseUrl: "" },
+      openaiBaseUrl: "",
+      tableNames: { credentials: "cred", kelabos: "k", journeys: "j" },
+    },
+    db,
+    s3: {},
+    secrets: {},
+    skipRebuild: true,
+  });
+
+  // `resolveModelConfig` is the fix: one resolution, shared with the runner.
+  // A deployment that pins its model in LLM_CONFIG (this file's constants are
+  // replaced wholesale on such a branch) gets it here; one that names it in
+  // config/kelabo.json gets that.
+  const { resolveModelConfig } = await import("../src/agent/llm.js");
+  assert.equal(
+    resolveModelConfig({ llm: { model: "from-the-file" } }).model,
+    "from-the-file",
+    "the config file wins when it names a model"
+  );
+  assert.equal(
+    resolveModelConfig({ llm: { model: "" } }).model,
+    LLM_CONFIG.model,
+    "and a blank one falls through to whatever this deployment pins"
+  );
+
+  // The invariant, stated once: **the provider is never handed an empty
+  // model.** There are two honest ways to satisfy it and which one applies
+  // depends on the deployment, so the test asks rather than assumes —
+  // hard-coding either would pass here and fail on a branch that pins its
+  // assistant in LLM_CONFIG, which is exactly the shape the bug came from.
+  const realFetch = globalThis.fetch;
+  let sent = null;
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), body: JSON.parse(init.body) };
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "ok" } }], usage: {} }) };
+  };
+  try {
+    if (LLM_CONFIG.model) {
+      // A deployment that pins its model: the blank config resolves to it and
+      // the call goes out naming it. This is the case that was broken —
+      // `""` went on the wire and the provider answered "you passed .".
+      await c.llm.completeRaw({ messages: [{ role: "user", content: "hi" }] });
+      assert.ok(sent, "the provider was called");
+      assert.equal(sent.body.model, LLM_CONFIG.model, "and named the pinned model, not an empty string");
+      assert.ok(sent.url.startsWith("http"), "the endpoint resolves too");
+    } else {
+      // Nothing anywhere names a model. Refused before the call, with the
+      // same error a missing key raises: from the room's side they are the
+      // same fact and the callers already say it well. Sending `""` and
+      // letting the provider 400 is what made this look like a network blip.
+      await assert.rejects(
+        () => c.llm.completeRaw({ messages: [{ role: "user", content: "hi" }] }),
+        /llm_not_configured/,
+        "no model anywhere is a configuration error, not a provider round-trip"
+      );
+      assert.equal(sent, null, "and nothing was sent");
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 await test("KELABO_LLM_API_KEY is a bootstrap for an empty credentials table, and a stored row beats it", async () => {
   // The self-host path: this repository ships no console that writes the
   // credentials table, so without the fallback a fresh deployment has no way

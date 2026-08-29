@@ -7,7 +7,7 @@ import { createState, rebuildState } from "./state.js";
 import { createCloudflareRtc } from "./rtc/cloudflare.js";
 import { getCredential as readCredential } from "./db.js";
 import { LLM_CONFIG, llmApiKeyFrom } from "@kelabo/contracts/credentials";
-import { createLlmProvider } from "./agent/llm.js";
+import { createLlmProvider, resolveModelConfig } from "./agent/llm.js";
 import { log, logError } from "./log.js";
 
 export async function createContainer(overrides = {}) {
@@ -154,9 +154,27 @@ export async function createContainer(overrides = {}) {
         log("journey_llm_credential_missing", {});
         throw new Error("llm_not_configured");
       }
-      return createLlmProvider(config.llm, {
+      // Resolved, never `config.llm` raw. A deployment that sets the model in
+      // the environment rather than in `config/kelabo.json` leaves that object
+      // with a blank `model`, and the provider will faithfully post `""`.
+      const modelConfig = resolveModelConfig(config);
+      if (!modelConfig.model) {
+        // Nothing named a model — not the config file, not the environment.
+        // Refused here rather than sent, because a provider handed `""`
+        // answers 400 "you passed ." and that arrives in a leg as "I couldn't
+        // reach the model just now", which reads as a network blip and sends
+        // the operator looking at the wrong thing entirely.
+        //
+        // Same error as a missing key, deliberately: from the room's side an
+        // assistant with no model and one with no key are the same fact, and
+        // the callers already have a sentence for it. The distinction is for
+        // the operator, and it is in the log.
+        log("journey_llm_model_missing", { provider: modelConfig.provider });
+        throw new Error("llm_not_configured");
+      }
+      return createLlmProvider(modelConfig, {
         apiKey,
-        openaiBaseUrl: config.openaiBaseUrl || LLM_CONFIG.baseUrl,
+        openaiBaseUrl: modelConfig.baseUrl,
         log,
       }).completeRaw(req);
     },
