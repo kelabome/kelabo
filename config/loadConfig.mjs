@@ -462,6 +462,29 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     // that names deepgram explicitly are the same thing by the time anyone
     // downstream reads it.
     stt: { ...(block.stt ?? {}), provider: sttProvider },
+    // The agent knobs are OPTIONAL in the file — they are published operational
+    // config now (docs 23; `agent` in `opConfigSchema`), and the file entry is
+    // only the bootstrap. Defaulted here, field by field and to the SAME values
+    // `resolveOpConfig` falls back to, because `gateway-ecs-stack.js` writes
+    // each one into the task definition with `String(...)`: an absent block
+    // used to fail synth, and an absent field would have shipped the string
+    // "undefined" as a knob. A deployment that deletes the block after
+    // publishing its values (the intended end state) must behave identically
+    // to one that never wrote it.
+    gateway: {
+      ...block.gateway,
+      agent: {
+        maxConcurrentRuns: 0,
+        maxDispatchPerTurn: 3,
+        sensitivity: "medium",
+        maxContributionsPerMinute: 3,
+        cooldownSeconds: 45,
+        rollingWindowSize: 60,
+        turnTimeoutSeconds: 1,
+        turnDeadlineSeconds: 180,
+        ...(block.gateway?.agent ?? {}),
+      },
+    },
     api,
     app: raw.app,
     rtcApiBase,
