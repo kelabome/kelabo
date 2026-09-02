@@ -294,6 +294,29 @@ await test("otp request rejects disallowed domain", async () => {
   assert.equal(res.json.error, "domain_not_allowed");
 });
 
+await test("a malformed body is 400 bad_request, even when the schema came from contracts", async () => {
+  // The regression this pins: `otpRequestBodySchema` is imported from
+  // `@kelabo/contracts`, which has its OWN copy of zod (a `file:` dep with its
+  // own install). The error it throws is not an instance of the `ZodError` this
+  // service imported, so `instanceof` was false and every malformed body —
+  // including on the sign-in route — answered 500 `internal_error` with a stack
+  // trace logged at `error` level and no field message for the SPA to show.
+  //
+  // The sign-in route first, because it is the worst place for it: a typo in a
+  // client answered 500, and the log said `unhandled` with a stack trace rather
+  // than naming the field.
+  const wrongType = await call("POST", "/auth/otp/request", { body: { email: 123 } });
+  assert.equal(wrongType.statusCode, 400, `contracts-schema validation returned ${wrongType.statusCode}`);
+  assert.equal(wrongType.json.error, "bad_request");
+  // The field-level message survives too — it is what the SPA renders, and it
+  // was being thrown away with the status.
+  assert.match(wrongType.json.message || "", /email/);
+
+  const missingEntirely = await call("POST", "/auth/otp/verify", { body: {} });
+  assert.equal(missingEntirely.statusCode, 400);
+  assert.equal(missingEntirely.json.error, "bad_request");
+});
+
 await test("empty allow-list = open registration, tenant from the email's own domain", async () => {
   // The multi-domain mode: no allow-list configured, every org lands in its
   // own tenant. Built from the same modules with only the config differing.

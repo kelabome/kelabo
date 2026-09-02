@@ -106,6 +106,31 @@ function compile(pattern) {
   return { regex, names };
 }
 
+/**
+ * Is this a zod validation failure?
+ *
+ * NOT `instanceof` alone. There are two physical copies of zod in this tree —
+ * `rest-api/node_modules/zod` and `contracts/node_modules/zod`, same version,
+ * different module instances, because `@kelabo/contracts` is a `file:` dep with
+ * its own install and npm symlinks it in. A schema imported from contracts
+ * throws contracts' `ZodError`, which is not an instance of the class this file
+ * imported, so `instanceof` was false for MOST of the schemas actually in use
+ * (everything in the `@kelabo/contracts` import block above).
+ *
+ * The effect was that a malformed request body — `POST /auth/otp/request` with
+ * a non-string email, say — answered **500 `internal_error`** instead of 400
+ * `bad_request`, dropped the field-level message the SPA renders, and logged a
+ * stack trace at `error` level on every ordinary client mistake. It reaches a
+ * deployment too: esbuild resolves each file's own `zod` and bundles both
+ * copies into the Lambda.
+ *
+ * So identity is by NAME and shape, which survives duplicate module instances.
+ * `instanceof` is kept first because it is exact when it does apply.
+ */
+function isZodError(e) {
+  return e instanceof ZodError || (e?.name === "ZodError" && Array.isArray(e?.issues));
+}
+
 function htmlErrorPage(status, code) {
   const body = `<!doctype html><html><head><title>Kelabo sign-in</title></head><body style="font-family:sans-serif;max-width:32rem;margin:4rem auto"><h1>Sign-in failed</h1><p><code>${code}</code></p><p><a href="/">Back to Kelabo</a></p></body></html>`;
   return { status, headers: { "Content-Type": "text/html; charset=utf-8" }, body };
@@ -1543,7 +1568,7 @@ export function createApp(deps) {
         status = e.status;
         code = e.code;
         message = e.message !== e.code ? e.message : undefined;
-      } else if (e instanceof ZodError) {
+      } else if (isZodError(e)) {
         status = 400;
         code = "bad_request";
         message = e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
