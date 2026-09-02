@@ -12,7 +12,7 @@ export AWS_PROFILE
 REGION = $(eval REGION := $(shell cd config && KELABO_ENV=$(env) node --input-type=module -e "import('./loadConfig.mjs').then(m=>console.log(m.loadConfig(process.env.KELABO_ENV).region))"))$(REGION)
 STACK_PREFIX := kelabo-$(env)
 
-.PHONY: help deploy infra docker gateway restart backend frontend synth secrets bootstrap test check \
+.PHONY: help deploy infra docker gateway restart backend frontend synth secrets bootstrap test check e2e e2e-harness \
 	origin-secret credential-set credentials-migrate credentials-show \
 	opconfig-seed opconfig-show \
 	allow-list allow-ip allow-rm \
@@ -29,7 +29,7 @@ help: ## show this help
 	@echo "current: env=$(env) AWS_PROFILE=$(AWS_PROFILE)"
 	@echo
 	@echo "verify (no AWS needed):"
-	@awk 'BEGIN{FS=":.*## "} /^(help|check|test|bootstrap):.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^(help|check|test|e2e|e2e-harness|bootstrap):.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "agent bridge on this machine (one package, one \`kelabo\`, every runtime):"
 	@awk 'BEGIN{FS=":.*## "} /^(connector-install|install-connector|install-oc-connector|install-cc-connector|uninstall-connector|uninstall-oc-connector|uninstall-cc-connector):.*## /{printf "  %-22s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -164,7 +164,7 @@ allow-rm: ## stop allowing a source address (IP=1.2.3.4/32)
 	@test -n "$(IP)" || (echo "IP required, e.g. make allow-rm env=$(env) IP=1.2.3.4/32"; exit 1)
 	@scripts/allowlist.sh $(env) rm $(IP)
 
-bootstrap: ## npm install in every package (root + 6 components)
+bootstrap: ## npm install in every package (root + 7 components)
 	npm install
 	cd contracts && npm install
 	cd infra && npm install
@@ -172,6 +172,7 @@ bootstrap: ## npm install in every package (root + 6 components)
 	cd gateway && npm install
 	cd connector && npm install
 	cd spa && npm install
+	cd e2e && npm install
 
 test: ## all smoke tests + spa build + cdk synth
 	cd contracts && npm test
@@ -179,7 +180,19 @@ test: ## all smoke tests + spa build + cdk synth
 	cd gateway && npm test
 	cd connector && npm test
 	cd spa && npm test && npm run build
+	cd e2e && npm test
 	cd infra && npx cdk synth -c env=$(env) >/dev/null && echo "cdk synth $(env) OK"
+
+# The browser suite is deliberately NOT part of `make test`: it needs a
+# Chromium download (`npx playwright install chromium`, ~115 MB) that `make
+# bootstrap` does not do, and a machine that cannot get one should still be
+# able to run every other gate. `cd e2e && npm test` — which `make test` does
+# run — covers the harness itself offline and in a second.
+e2e: ## browser end-to-end suite (Playwright; needs `npx playwright install chromium` once)
+	cd e2e && npx playwright test $(if $(grep),-g "$(grep)",)
+
+e2e-harness: ## run the offline stack on :3000/:3001 and leave it up (no browser)
+	cd e2e && npm run harness
 
 agent-pack: ## build the publishable npm package into connector/dist/agent/
 	@# Self-sufficient on a fresh clone: the pack bundles contracts (zod and all)
@@ -264,4 +277,4 @@ uninstall-connector: ## remove every runtime's wiring, the credential, and the p
 	npm rm -g @kelabome/agents
 
 check: ## node --check over every .js/.mjs (syntax only; skips spa/src)
-	@find config contracts/src infra/bin infra/lib rest-api/src gateway/src connector/src connector/build rig -name "*.js" -o -name "*.mjs" | grep -v node_modules | xargs -I{} node --check {} && echo "syntax OK"
+	@find config contracts/src infra/bin infra/lib rest-api/src gateway/src connector/src connector/build rig e2e/harness e2e/fixtures e2e/tests -name "*.js" -o -name "*.mjs" | grep -v node_modules | xargs -I{} node --check {} && echo "syntax OK"

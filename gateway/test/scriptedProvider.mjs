@@ -22,7 +22,15 @@ function isQuestion(text) {
   return /[?？]|吗|呢|请问|多少|什么|怎么|哪|does anyone know|what(?:'s| is| are)|how (?:do|does)|current|latest|version|price|weather|when|where|who/i.test(text);
 }
 
-function respond(req) {
+/**
+ * Exported so `e2e/harness/llmServer.mjs` can serve the same decisions over an
+ * OpenAI-compatible HTTP endpoint. The e2e run must not fork this logic: the
+ * agent worker builds its own provider from `modelConfig` inside a worker
+ * thread, so the only way to script it without an injection hole in production
+ * code is to be the endpoint it calls — and a second copy of the script would
+ * drift from the one `devAgent.mjs` uses.
+ */
+export function respond(req) {
   const system = req.system || "";
   const lastUser = lastUserText(req.messages);
 

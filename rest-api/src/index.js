@@ -1603,10 +1603,22 @@ let defaultApp;
  *
  * Constructing the AWS clients is safe offline: they open no socket until a
  * command is sent.
+ *
+ * `overrides` replaces the AWS boundary and nothing else — the document client,
+ * Secrets Manager, S3 and the mail transport. It exists for `e2e/`, which runs
+ * this whole control plane against an in-memory store so a browser can drive
+ * it: every module below stays the real one, so the e2e suite exercises the
+ * wiring rather than a second copy of it. `smoke.mjs` builds its own
+ * composition through `createApp` and is unaffected; that is still the right
+ * seam for route behaviour, and this is the right one for "run the deployment".
+ *
+ * Deliberately narrow. Anything overridable here is something that would
+ * otherwise open a socket to AWS; a knob that changes *behaviour* belongs in
+ * published op-config, not in a parameter only a test passes.
  */
-export function composeApp(config) {
-  const db = createDb({ config });
-  const secrets = createSecrets({ region: config.region });
+export function composeApp(config, overrides = {}) {
+  const db = overrides.db ?? createDb({ config, client: overrides.dynamoClient });
+  const secrets = overrides.secrets ?? createSecrets({ region: config.region });
   // Supplier credentials, by slot. Goes through the db module, like every other
   // reader, so exactly one place knows the table's name and keys — see
   // contracts/src/credentials.js for why it is not a partition of an existing
@@ -1632,7 +1644,7 @@ export function composeApp(config) {
   // is what bounds how long the old one is still used. The key is read only
   // when a provider needs one: SES authenticates with this Lambda's own IAM
   // role, so an SES deployment never fills the slot and does not have to.
-  const mailer = createMailer({
+  const mailer = overrides.mailer ?? createMailer({
     resolve: async () => {
       // Provider and from-address are published operational config
       // (contracts/src/opconfig.js), resolved here — per send, because
@@ -1666,7 +1678,7 @@ export function composeApp(config) {
   const huddle = createHuddle({ config, db, internal, kelabos });
   const join = createJoin({ config, db, secrets, opConfig });
   const joinCodes = createJoinCodes({ config, db, opConfig });
-  const records = createRecords({ config, db });
+  const records = createRecords({ config, db, s3: overrides.s3 });
   const sttToken = createSttToken({ config, db, credentials, opConfig });
   const agent = createAgent({ config, db, secrets, opConfig });
   // Journey (docs 20) — a persistent container linking related kelabos.
