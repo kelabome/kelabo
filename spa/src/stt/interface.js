@@ -124,11 +124,16 @@
 
 import { deepgramClient } from './deepgram.js'
 import { sonioxClient } from './soniox.js'
+import { fakeClient } from './fake.js'
 
 /** @type {Record<string, SttClient>} */
 const CLIENTS = {
   [deepgramClient.id]: deepgramClient,
   [sonioxClient.id]: sonioxClient,
+  // Opens no socket and transcribes nothing; it exists so `e2e/` can drive the
+  // capture pipeline in a real browser without a supplier account. It cannot be
+  // reached from a config file — see ./fake.js and rest-api/src/stt/fake.js.
+  [fakeClient.id]: fakeClient,
 }
 
 /**

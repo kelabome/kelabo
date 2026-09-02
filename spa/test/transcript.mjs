@@ -136,6 +136,31 @@ const FIXTURES = {
     ]),
     replayable: sx([tok('after a reconnect', 0, 2000, { is_final: true })]),
   },
+  // The offline provider (spa/src/stt/fake.js). It is in the registry, so it is
+  // held to the same contract as the two real ones — which is the point of
+  // testing it at all: the e2e suite drives the whole capture pipeline through
+  // this reader, and a reader that quietly returned the wrong shape would make
+  // that suite prove something about a pipeline the product does not have.
+  fake: {
+    samples: [
+      { tails: [{ speaker: '0', text: 'a guess', start: 0, end: 500 }] },
+      { finals: [{ speaker: '0', text: 'a settled thing', start: 0, end: 900 }], endpoint: true },
+      { finals: [], tails: [] },
+      { type: 'error', code: 503, message: 'nope' },
+      { type: 'finished' },
+      // Not an object at all — the transport is in-process, so a caller
+      // mistake arrives here rather than being filtered by a socket.
+      null,
+    ],
+    plain: { finals: [{ speaker: '0', text: 'just me talking', start: 0, end: 1200 }] },
+    multiSpeaker: {
+      finals: [
+        { speaker: '1', text: 'hello there', start: 100, end: 900 },
+        { speaker: '2', text: 'hi', start: 1000, end: 1400 },
+      ],
+    },
+    replayable: { finals: [{ speaker: '0', text: 'after a reconnect', start: 0, end: 2000 }] },
+  },
 }
 
 for (const id of sttClientIds()) {

@@ -1,5 +1,6 @@
 import { deepgramProvider } from "./deepgram.js";
 import { sonioxProvider } from "./soniox.js";
+import { fakeProvider } from "./fake.js";
 
 // The STT provider interface, server half — and the registry that resolves it.
 //
@@ -41,6 +42,11 @@ import { sonioxProvider } from "./soniox.js";
 const PROVIDERS = {
   [deepgramProvider.id]: deepgramProvider,
   [sonioxProvider.id]: sonioxProvider,
+  // Transcribes nothing; exists so `e2e/` can drive the capture pipeline in a
+  // browser without a supplier account. Registered here rather than injected,
+  // because a registry a test can extend is a registry the product does not
+  // really have — see ./fake.js for why it cannot be selected by accident.
+  [fakeProvider.id]: fakeProvider,
 };
 
 /**
