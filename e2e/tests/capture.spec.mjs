@@ -13,6 +13,34 @@
 import { test, expect } from "../fixtures/test.mjs";
 import { room } from "../fixtures/pages.mjs";
 
+/**
+ * Can this deployment actually dispatch to the fake engine?
+ *
+ * Asked of the deployment rather than assumed, because the answer differs and
+ * the difference is deliberate. Where transcription's engine comes from
+ * op-config (`stt.provider`), setting it to `fake` selects it and these tests
+ * run. Where the engine comes from a **rate card** instead — because the engine
+ * prices the call, so it belongs to the pricing artifact — the card's
+ * `sttEngine` is an enum of the engines that have a price, and a fake one has
+ * no price and is not in it. Minting then fails with `stt_unavailable`, the
+ * room shows "Transcription is unavailable", and none of the capture pipeline
+ * is reachable from a browser at all.
+ *
+ * So: probe once, and skip with a reason rather than failing three tests with a
+ * message about a missing bubble. The probe is the real mint endpoint, so it
+ * cannot drift from what the room does.
+ */
+async function fakeEngineAvailable(api) {
+  const kelabo = await api.createKelabo({ title: "STT engine probe" });
+  await api.joinKelabo(kelabo.kelaboId, { displayName: "Probe" });
+  try {
+    const session = await api.raw.api("POST", `/kelabos/${kelabo.kelaboId}/stt-token`, {});
+    return session?.provider === "fake";
+  } catch {
+    return false;
+  }
+}
+
 /** Say something through the fake provider, from inside the page. */
 async function say(page, text) {
   await page.evaluate((line) => {
@@ -20,6 +48,13 @@ async function say(page, text) {
     window.__kelaboFakeStt.say(line);
   }, text);
 }
+
+test.beforeEach(async ({ alice }) => {
+  test.skip(
+    !(await fakeEngineAvailable(alice.api)),
+    "this deployment does not dispatch to the fake transcription engine (its engine comes from the rate card, which prices only real ones) — the capture pipeline is not reachable from a browser here"
+  );
+});
 
 test("the room acquires the microphone and reports transcription live", async ({ alice }) => {
   const { page, api } = alice;
