@@ -207,6 +207,7 @@ day-to-day from the console afterwards.
    | `environments.<env>.account` / `region` | your AWS account ID and region |
    | `environments.<env>.hostedZone.name` / `id` | the Route 53 zone from C1 |
    | `environments.<env>.subdomains.portal` / `gateway` | e.g. `kelabo` and `gw.kelabo` → `kelabo.mycompany.com`, `gw.kelabo.mycompany.com` |
+   | `environments.<env>.portalAliases` | empty (the default) is right for almost everyone. Extra *full* domains the portal also answers on — the case that needs it is a portal on `www` that must also serve the bare apex, because a browser never falls back from one to the other on its own. Each entry becomes a certificate SAN, a CloudFront alias and a DNS record, so every one must sit inside this environment's hosted zone |
    | `rootAdminEmail` (at the **root** of the file, not inside an environment) | your own address — the one identity that may administer this deployment: grant other administrators, publish configuration, rotate supplier keys. **Deploy-time and only deploy-time**, deliberately: everything else below is editable from a web page, so the answer to *who may edit* must not be, or an administrator could lock you out of your own deployment in one request. **Empty fails closed** — nobody is root and `/admin` refuses everyone, which is safe but inert, so set it now. It must be an address that can actually sign in, i.e. one at your `allowedEmailDomain`. Per-environment override goes in the environment block |
 | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation. Two halves with different lifetimes: the **enforcement** is publishable (`/admin` → Access), while the sign-in page's prefill reaches the browser as a build-time `VITE_*` value. So publishing a new domain admits it immediately, but the page keeps naming the old one until `make frontend` |
    | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time, so changing it needs `make frontend` — and it is deliberately **not** publishable for exactly that reason: nothing server-side reads it, so a console field for it would look like it worked and would not (doc 23 §7.2) |
@@ -220,13 +221,40 @@ day-to-day from the console afterwards.
    | `environments.<env>.ses.dmarc` | omit unless your sending domain has no DMARC record yet — it is one record per domain, so publishing a second one where your mail provider already wrote one fails the deploy. `true` publishes `v=DMARC1; p=none;` beside the DKIM CNAMEs: monitor-only, which is the sole safe opening policy, since anything stricter quarantines mail from senders you have not yet inventoried. `{ "policy": "none", "rua": "mailto:…" }` to add an aggregate-report address — but only one you actually read, and if it is at another domain that domain must publish a `<sender>._report._dmarc` record or the reports go nowhere |
    | `environments.<env>.ses.mailFrom` | optional. `true` publishes a custom MAIL FROM subdomain (`mail.<your-domain>`) with its MX and SPF records, so SES's envelope sender is your own domain and mail passes DMARC on SPF *and* DKIM rather than DKIM alone — worth setting before requesting production access (§C1). A string names a different subdomain |
    | `environments.<env>.ses.region` | leave unset — mail then goes from the env's own region. Set it only to put an environment's mail in a *different* region, which is the one way to give it its own sandbox status, quota, reputation and bounce list (§C1). The identity must be verified in that region, and production access requested there separately |
+   | `environments.<env>.gateway.cpu` / `memoryMiB` / `desiredCount` | the Gateway task's size. `desiredCount` stays **1** — the Gateway keeps live kelabo state in process and rebuilds it from DynamoDB on boot, so a second task would not see the first one's rooms |
+   | `environments.<env>.gateway.arch` | `amd64` (the template's value) or `arm64`. Graviton is meaningfully cheaper and the Gateway runs happily on it; the catch is that the **image must be built for the same architecture**, and `make docker` reads this same key, so change it and rebuild rather than only redeploying |
+   | `environments.<env>.logRetentionDays` | `120` by default. How long CloudWatch keeps the Lambda's and the Gateway's application logs. Set explicitly because the AWS default is *never expire* and these logs name the identity performing each action — for a signed-in person, their email address. It is longer than `retentionDays` on purpose: an incident is often reported after the kelabo it concerns has expired. Must be a value CloudWatch accepts (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, …) |
+   | `environments.<env>.retentionDays` | how long kelabo material is kept. Publishable, but stated in the file because it is a promise about people's data rather than a knob. One asymmetry: it stamps a TTL at write time, so a change reaches **new** material only — lengthening it does not resurrect what expired, shortening it does not reach back |
 
    Leave `auth.socialProviders` as `[]` — work-email sign-in is the
    self-hosting identity path. (Google/Apple sign-in requires registering
-   OAuth apps and adding their client secrets first.)
+   OAuth apps and adding their client secrets first.) It is one of only two
+   publishable settings with no console control, which is why it is in the
+   file at all.
+
+   **That table is the whole file.** What is *not* in `config/template.json` is
+   as deliberate as what is: every rate limit, every TTL, the eight agent
+   knobs, the RTC defaults, the join-code dials and `contacts.external` are
+   published from `/admin` and were removed from the template on purpose. They
+   are not missing and there is nothing to fill in — `config/loadConfig.mjs`
+   defaults each one to exactly the value the published fold falls back to, so
+   a file that omits them behaves identically to one that spells them out. The
+   reason to keep them out is that a value in this file **stops doing anything
+   the moment somebody publishes that field**, with no error and no warning
+   (doc 23 §9), and a knob that looks like it works and does not is worse than
+   an absent one. Set them from the console.
+
+   The handful of publishable values that *are* here — `llm`, `stt.provider`
+   and `stt.providers`, `mail.fromAddress`, `allowedEmailDomain` — are here
+   because they have no working fallback. A deployment missing them comes up
+   with no model and unable to send a sign-in code, and cannot publish its way
+   out, because `rootAdminEmail` has to be an address at `allowedEmailDomain`.
 
    The `environments` block has `dev`, `staging` and `prod` entries — they are
    independent deployments; configure the ones you will use (§E uses two).
+   The three differ slightly in how they configure mail on purpose, to show
+   the three shapes: `dev` names SES explicitly, `staging` names no provider
+   at all, and `prod` names another one.
 
 3. **Install and bootstrap:**
 

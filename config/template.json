@@ -1,6 +1,6 @@
 {
   "app": "kelabo",
-  "_rootAdminEmail": "who may administer this deployment: the one identity that can grant further admins from /admin. Empty (or omitted) fails closed — nobody is root and the console refuses everyone, which is what a fresh deployment wants until you put your own address here. Deploy-time on purpose: every other operational value below is only a BOOTSTRAP and can be republished from /admin without a deploy, so who may publish must not itself be publishable. Per-environment override goes in the environment block.",
+  "_rootAdminEmail": "who may administer this deployment: the one identity that can grant further admins from /admin. Empty (or omitted) fails closed — nobody is root and the console refuses everyone, which is what a fresh deployment wants until you put your own address here. Deploy-time on purpose: every other operational value is published from /admin without a deploy, so who may publish must not itself be publishable. Per-environment override goes in the environment block.",
   "rootAdminEmail": "",
   "environments": {
     "dev": {
@@ -16,30 +16,19 @@
         "portal": "dev",
         "gateway": "gw.dev"
       },
+      "portalAliases": [],
       "allowedEmailDomain": "example.com",
       "organizationName": "Example Corp",
+      "allowIps": [],
+      "api": {
+        "originSecret": "off"
+      },
+      "logRetentionDays": 120,
       "secrets": {
-        "stt": "kelabo/dev/stt",
-        "llm": "kelabo/dev/llm",
         "cookieSigningKey": "kelabo/dev/cookie-key",
         "oidcGoogle": "kelabo/dev/oidc-google",
         "oidcApple": "kelabo/dev/oidc-apple",
-        "mcpPrefix": "kelabo/dev/mcp/",
-        "cloudflareRealtime": "kelabo/dev/cloudflare-realtime"
-      },
-      "rtc": {
-        "provider": "cloudflare",
-        "defaultMode": "sfu",
-        "meshMaxParticipants": 5,
-        "iceTtlSeconds": 3600,
-        "video": true
-      },
-      "auth": {
-        "sessionTtlSeconds": 3600,
-        "refreshTtlDays": 60,
-        "participantTtlSeconds": 43200,
-        "agentTokenTtlDays": 90,
-        "socialProviders": []
+        "mcpPrefix": "kelabo/dev/mcp/"
       },
       "llm": {
         "provider": "deepseek",
@@ -63,7 +52,9 @@
           }
         }
       },
-      "allowIps": [],
+      "auth": {
+        "socialProviders": []
+      },
       "mail": {
         "provider": "ses",
         "fromAddress": "otp@example.com"
@@ -79,28 +70,9 @@
         "memoryMiB": 1024,
         "desiredCount": 1,
         "imageTag": "latest",
-        "agent": {
-          "maxConcurrentRuns": 0,
-          "maxDispatchPerTurn": 3,
-          "sensitivity": "medium",
-          "maxContributionsPerMinute": 3,
-          "cooldownSeconds": 45,
-          "rollingWindowSize": 60,
-          "turnTimeoutSeconds": 1,
-          "turnDeadlineSeconds": 180
-        }
+        "arch": "amd64"
       },
-      "otp": {
-        "ttlSeconds": 600,
-        "maxAttempts": 5,
-        "resendSeconds": 30,
-        "perEmailWindowSeconds": 3600,
-        "perEmailMaxRequests": 5,
-        "perIpWindowSeconds": 3600,
-        "perIpMaxRequests": 30
-      },
-      "retentionDays": 30,
-      "_logRetentionDays": "optional: how long CloudWatch keeps Lambda + Gateway application logs. Default 120. Must be a value CloudWatch accepts (1,3,5,7,14,30,60,90,120,150,180,365,...). These logs name the identity performing each action, so this is a privacy setting, not only a cost one."
+      "retentionDays": 30
     },
     "staging": {
       "endpoint": "staging",
@@ -115,30 +87,19 @@
         "portal": "staging",
         "gateway": "staging-gw"
       },
+      "portalAliases": [],
       "allowedEmailDomain": "example.com",
       "organizationName": "Example Corp",
+      "allowIps": [],
+      "api": {
+        "originSecret": "off"
+      },
+      "logRetentionDays": 120,
       "secrets": {
-        "stt": "kelabo/staging/stt",
-        "llm": "kelabo/staging/llm",
         "cookieSigningKey": "kelabo/staging/cookie-key",
         "oidcGoogle": "kelabo/staging/oidc-google",
         "oidcApple": "kelabo/staging/oidc-apple",
-        "mcpPrefix": "kelabo/staging/mcp/",
-        "cloudflareRealtime": "kelabo/staging/cloudflare-realtime"
-      },
-      "rtc": {
-        "provider": "cloudflare",
-        "defaultMode": "sfu",
-        "meshMaxParticipants": 5,
-        "iceTtlSeconds": 3600,
-        "video": true
-      },
-      "auth": {
-        "sessionTtlSeconds": 3600,
-        "refreshTtlDays": 60,
-        "participantTtlSeconds": 43200,
-        "agentTokenTtlDays": 90,
-        "socialProviders": []
+        "mcpPrefix": "kelabo/staging/mcp/"
       },
       "llm": {
         "provider": "deepseek",
@@ -162,6 +123,9 @@
           }
         }
       },
+      "auth": {
+        "socialProviders": []
+      },
       "ses": {
         "fromAddress": "otp@example.com"
       },
@@ -170,28 +134,9 @@
         "memoryMiB": 1024,
         "desiredCount": 1,
         "imageTag": "latest",
-        "agent": {
-          "maxConcurrentRuns": 0,
-          "maxDispatchPerTurn": 3,
-          "sensitivity": "medium",
-          "maxContributionsPerMinute": 3,
-          "cooldownSeconds": 45,
-          "rollingWindowSize": 60,
-          "turnTimeoutSeconds": 1,
-          "turnDeadlineSeconds": 180
-        }
+        "arch": "amd64"
       },
-      "otp": {
-        "ttlSeconds": 600,
-        "maxAttempts": 5,
-        "resendSeconds": 30,
-        "perEmailWindowSeconds": 3600,
-        "perEmailMaxRequests": 5,
-        "perIpWindowSeconds": 3600,
-        "perIpMaxRequests": 30
-      },
-      "retentionDays": 30,
-      "_logRetentionDays": "optional: how long CloudWatch keeps Lambda + Gateway application logs. Default 120. Must be a value CloudWatch accepts (1,3,5,7,14,30,60,90,120,150,180,365,...). These logs name the identity performing each action, so this is a privacy setting, not only a cost one."
+      "retentionDays": 30
     },
     "prod": {
       "endpoint": "prod",
@@ -206,30 +151,19 @@
         "portal": "",
         "gateway": "gw"
       },
+      "portalAliases": [],
       "allowedEmailDomain": "example.com",
       "organizationName": "Example Corp",
+      "allowIps": [],
+      "api": {
+        "originSecret": "off"
+      },
+      "logRetentionDays": 120,
       "secrets": {
-        "stt": "kelabo/prod/stt",
-        "llm": "kelabo/prod/llm",
         "cookieSigningKey": "kelabo/prod/cookie-key",
         "oidcGoogle": "kelabo/prod/oidc-google",
         "oidcApple": "kelabo/prod/oidc-apple",
-        "mcpPrefix": "kelabo/prod/mcp/",
-        "cloudflareRealtime": "kelabo/prod/cloudflare-realtime"
-      },
-      "rtc": {
-        "provider": "cloudflare",
-        "defaultMode": "sfu",
-        "meshMaxParticipants": 5,
-        "iceTtlSeconds": 3600,
-        "video": true
-      },
-      "auth": {
-        "sessionTtlSeconds": 3600,
-        "refreshTtlDays": 90,
-        "participantTtlSeconds": 43200,
-        "agentTokenTtlDays": 90,
-        "socialProviders": []
+        "mcpPrefix": "kelabo/prod/mcp/"
       },
       "llm": {
         "provider": "deepseek",
@@ -253,6 +187,9 @@
           }
         }
       },
+      "auth": {
+        "socialProviders": []
+      },
       "mail": {
         "provider": "mailersend",
         "fromAddress": "otp@example.com"
@@ -262,28 +199,9 @@
         "memoryMiB": 1024,
         "desiredCount": 1,
         "imageTag": "latest",
-        "agent": {
-          "maxConcurrentRuns": 0,
-          "maxDispatchPerTurn": 3,
-          "sensitivity": "medium",
-          "maxContributionsPerMinute": 3,
-          "cooldownSeconds": 45,
-          "rollingWindowSize": 60,
-          "turnTimeoutSeconds": 1,
-          "turnDeadlineSeconds": 180
-        }
+        "arch": "amd64"
       },
-      "otp": {
-        "ttlSeconds": 600,
-        "maxAttempts": 5,
-        "resendSeconds": 30,
-        "perEmailWindowSeconds": 3600,
-        "perEmailMaxRequests": 5,
-        "perIpWindowSeconds": 3600,
-        "perIpMaxRequests": 30
-      },
-      "retentionDays": 90,
-      "_logRetentionDays": "optional: how long CloudWatch keeps Lambda + Gateway application logs. Default 120. Must be a value CloudWatch accepts (1,3,5,7,14,30,60,90,120,150,180,365,...). These logs name the identity performing each action, so this is a privacy setting, not only a cost one."
+      "retentionDays": 90
     }
   }
 }

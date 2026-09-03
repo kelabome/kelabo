@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node test/config.mjs",
     "synth": "cdk synth",
     "deploy": "cdk deploy --all"
   },

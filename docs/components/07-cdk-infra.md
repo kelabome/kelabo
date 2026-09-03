@@ -26,45 +26,65 @@ which is the whole test for which side a new setting belongs on.
 deploy-time on purpose: it names who may publish everything else, and empty
 fails closed.
 
+`config/template.json` is this file's shape, and it is now **only** the
+deploy-time half — the published blocks (`otp`, `gateway.agent`, `rtc`,
+`joinCode`, `contacts`, the `auth` TTLs) were removed from it, because
+`loadConfig.mjs` defaults each field to exactly the value `resolveOpConfig`
+falls back to. A block-less file and a block-full one behave identically, so
+the file no longer carries settings that stop working the moment anyone
+publishes them. `infra/test/config.mjs` keeps it that way.
+
 ```jsonc
 {
   "app": "kelabo",
+  "rootAdminEmail": "you@example.com",   /* who may publish everything else */
   "environments": {
     "dev": {
       "endpoint": "dev",
+      "baseDomain": "example.com",       /* per env; no shared default */
       "account": "0123456789",
       "region": "ap-southeast-2",
-      "domain": "kelabo-dev.example.com",
       "hostedZone": { "name": "example.com", "id": "ZXXXXXXXXX" },
       "subdomains": { "portal": "dev", "gateway": "dev-gw" },
+      "portalAliases": [],               /* extra portal hosts, e.g. the bare apex */
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
+      "allowIps": [],
+      "api": { "originSecret": "off" },  /* off | send | require — §2 */
+      "logRetentionDays": 120,
       "secrets": {
+        /* only these four: the rest are derived in loadConfig.mjs, and the
+           supplier keys are CRED# rows now, not Secrets Manager entries */
         "cookieSigningKey": "kelabo/dev/cookie-key",
         "oidcGoogle": "kelabo/dev/oidc-google",
         "oidcApple":  "kelabo/dev/oidc-apple",
-        "apiOrigin":  "kelabo/dev/api-origin"
+        "mcpPrefix":  "kelabo/dev/mcp/"
       },
-      "auth": {
-        "sessionTtlSeconds": 3600,
-        "refreshTtlDays": 60,
-        "socialProviders": ["google", "apple"]
-      },
+      /* bootstrap: publishable, but with no working fallback, so a first
+         deploy needs them here (docs 23 §1.2) */
       "llm": { "provider": "deepseek", "model": "deepseek-v4-flash",
                "smallModel": "deepseek-v4-flash",
                "baseUrl": "https://api.deepseek.com/v1" },
       "stt": { "provider": "deepgram", "language": "en",
                "providers": { "deepgram": { "…": "…" }, "soniox": { "…": "…" } } },
-      "rtc": { "provider": "cloudflare", "defaultMode": "sfu",
-               "meshMaxParticipants": 6, "iceTtlSeconds": 3600, "video": true },
-      "ses": { "fromAddress": "otp@kelabo-dev.example.com" },
+      "auth": { "socialProviders": [] }, /* no console control — file only */
+      "mail": { "provider": "ses", "fromAddress": "otp@example.com" },
+      "ses":  { "hostedZone": { "name": "example.com", "id": "ZXXXXXXXXX" } },
+      "gateway": { "cpu": 512, "memoryMiB": 1024, "desiredCount": 1,
+                   "imageTag": "latest", "arch": "amd64" },
       "retentionDays": 30
       /* tenantId is derived at runtime from the verified email domain */
     },
     "staging": { "endpoint": "staging", "...": "..." },
-    "prod":    { "endpoint": "prod", "domain": "kelabo.example.com", "...": "..." }
+    "prod":    { "endpoint": "prod", "baseDomain": "example.com", "...": "..." }
   }
 }
 ```
+
+Absent from the example and from the template, deliberately: `ses.dmarc`,
+`ses.spf`, `ses.mailFrom`, `ses.region`, `ses.createIdentity` and `ses.events`
+are opt-ins (§6), and the first three are one record per domain — a template
+value would fail the deploy of anyone whose domain already has one.
 
 **Rules baked into the CDK app:**
 - `cdk deploy -c env=dev|staging|prod` selects exactly one block.

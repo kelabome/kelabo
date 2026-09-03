@@ -181,6 +181,7 @@ test: ## all smoke tests + spa build + cdk synth
 	cd connector && npm test
 	cd spa && npm test && npm run build
 	cd e2e && npm test
+	cd infra && npm test
 	cd infra && npx cdk synth -c env=$(env) >/dev/null && echo "cdk synth $(env) OK"
 
 # The browser suite is deliberately NOT part of `make test`: it needs a

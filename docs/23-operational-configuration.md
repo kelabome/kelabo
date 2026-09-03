@@ -42,8 +42,10 @@ beside the account id is that they arrived on the same day.
 | Value | Why it cannot be published |
 |---|---|
 | `account`, `region`, `baseDomain`, `hostedZone`, `subdomains` | Read by CDK at synth; they *are* the stack's identity |
+| `portalAliases` | Certificate SANs, CloudFront aliases and DNS records — all synth-time |
 | `allowIps` | Compiles to WAF rules and ALB listener rules |
-| `gateway.cpu/memoryMiB/desiredCount/imageTag` | Task definition properties |
+| `api.originSecret` | Decides whether CloudFront sends the header and whether the Lambda demands it — two stacks, both at synth |
+| `gateway.cpu/memoryMiB/desiredCount/imageTag/arch` | Task definition properties; `arch` also picks the image the build pushes |
 | `logRetentionDays` | A CloudWatch log group property |
 | `secrets.*` | Secret *names*, resolved into IAM grants at synth |
 | `rootAdminEmail` | **Deliberate**, not technical — see §4 |
@@ -447,6 +449,17 @@ console** — it publishes `kelabo.json` values over whatever was set there.
 5. Leave the `KELABO_*` env var and the `kelabo.json` key alone. They are the
    bootstrap now, and removing them would break a deployment that has published
    nothing.
+6. Say what `config/template.json` does about it, in `TEMPLATE_KEY` in
+   `infra/test/config.mjs`. A new group in `opConfigSchema` that is not named
+   there fails that test — deliberately, because the decision is not obvious
+   and the wrong answer is invisible. The default is `null`: the template does
+   **not** carry it, because a value in the file stops doing anything the
+   moment the field is published (§9). The template carries a publishable
+   field only when it has no working fallback (`llm`, `stt.providers`,
+   `mail.fromAddress`, `org.allowedEmailDomain` — a deployment missing those
+   cannot run the agent or send a sign-in code, and cannot publish its way out
+   because root must be an address at `allowedEmailDomain`) or when it has no
+   console control at all (`auth.socialProviders`, `stt.settings`, §1.2).
 
 Adding an STT **provider** needs none of this: `stt.settings` is an opaque
 `z.record`, deliberately, so a new engine's block does not edit this schema, the

@@ -36,6 +36,14 @@ installs nothing but esbuild.
   model, a rate limit, a TTL, a provider — is a field in `opConfigSchema`
   (`contracts/src/opconfig.js`), published from `/admin`, with the config file
   as its bootstrap. A value read at synth cannot follow a row in a table.
+  **`config/template.json` carries the deploy-time half only** — the published
+  blocks were removed from it, because `loadConfig.mjs` defaults each field to
+  exactly the fold's own fallback, and a value left in the file stops doing
+  anything the moment that field is published. The exceptions are the four
+  with no working fallback (`llm`, `stt.providers`, `mail.fromAddress`,
+  `allowedEmailDomain`) and the two with no console control
+  (`auth.socialProviders`, `stt.settings`). `infra/test/config.mjs` enforces
+  both halves and fails on a new `opConfigSchema` group that says neither.
 - **`rootAdminEmail` is deploy-time and only deploy-time**, and empty **fails
   closed**. Everything else operational is editable from a web page, so who may
   edit must not be — otherwise an administrator can lock the operator out of
@@ -49,7 +57,9 @@ installs nothing but esbuild.
 
 `config/kelabo.json` is **gitignored**. Copy `config/template.json` to
 `config/kelabo.json` and fill in account/region/domains — nothing (including
-`make check`/`make test`/`cdk synth`) works without it.
+`make check`/`make test`/`cdk synth`) works without it. The template is
+deploy-time only; rate limits, TTLs, agent knobs and RTC defaults are not
+missing from it, they are `/admin`'s (docs 23).
 
 ```
 make bootstrap     # npm install at root + contracts, infra, rest-api, gateway, connector, spa
@@ -75,6 +85,7 @@ cd contracts && npm test         # frames (the agent wire protocol), mention, sp
 cd gateway  && npm test          # agent, mcp, rtc, roster, presence, repairJson, minutesAnswer, cors, opconfig, smoke, journeys, journeyLegs
 cd rest-api && npm test          # smoke, wiring, reserved, admin, mail, otpMail, journeys, closeAccount
 cd connector && npm test         # queue + envelope + persona + cards + install + runtimes + launch + channel + control (pure), smoke, pack
+cd infra && npm test             # config/template.json: nothing CDK writes is "undefined", no published block crept back
 cd spa && npm test               # test/transcript.mjs (compose + project) + test/rtc.mjs (pull reconcile, retry policy) + test/presence.mjs
 cd spa && npm run build          # the only syntax gate for JSX
 ```
