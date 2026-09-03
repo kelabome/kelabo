@@ -548,6 +548,15 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       // secret absent and never notice it. Shaped like the STT secret — a key
       // per provider — so changing provider does not mean re-entering one.
       mail: block.secrets?.mail ?? `kelabo/${block.endpoint}/mail`,
+      // The LLM key's old home. Derived like the rest, and it was not until
+      // `config/template.json` stopped naming it: the comment below has always
+      // said `llm` was derived, every config happened to spell it out, and
+      // nothing read the value except the one script that needs it, so the
+      // omission could not fail. `migrate-credentials.mjs` would have looked
+      // for a secret called "undefined" and reported the llm slot as having
+      // nothing to copy — on the one deployment shape that still had a key
+      // there to rescue.
+      llm: block.secrets?.llm ?? `kelabo/${block.endpoint}/llm`,
       // `stt`, `mail`, `llm` and `cloudflareRealtime` above are no longer where
       // a supplier key LIVES — those are rows in the credentials table now,
       // addressed by slot (contracts/src/credentials.js), and nothing at
