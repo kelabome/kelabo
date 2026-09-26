@@ -38,7 +38,7 @@ help: ## show this help
 	@awk 'BEGIN{FS=":.*## "} /^(agent-login|agent-pack|agent-publish|agent-release):.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "deploy (needs AWS creds + config/kelabo.json):"
-	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets|credential-set|credentials-migrate|credentials-show|opconfig-seed|opconfig-show):.*## /{printf "  %-19s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets|credential-set|credentials-import|credentials-migrate|credentials-show|opconfig-seed|opconfig-show):.*## /{printf "  %-19s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "access control (allowIps — empty means open):"
 	@awk 'BEGIN{FS=":.*## "} /^(allow-list|allow-ip|allow-rm):.*## /{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -102,6 +102,13 @@ credentials-migrate: ## copy supplier credentials from Secrets Manager into DDB 
 credential-set: ## set one supplier credential slot (slot=llm fields="apiKey=…" [write=1] [replace=1])
 	@cd rest-api && node scripts/put-credential.mjs $(env) --slot=$(slot) $(fields) \
 	  $(if $(write),--write,) $(if $(replace),--replace,) $(if $(force),--force,) $(if $(by),by=$(by),)
+
+# Import / refresh every slot from a local JSON file (config/credentials.json,
+# gitignored; template in config/credentials.template.json). Each slot goes
+# through put-credential.mjs, values via env vars, never argv. Dry unless write=1.
+credentials-import: ## import/refresh all credential slots from config/credentials.json ([file=…] [write=1])
+	@cd rest-api && node scripts/import-credentials.mjs $(env) $(if $(file),--file=$(abspath $(file)),) \
+	  $(if $(write),--write,) $(if $(by),by=$(by),)
 
 credentials-show: ## print which credential slots this env has set (never the values)
 	@aws dynamodb scan --table-name kelabo-$(env)-credentials --region $(REGION) \

@@ -310,6 +310,17 @@ day-to-day from the console afterwards.
    outright rather than stored, so a typo cannot leave you with a credential
    that looks set and is not.
 
+   To keep every slot's keys in one place instead, copy
+   `config/credentials.template.json` to `config/credentials.json` (gitignored;
+   `chmod 600` it), fill in what you have, and run
+   `make credentials-import env=dev` — a dry run — then again with `write=1`.
+   Each slot goes through the same `credential-set` path, values travel as
+   environment variables rather than arguments, blank fields are skipped
+   rather than written, and the whole file is validated before anything is
+   written. Re-run it to refresh a key. It is a convenience, not a
+   requirement: a plaintext key file on a laptop is a copy you now have to
+   look after, so delete it if you do not need to refresh from it.
+
    `make credentials-show env=dev` lists which slots are set, never the
    values. A slot you leave empty is not an error: the matching capability
    reports itself unconfigured and the rest of the product runs (docs 19).
