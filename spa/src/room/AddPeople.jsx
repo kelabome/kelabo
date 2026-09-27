@@ -50,7 +50,9 @@ export function AddPeople({ kelaboId, present }) {
     setSearching(true)
     const t = setTimeout(() => {
       api.searchPeople(q)
-        .then(d => setResults(d.suggestions || []))
+        // Only people who have signed in can be rung; a directory entry who
+        // never has would be refused, so they are not offered (docs 18 §4.8).
+        .then(d => setResults((d.suggestions || []).filter(s => s.registered !== false)))
         .catch(() => setResults([]))
         .finally(() => setSearching(false))
     }, SEARCH_DEBOUNCE_MS)

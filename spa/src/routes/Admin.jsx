@@ -8,6 +8,7 @@ import { SkeletonRows } from '../components/ui/Skeleton'
 import { Tabs } from '../components/ui/Tabs'
 import { useToast } from '../components/Toaster'
 import { useConfirm } from '../components/ConfirmDialog'
+import { DirectoryAdmin } from '../components/DirectoryAdmin'
 import {
   ActionRow,
   BehaviourGroup,
@@ -76,6 +77,7 @@ const TABS = [
   { id: 'suppliers', label: 'Suppliers' },
   { id: 'limits', label: 'Limits' },
   { id: 'access', label: 'Access' },
+  { id: 'directory', label: 'Directory' },
   { id: 'history', label: 'History' },
 ]
 
@@ -436,6 +438,10 @@ export default function Admin() {
         </Section>
       )}
 
+      {/* The organisation directory (docs 18 §4.7). Data, not configuration:
+          it saves on its own and has no version, so no Publish bar below. */}
+      {tab === 'directory' && <DirectoryAdmin />}
+
       {tab === 'history' && (
         <Section
           title="History"
@@ -458,10 +464,11 @@ export default function Admin() {
       {/* One publish for the whole document: the config is versioned
           atomically, and a note per field would be a version per field.
           Excluded from Suppliers, which is not config at all — each slot saves
-          itself, immediately, with no version and no note. Showing a "Publish"
+          itself, immediately, with no version and no note — as does Directory,
+          which is data rather than configuration. Showing a "Publish"
           bar under a key form would invite someone to paste a key and then look
           for the button that commits it. */}
-      {tab !== 'history' && tab !== 'suppliers' && (
+      {tab !== 'history' && tab !== 'suppliers' && tab !== 'directory' && (
         <div className="settings-row settings-row-plain action-row">
           <input
             className="input"
