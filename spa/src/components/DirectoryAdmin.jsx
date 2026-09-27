@@ -327,7 +327,25 @@ export function DirectoryAdmin() {
               spellCheck={false}
             />
           ) : (
-            <input ref={fileRef} type="file" accept=".csv,.txt,text/csv,text/plain" onChange={pick} />
+            // The native control cannot be themed (its button is browser
+            // chrome), so it is visually hidden and driven by our own Button;
+            // the label keeps it reachable by keyboard and screen readers.
+            <div className="dir-file">
+              <input
+                ref={fileRef}
+                id="dir-file-input"
+                className="sr-only"
+                type="file"
+                accept=".csv,.txt,text/csv,text/plain"
+                onChange={pick}
+              />
+              <Button type="button" onClick={() => fileRef.current?.click()}>
+                <Icon name="upload" size={14} /> {file ? 'Change file' : 'Choose file'}
+              </Button>
+              <label htmlFor="dir-file-input" className="dir-file-name">
+                {file ? file.name : 'No file chosen'}
+              </label>
+            </div>
           )}
         </Row>
         <ActionRow>

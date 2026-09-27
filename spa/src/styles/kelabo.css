@@ -3078,6 +3078,8 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
 /* /admin → Directory: preview lists (domains, skipped rows, samples). */
 .dir-list { margin: 0; padding-left: 1.1rem; font-size: var(--text-sm); display: grid; gap: 2px; }
 .dir-list .chip { margin-left: var(--space-2); }
+.dir-file { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.dir-file-name { font-size: var(--text-sm); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16rem; }
 .epick-error { margin: 6px 0 0; font-size: var(--text-xs); color: var(--danger); }
 .epick-note { margin: 6px 0 0; font-size: var(--text-xs); color: var(--text-3); }
 
