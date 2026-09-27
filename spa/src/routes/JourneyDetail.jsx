@@ -17,6 +17,7 @@ import { Skeleton, SkeletonRows } from '../components/ui/Skeleton'
 import { Switch } from '../components/ui/Switch'
 import { Tabs } from '../components/ui/Tabs'
 import { Markdown } from '../components/Markdown'
+import { EmailPicker } from '../components/EmailPicker'
 import { JourneyLegs } from '../chat/JourneyLegs'
 import { journeyLegs } from '../api'
 import { JourneyHealthChip } from './Journeys'
@@ -1037,6 +1038,48 @@ function AvatarReroll({ journey, onSaved }) {
   )
 }
 
+/**
+ * Add accessors to a private journey. The same picker as scheduling's invite
+ * field, so a colleague is found by name — registered or only in the
+ * organisation directory — and any typed address still works.
+ */
+function AddAccessorsDialog({ existing, onClose, onSave }) {
+  const [emails, setEmails] = useState([])
+  const [busy, setBusy] = useState(false)
+  const { identity } = useAuth()
+  const hostDomain = identity?.email?.split('@')[1] || ''
+  const fresh = emails.filter(e => !existing.includes(e))
+
+  const save = async () => {
+    if (!fresh.length) return onClose()
+    setBusy(true)
+    try { await onSave(fresh) } finally { setBusy(false); onClose() }
+  }
+
+  return (
+    <Modal
+      open
+      onDismiss={busy ? undefined : onClose}
+      label="Add accessors"
+      badge={<span className="modal-icon modal-icon-neutral"><Icon name="user-plus" /></span>}
+      title="Add accessors"
+      actions={
+        <>
+          <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button type="button" variant="primary" onClick={save} disabled={busy || !fresh.length}>
+            {busy ? 'Adding…' : fresh.length > 1 ? `Add ${fresh.length}` : 'Add'}
+          </Button>
+        </>
+      }
+    >
+      <p className="modal-body">Only you and the people you add can see this journey. Start typing a name.</p>
+      <div className="modal-input">
+        <EmailPicker value={emails} onChange={setEmails} hostDomain={hostDomain} disabled={busy} />
+      </div>
+    </Modal>
+  )
+}
+
 // --- Helm ----------------------------------------------------------------------
 
 /**
@@ -1288,15 +1331,23 @@ export default function JourneyDetail() {
   }
   const saveAvatar = async body => { await api.patchJourney(id, body); reload() }
 
-  const addAccessor = async () => {
-    const email = await prompt({ title: 'Add an accessor', placeholder: 'name@example.com', confirmLabel: 'Add' })
-    if (!email) return
+  // The dialog, not a bare prompt: accessors are found by name the same way
+  // invitees are (EmailPicker → /people/search, docs 18 §4.8), and several
+  // can be added at once.
+  const [addingAccessors, setAddingAccessors] = useState(false)
+  const addAccessor = () => setAddingAccessors(true)
+  const saveAccessors = async emails => {
+    const failed = []
+    for (const email of emails) {
+      try { await api.addJourneyAccessor(id, email) } catch { failed.push(email) }
+    }
     try {
-      await api.addJourneyAccessor(id, email.trim())
       const d = await api.listJourneyAccessors(id)
       setAccessors(d.accessors || [])
-      reload()
-    } catch { toast('Could not add that accessor') }
+    } catch { /* the list reloads on the next visit */ }
+    reload()
+    if (failed.length) toast(`Could not add ${failed.join(', ')}`)
+    else toast(emails.length === 1 ? `${emails[0]} can now see this journey` : `${emails.length} accessors added`)
   }
   const removeAccessor = async a => {
     try {
@@ -1388,6 +1439,13 @@ export default function JourneyDetail() {
               onAddAccessor={addAccessor}
               onRemoveAccessor={removeAccessor}
               reload={reload}
+            />
+          )}
+          {addingAccessors && (
+            <AddAccessorsDialog
+              existing={(accessors || []).map(a => a.identity)}
+              onClose={() => setAddingAccessors(false)}
+              onSave={saveAccessors}
             />
           )}
         </>

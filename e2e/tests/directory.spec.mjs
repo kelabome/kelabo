@@ -2,7 +2,8 @@
 //
 // What a route test cannot show: that an administrator can get a file from
 // their disk into the directory through the console, and that a member typing
-// part of a NAME into the invite field is offered that person's address.
+// part of a NAME — into the invite field, or when adding a journey accessor —
+// is offered that person's address.
 
 import { test, expect } from "../fixtures/test.mjs";
 import { ROOT_ADMIN_EMAIL, TENANT_DOMAIN } from "../harness/env.mjs";
@@ -56,6 +57,26 @@ test("a member finds a directory person by name in the invite field", async ({ a
   // The contractor at another domain is findable too.
   await input.fill("pat contr");
   await expect(page.locator(".epick-option").filter({ hasText: "Pat Contractor" })).toBeVisible();
+});
+
+test("a journey lead adds an accessor found by name", async ({ person }) => {
+  const lead = await person("lead");
+  const journey = await lead.api.createJourney({ title: "Private roadmap", visibility: "private" });
+  const { page } = lead;
+  await page.goto(`/journeys/${journey.journeyId}`);
+  await page.getByRole("tab", { name: "Helm" }).click();
+  await page.getByRole("button", { name: "Add accessor" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Add accessors" });
+  await dialog.locator('input[name="invitee-search"]').fill("ysolde marc");
+  const option = dialog.locator(".epick-option").filter({ hasText: "Ysolde Marchetti" });
+  await expect(option).toBeVisible();
+  await option.click();
+  await dialog.getByRole("button", { name: "Add", exact: true }).click();
+
+  await expect(page.getByText(`ymarchetti@${TENANT_DOMAIN}`)).toBeVisible();
+  const { accessors } = await lead.api.raw.api("GET", `/journeys/${journey.journeyId}/accessors`);
+  expect(accessors.map((a) => a.identity)).toContain(`ymarchetti@${TENANT_DOMAIN}`);
 });
 
 test("removing the directory stops the suggestions", async ({ person }) => {
