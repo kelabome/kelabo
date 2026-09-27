@@ -80,12 +80,19 @@ on Home the only network activity is `api.listKelabos()` every 8 s in
 `AppShell`. Presence needs the **first browser-facing, non-kelabo-scoped**
 Gateway route.
 
-**There is deliberately no org address book.** `dynamodb-stack.js` and
-`08-database.md` record the decision: the registered users *are* the list, via
-`users.tenant-index`. This design keeps that — colleagues are **derived, never
-stored**, which is precisely why "you cannot remove a colleague" is *structural*
-(there is no row to delete) rather than a rule enforced somewhere. Only *external*
-links are new persisted state.
+**Colleagues are derived, not stored.** The registered users *are* the list,
+via `users.tenant-index` — which is precisely why "you cannot remove a
+colleague" is *structural* (there is no row to delete) rather than a rule
+enforced somewhere.
+
+This section used to say there was deliberately no org address book, because a
+parallel copy of the users table could only drift. That held until the product
+met a company: the person you want to invite is invisible until they have signed
+in once, so the list is empty exactly when it is needed. §4.7 adds the one copy
+that does not drift — an **organisation directory** imported from the company's
+own export and *replaced*, never appended to, on every import — as a second
+source for finding people. It adds no relationship: a directory entry is not a
+colleague you can ring, only an address you can find by name (§4.8).
 
 ---
 
@@ -325,9 +332,9 @@ empty reschedule.
 ### 4.1 Three kinds of contact
 
 1. **Colleagues (same org)** are **derived** from `users.tenant-index`, never
-   stored as a relationship. Everyone in your domain exists to you; the org
-   boundary is the directory. This honours the recorded "no address book"
-   decision.
+   stored as a relationship. Everyone in your domain exists to you. The
+   organisation directory (§4.7) makes colleagues who have not signed in yet
+   *findable* — it does not make them contacts.
 2. **Favourites (same org)** are a **private, one-way, unmirrored** marker on top
    of a colleague. You favourite a colleague to pin them; the org list you *see*
    is your favourites, and the rest are found by **search**. The other person is
@@ -354,8 +361,9 @@ conflated:**
 
 - The Contacts screen lists **only your favourites** by default. Non-favourited
   colleagues do not appear until you search.
-- **Search** (`GET /people/search`, already exists) returns any colleague by
-  name/email prefix, and each result carries `favourited: boolean` and presence
+- **Search** (`GET /people/search`) returns any colleague — and anyone in the
+  organisation directory — ranked by name (§4.8), and each result carries
+  `favourited: boolean`, `registered: boolean` and presence
   so you can see their state and favourite/unfavourite them **from the result**.
 - You can also favourite from the **kelabo room** — a participant who is a
   same-org colleague gets an "add to favourites" affordance on their tile / in the
@@ -511,6 +519,119 @@ the primary flow the user described is search, which already exists.
 then; favourites are private one-way markers), `02-rest-api.md` (favourite +
 external routes, and the `favourited` field on `/people/search`), `01-spa.md`
 (the Contacts screen and the room favourite affordance).
+
+### 4.7 The organisation directory — ✅ built
+
+**Why.** Colleagues are the users table, and a row appears there only on first
+sign-in. In a company rolling Kelabo out, that means nobody can be found by name
+until they have already used it. Asking each person to build their own list is
+the wrong answer for an organisation that already has one: its mail system.
+
+**What.** An administrator uploads, from `/admin` → **Directory**, the export
+their mail system already produces, for one **tenant** (an email domain).
+Everybody signed in at that tenant can then find those people by name wherever an
+address is typed. Entries may be at *any* domain — a company list routinely
+includes a second regional domain and contractors — because the tenant decides who
+may *see* the list, not what its addresses end in.
+
+Which files (`contracts/src/directory.js`, matched by header name, never by
+product):
+
+| Source | How to get it |
+|---|---|
+| Microsoft Entra | Entra admin centre → Users → **Download users** (`displayName`, `mail`, `userPrincipalName`, …; `mail` preferred, the UPN when it is blank) |
+| Microsoft 365 | Microsoft 365 admin centre → Active users → **Export users** |
+| Outlook | People → **Export contacts** (a person's own contacts, not the org's) |
+| Google Workspace | Admin console → Users → **Download users** (`… [Required]` headers) |
+| Google Contacts | Export → Google CSV (`E-mail 1 - Value`) |
+| By hand | any sheet with a name and an email column, saved as CSV — with or without a header, comma- or semicolon-separated |
+| Clipboard | a pasted recipient list: `Ann Lee <ann@example.com>; "Lee, Bob" <bob@…>` |
+
+Excel's byte-order mark, CRLF endings and semicolon delimiter are handled. A bad
+row is skipped and reported with its line number; the rest import. A file with no
+address column at all is refused with its headers named — it is the wrong file,
+not a bad line.
+
+**Replace, never append.** An import is the new truth for that tenant: people
+missing from the file are removed. That is what answers the old objection — a copy
+that is replaced wholesale from the source of truth cannot drift further than the
+last export — and it is how a leaver drops out. The risk it creates is importing
+the wrong file (one department's) and deleting everyone else, so an import that
+would remove **more than half** of an existing directory is refused
+(`409 directory_shrink`) unless the administrator ticks a confirmation having seen
+the counts.
+
+**Preview, then import.** Both take the same file and parse it server-side with
+the one reader. The preview writes nothing and reports added / renamed / removed /
+unchanged, skipped rows, duplicates merged, and a **count per domain** — which is
+where `example.com.ay` shows up before it is stored. The import re-reads the
+directory rather than trusting the preview's numbers.
+
+**Refusals.** A public mailbox domain (`gmail.com`, `*.onmicrosoft.com`, the
+`orgDomains.js` list) cannot own a directory — it would publish a staff list to
+every stranger with a Gmail address. A tenant nobody can sign in at (another
+domain than a set `allowedEmailDomain`) is allowed but warned about.
+
+**Storage.** In the existing contacts table — no new table, no deploy ordering:
+
+```
+PK = DIR#<tenant>        SK = EMAIL#<email>      { email, name, tenantId, importedAt }
+PK = DIRECTORY           SK = TENANT#<tenant>    { tenantId, count, importedAt, importedBy, fileName, added, updated, removed }
+```
+
+The `DIRECTORY` partition is the register `/admin` lists with one query. Writes go
+before deletes, in batches of 25, so a failure part-way leaves extra people
+findable rather than real people missing, and re-running converges. Limits: 20,000
+entries and 4 MB per file.
+
+**Routes** (admin-only, re-checked in `rest-api/src/directory.js`):
+
+| Route | Effect |
+|---|---|
+| `GET /admin/directory` | `{ defaultTenant, directories:[{tenantId,count,importedAt,importedBy,fileName}] }` |
+| `POST /admin/directory/preview` `{tenantId, csv, fileName?}` | what an import would do; writes nothing |
+| `POST /admin/directory/import` `{tenantId, csv, fileName?, force?}` | replace the tenant's directory with the file |
+| `GET /admin/directory/:tenant` | the entries, for the console to show or download back as CSV |
+| `DELETE /admin/directory/:tenant` | remove the directory; registered users are untouched |
+
+### 4.8 Finding people by name — ✅ built
+
+`GET /people/search?q=` used to be a `begins_with` on the address, which helps
+only somebody who already knows the address. It now ranks names
+(`contracts/src/peopleSearch.js`, pure) over the merge of two sources
+(`rest-api/src/people.js`):
+
+- the **registered users** at the caller's tenant, and
+- the **organisation directory** imported for it (§4.7).
+
+One entry per address. A registered user's own display name wins, except the one
+sign-in generates when it has nothing better (the local part) — a directory's
+"Daniel Okafor" beats a generated "dokafor", and it is what people type.
+
+Matching folds case and accents and splits names and the address's local part into
+words. Every typed word must match some word; each scores exact (100) > prefix (80)
+> one edit away, transpositions included (45, 4+ letters) > inside a word (40, 3+)
+> letters in order (20, 3+). Typing the address itself scores above everything, and
+initials ("do") match too. Favourites (+15) and people who have signed in (+5) win
+ties. Up to 8 results.
+
+Both lists are read whole and cached **per tenant for 60 s** in each Lambda
+container; an import invalidates the importing container at once, and the others
+within the TTL — the op-config cache's bound, for the same reason. A directory read
+failure degrades search to registered users rather than failing it. The tenant is
+the partition key of both reads, so no query can reach another organisation.
+
+Each suggestion carries `registered` and `source` (`user` | `directory`):
+
+- the **invite field** (`EmailPicker`) shows name over address and tags directory
+  entries — any address can be invited, so nothing is filtered;
+- the **ring pickers** (`CallDialog`, `AddPeople`) show only `registered` people,
+  because a ring reaches a signed-in person and nobody else;
+- **Contacts** shows "not signed in yet", and offers the favourite star only at
+  your own domain — the rule favourites always had.
+
+An empty query is not a search: it still returns the first registered colleagues,
+which is what the pickers show before anything is typed.
 
 ---
 

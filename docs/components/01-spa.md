@@ -240,9 +240,10 @@ is the point: it is minted before the kelabo exists as a live thing and is the
 kelabo in an earlier state (docs 08), not a placeholder swapped for a real one.
 
 - **`/schedule`** — title, time, duration, note, and an invitee picker
-  (`EmailPicker`) that suggests the people registered at your own email domain
-  as you type — read from the users table's `tenant-index`, not a private
-  contact list, which would start empty for everybody. Suggestions never
+  (`EmailPicker`) that suggests people by name as you type — everyone
+  registered at your own email domain plus the organisation directory an
+  administrator imported (docs 18 §4.7–4.8), name over address, with directory
+  entries who have not signed in tagged as such. Suggestions never
   restrict: any valid address is accepted, so inviting someone outside the
   company or a colleague who has not signed in yet works the same. `When` is a
   themed `DateTimePicker` rather than the native controls, which each browser
@@ -515,9 +516,9 @@ a journeys tab is not built.)*
 
 ### 5.10 Administration (`/admin`) — docs 23
 
-Six tabs, mirrored into `?tab=` with `replace: true` so a section is linkable and
+Seven tabs, mirrored into `?tab=` with `replace: true` so a section is linkable and
 survives a reload: **Assistant**, **Services**, **Suppliers**, **Limits**,
-**Access**, **History**.
+**Access**, **Directory**, **History**.
 
 **Every field shows three things, not one.** What is published, what this
 deployment falls back to, and therefore what is in effect. Showing only the
@@ -544,6 +545,15 @@ the history of. Boxes are password fields that always start empty, because
 and a masked placeholder over a value that was never fetched would imply
 otherwise. Empty means "leave this one alone" and the server merges, so rotating
 one engine's key cannot wipe the other's.
+
+**Directory is data, not config, and has no publish bar either**
+(`components/DirectoryAdmin.jsx`, docs 18 §4.7). An administrator picks a tenant
+and a file (or pastes a list), previews — counts, a total per domain so a typo'd
+domain stands out, skipped rows with line numbers, who would be renamed or
+removed — and then imports, which replaces that tenant's directory. An import
+that would remove most of a directory needs a tick first. Existing directories
+can be downloaded back as CSV, refreshed from a new file, or removed. The file is
+read in the browser and sent as text; it is parsed server-side by the one reader.
 
 A failed load renders an error with a retry, not a skeleton. That distinction
 was learned the hard way: `.catch(() => setState(null))` left the tab

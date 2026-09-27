@@ -351,6 +351,7 @@ the control.
 | **Suppliers** | The four credential slots: which fields are filled, when, by whom — and a box to set or rotate each |
 | **Limits** | Sign-in code and join-code limits, session/token lifetimes, retention, external contacts |
 | **Access** | The sign-in domain, and the administrator roster |
+| **Directory** | Your organisation's people list, imported from your mail system (§D6), so colleagues can be found by name before they have signed in |
 | **History** | Every published version, newest first, with its author and note |
 
 Four things about it are worth knowing before you use it in anger:
@@ -370,6 +371,37 @@ Four things about it are worth knowing before you use it in anger:
 - **The roster is root's alone.** A granted administrator can publish and rotate
   keys but cannot grant or revoke — otherwise they would be root after one hop.
   Root itself is `rootAdminEmail` and changes only by a deploy.
+
+### D6. Import your organisation's directory (optional)
+
+Out of the box, typing a name into an invite field suggests only people who have
+already signed in — so on day one, nobody. Importing your mail system's people
+list fixes that: everyone at your domain can then find a colleague by first
+name, surname, initials or a misspelling, and pick their address.
+
+1. **Export the list.** Whichever of these you have:
+   - **Microsoft 365 / Entra ID:** Entra admin centre → *Users* → *All users* →
+     *Download users*, or Microsoft 365 admin centre → *Users* → *Active users*
+     → *Export users*. Both give a CSV with display names and addresses.
+   - **Google Workspace:** Admin console → *Directory* → *Users* → *Download
+     users*.
+   - **Anything else:** a spreadsheet with a name column and an email column,
+     saved as CSV. A pasted recipient list (`Ann Lee <ann@example.com>; …`)
+     works too.
+
+   Outlook's own *Export contacts* gives *your* contacts, not the company's —
+   fine for a small team, but the admin exports above are the whole list.
+2. **Preview it.** `/admin` → **Directory**, tenant = your email domain, choose
+   the file, **Preview**. Nothing is written yet. Check the per-domain counts:
+   a typo such as `example.com.ay` shows up there as a domain of its own, and is
+   worth fixing in the source before you import it.
+3. **Import.** The directory is **replaced** by the file — people not in it are
+   removed. That is how leavers drop out: export again, import again, whenever
+   you like. An import that would remove more than half of the directory asks
+   you to confirm first.
+
+Nothing to deploy and no key to set: the list lives in the contacts table the
+deployment already has, and search picks up an import within a minute.
 
 ---
 

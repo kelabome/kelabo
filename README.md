@@ -109,6 +109,10 @@ lands on a filterable timeline. Full design: [docs/20-journey.md](docs/20-journe
   the roster before it starts; cancellations and reschedules notify everyone.
 - **Contacts and presence** — see who in your organisation is online, and ring
   them into a huddle straight from Contacts.
+- **Your organisation's directory, imported** — upload the people list your
+  mail system already exports (Microsoft 365, Google Workspace, or any CSV) and
+  invite fields find colleagues by name, typos and all, before they have ever
+  signed in.
 - **Bring your own coding agent.** Attach your own opencode or Claude Code
   session to a kelabo — it hears the transcript and answers onto the board.
 - **Everything optional degrades, nothing jams.** No STT key? The room is

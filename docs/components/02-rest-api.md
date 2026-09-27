@@ -296,8 +296,14 @@ Mint a short-lived STT streaming credential for the browser.
 
 `contacts.js` (docs 18 §4): `GET /contacts` 🔑 (colleagues derived from the users
 table + the caller's favourites), `POST /contacts/favourites` 🔑,
-`DELETE /contacts/favourites/:email` 🔑, `GET /people/search` 🔑. External
-cross-org contacts return 501 unless `config.contacts.external` is set.
+`DELETE /contacts/favourites/:email` 🔑. External cross-org contacts return 501
+unless `config.contacts.external` is set.
+
+`GET /people/search?q=` 🔑 (`scheduling.suggestPeople` over `people.js`, docs 18
+§4.8) ranks, by name, the registered users at the caller's tenant merged with the
+organisation directory imported for it. Each suggestion is `{ email, displayName,
+favourited, registered, source: "user"|"directory", avatarVariant }`, up to 8.
+Candidates are cached per tenant for 60 s per container.
 
 ### 3.5b Host MCP settings (`/me/mcp`)
 
@@ -382,6 +388,10 @@ entry as a courtesy, not as the control.
 | `PUT /admin/credentials/:slot` | admin | body `{ fields }`; merges |
 | `GET /admin/roster` | **root** | `{ root, admins[] }` |
 | `POST /admin/roster`, `DELETE /admin/roster/:email` | **root** | grant / revoke |
+| `GET /admin/directory` | admin | `{ defaultTenant, directories[] }` — docs 18 §4.7 |
+| `POST /admin/directory/preview` | admin | body `{ tenantId, csv, fileName? }` → counts, per-domain totals, skipped rows, samples. Writes nothing |
+| `POST /admin/directory/import` | admin | same body plus `force?`; **replaces** the tenant's directory. `409 directory_shrink` if it would remove more than half without `force` |
+| `GET /admin/directory/:tenant`, `DELETE /admin/directory/:tenant` | admin | the entries / remove the directory |
 
 **`whoami` answers a non-admin instead of refusing them.** It is what the app
 asks on load to decide whether to render the menu entry, so a 403 there would be
