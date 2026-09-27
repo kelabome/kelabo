@@ -59,6 +59,8 @@ import { createSttToken } from "./stt/index.js";
 import { createInternal } from "./internal.js";
 import { createOpConfig } from "./opconfig.js";
 import { createAdmin } from "./admin.js";
+import { createDirectoryAdmin } from "./directory.js";
+import { createPeople } from "./people.js";
 import { createAgent } from "./agent.js";
 import { parseCookies, readCookie, mintCookie, serializeCookie } from "./cookies.js";
 import { ApiError, err } from "./errors.js";
@@ -137,7 +139,7 @@ function htmlErrorPage(status, code) {
 }
 
 export function createApp(deps) {
-  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, credentials, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin } = deps;
+  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, credentials, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin, directory } = deps;
 
   /**
    * Best-effort link into the journeys named at kelabo creation/schedule time
@@ -360,6 +362,55 @@ export function createApp(deps) {
         });
         log("warn", "admin_revoked", { by: session.identity, email: body.email });
         return { status: 200, body };
+      },
+    },
+    // The organisation directory (docs 18 §4.7): an imported list of people a
+    // tenant can find by name. Admin-only, re-checked in directory.js. Preview
+    // writes nothing; apply replaces the tenant's directory with the file.
+    {
+      method: "GET",
+      pattern: "/admin/directory",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await directory.list({ identity: session.identity }) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/admin/directory/preview",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await directory.preview({ identity: session.identity, body: req.body }) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/admin/directory/import",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return { status: 200, body: await directory.apply({ identity: session.identity, body: req.body }) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/admin/directory/:tenant",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await directory.entries({ identity: session.identity, tenantId: decodeURIComponent(req.params.tenant) }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/admin/directory/:tenant",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await directory.remove({ identity: session.identity, tenantId: decodeURIComponent(req.params.tenant) }),
+        };
       },
     },
     {
@@ -1673,8 +1724,12 @@ export function composeApp(config, overrides = {}) {
   const mcpOauth = createMcpOauth({ config, db, secrets });
   const internal = createInternal({ config, secrets });
   const kelabos = createKelabos({ config, db, internal, credentials, opConfig });
-  const scheduling = createScheduling({ config, db, mailer, internal, opConfig });
-  const contacts = createContacts({ config, db, opConfig });
+  // Who can be found by name (docs 18 §4.8): registered users plus the
+  // imported directory, cached per tenant. One instance, shared by the search
+  // that reads it and the import that invalidates it.
+  const people = createPeople({ db });
+  const scheduling = createScheduling({ config, db, mailer, internal, opConfig, people });
+  const contacts = createContacts({ config, db, opConfig, people });
   const huddle = createHuddle({ config, db, internal, kelabos });
   const join = createJoin({ config, db, secrets, opConfig });
   const joinCodes = createJoinCodes({ config, db, opConfig });
@@ -1688,7 +1743,8 @@ export function composeApp(config, overrides = {}) {
   const journeys = createJourneys({ config, db, internal });
   // The roster that says who may publish the configuration above.
   const admin = createAdmin({ config, db, opConfig, credentials, internal, log });
-  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin });
+  const directory = createDirectoryAdmin({ config, db, admin, people, opConfig, log });
+  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin, directory });
 }
 
 export async function handler(event, context) {
