@@ -1,6 +1,7 @@
 node_modules/
 rig/rig-profile.json
 config/kelabo.json
+config/credentials.json
 infra/cdk.out/
 spa/dist/
 rest-api/dist/

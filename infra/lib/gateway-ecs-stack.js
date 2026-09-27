@@ -93,7 +93,10 @@ export class GatewayEcsStack extends Stack {
           cfg.gateway.arch === "arm64" ? ecs.CpuArchitecture.ARM64 : ecs.CpuArchitecture.X86_64,
       },
       desiredCount: cfg.gateway.desiredCount,
-      taskSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      // onePerAz: a long-lived default VPC often carries extra public subnets
+      // someone else added (a second one in the same AZ). Harmless for tasks,
+      // but see the load balancer override below for why it matters there.
+      taskSubnets: { subnetType: ec2.SubnetType.PUBLIC, onePerAz: true },
       assignPublicIp: true,
       publicLoadBalancer: true,
       certificate,
@@ -243,6 +246,18 @@ export class GatewayEcsStack extends Stack {
 
       new CfnOutput(this, "GatewayAllowIpRuleArns", { value: ruleArns.join(",") });
     }
+
+    // An ALB refuses two subnets in one AZ ("A load balancer cannot be attached
+    // to multiple subnets in the same Availability Zone"), and the pattern
+    // attaches every public subnet of the VPC with no way to narrow it short of
+    // supplying our own load balancer — which would change its logical id and
+    // replace it on every existing deployment. Overriding the subnet list keeps
+    // the id; on a VPC with one subnet per AZ it synthesizes the same list, so
+    // it is a no-op everywhere but where it is needed.
+    this.service.loadBalancer.node.defaultChild.addPropertyOverride(
+      "Subnets",
+      vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC, onePerAz: true }).subnetIds,
+    );
 
     const taskRole = this.service.taskDefinition.taskRole;
     tables.kelabos.grantReadWriteData(taskRole);
