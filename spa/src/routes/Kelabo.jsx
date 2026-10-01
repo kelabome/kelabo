@@ -77,6 +77,12 @@ function KelaboRoom() {
   // The kelabo ended but the Gateway never wrote the record. Distinct from
   // `ended` because only the host sees it, and only they can retry it.
   const [archiveFailed, setArchiveFailed] = useState(false)
+  // The host pressed End and the request is still in flight. It can take a
+  // while — in developer mode the Gateway waits on the bridge for the session
+  // archive — so the room says so instead of looking frozen. Leaving while it
+  // runs is safe: nothing aborts the request, and minutes are generated in the
+  // Gateway after it returns, not in this page.
+  const [ending, setEnding] = useState(false)
   const [icon, setIcon] = useState(themeIcon())
   const [scheme, setSchemeState] = useState(currentScheme())
   const [finalOnly, setFinalOnly] = useState(localStorage.getItem('kelabo-final-only') === '1')
@@ -467,9 +473,12 @@ function KelaboRoom() {
   // The reload/close prompt stands down while the call is in `error`: with the
   // call already down there is nothing a reload loses, and it used to tax the
   // exact action that recovers.
-  useLeaveGuard({ enabled: !ended, unloadEnabled: !ended && call.state !== 'error', confirm: confirmLeave, onLeave: leave })
+  // While ending, the guard stands down too: the kelabo is already finishing
+  // for everyone, so "the kelabo carries on without you" is no longer true.
+  useLeaveGuard({ enabled: !ended && !ending, unloadEnabled: !ended && !ending && call.state !== 'error', confirm: confirmLeave, onLeave: leave })
 
   const endKelabo = async () => {
+    if (ending) return
     const ok = await confirm({
       title: 'End kelabo?',
       body: `The kelabo ends for all ${participantCount || ''} participants. ${
@@ -480,6 +489,7 @@ function KelaboRoom() {
       confirmLabel: 'End kelabo',
     })
     if (!ok) return
+    setEnding(true)
     try {
       const res = await api.endKelabo(id)
       // The kelabo always ends; the record does not always get written. Say
@@ -491,7 +501,17 @@ function KelaboRoom() {
       setEnded(true)
     } catch {
       toast('Could not end the kelabo')
+    } finally {
+      setEnding(false)
     }
+  }
+
+  // Out of the room while the end is still in flight. The request is not
+  // aborted (api.request passes no signal) and the toast above still fires
+  // wherever the host lands, so a failure is not lost by leaving.
+  const leaveWhileEnding = () => {
+    toast(assistantOn ? 'Ending in the background — minutes will appear in the record' : 'Ending in the background')
+    leave()
   }
 
   const retryArchive = async () => {
@@ -559,6 +579,29 @@ function KelaboRoom() {
       />
 
       <InviteDialog kelaboId={id} open={inviteOpen} onClose={() => setInviteOpen(false)} />
+
+      <Modal
+        open={ending && !ended}
+        label="Ending kelabo"
+        badge={<span className="modal-icon modal-icon-accent"><span className="con-spinner" aria-hidden="true"></span></span>}
+        title="Ending kelabo…"
+        actions={
+          <>
+            <Button variant="ghost" onClick={leaveWhileEnding}>Leave now</Button>
+            <Button variant="primary" disabled>Waiting…</Button>
+          </>
+        }
+      >
+        <p className="modal-body" role="status" aria-live="polite">
+          {assistantOn
+            ? 'Please wait — saving the record and generating minutes. This can take a little while.'
+            : 'Please wait — saving the record. This can take a little while.'}
+        </p>
+        <p className="modal-body">
+          You can wait here, or leave now: the kelabo still ends for everyone
+          {assistantOn ? ' and the minutes are written either way' : ''}.
+        </p>
+      </Modal>
 
       {ended && (
         <Modal
