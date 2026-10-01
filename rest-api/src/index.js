@@ -14,6 +14,7 @@ import {
   ringAnswerBodySchema,
   rsvpBodySchema,
   rsvpCookieSchema,
+  rsvpLinkSchema,
   COOKIE_RSVP,
   joinBodySchema,
   settingsPutBodySchema,
@@ -176,7 +177,15 @@ export function createApp(deps) {
    * ever consulted when there is no session — a signed-in invitee is already
    * identified by their address, which is a far better key than a cookie.
    */
-  async function readRsvpKey(req, kelaboId) {
+  async function readRsvpKey(req, kelaboId, linkToken) {
+    // The mail's Accept/Decline link names the invitee outright, so it wins
+    // over a cookie — which may belong to whoever last answered as a guest on
+    // this browser.
+    if (linkToken) {
+      const key = await secrets.getCookieKey(config);
+      const t = readCookie(linkToken, key, rsvpLinkSchema);
+      if (t && t.kelaboId === kelaboId) return t.inviteKey;
+    }
     const raw = req.cookies[COOKIE_RSVP];
     if (!raw) return null;
     const key = await secrets.getCookieKey(config);
@@ -786,7 +795,7 @@ export function createApp(deps) {
           body: await scheduling.getInvitation({
             kelaboId: req.params.id,
             identity: session?.identity || null,
-            rsvpKey: await readRsvpKey(req, req.params.id),
+            rsvpKey: await readRsvpKey(req, req.params.id, req.query?.t),
           }),
         };
       },
@@ -802,11 +811,13 @@ export function createApp(deps) {
           body,
           identity: session?.identity || null,
           displayName: session?.displayName,
-          rsvpKey: await readRsvpKey(req, req.params.id),
+          rsvpKey: await readRsvpKey(req, req.params.id, body.token),
         });
-        // A guest gets a cookie holding their invite key so a second visit can
-        // change the answer instead of creating a second person.
-        const cookies = result.isGuest ? [await rsvpCookie(req.params.id, result.inviteKey)] : [];
+        // Anyone answering without a session — a guest, or an invitee who
+        // clicked Accept/Decline in their mail — gets a cookie holding their
+        // invite key, so a second visit changes the answer instead of creating
+        // a second person, and the mail's token need not stay in the URL.
+        const cookies = !session?.identity ? [await rsvpCookie(req.params.id, result.inviteKey)] : [];
         return { status: 200, body: result, cookies };
       },
     },
@@ -1673,7 +1684,7 @@ export function composeApp(config, overrides = {}) {
   const mcpOauth = createMcpOauth({ config, db, secrets });
   const internal = createInternal({ config, secrets });
   const kelabos = createKelabos({ config, db, internal, credentials, opConfig });
-  const scheduling = createScheduling({ config, db, mailer, internal, opConfig });
+  const scheduling = createScheduling({ config, db, mailer, internal, opConfig, secrets });
   const contacts = createContacts({ config, db, opConfig });
   const huddle = createHuddle({ config, db, internal, kelabos });
   const join = createJoin({ config, db, secrets, opConfig });

@@ -11,13 +11,24 @@ import { Button } from '../components/ui/Button'
 import { useToast } from '../components/Toaster'
 import { DeviceCheck } from '../components/DeviceCheck'
 
+const WAIT_POLL_MS = 15000
+
+function whenText(at, minutes) {
+  if (!at) return ''
+  const date = new Date(at).toLocaleString([], {
+    weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit',
+  })
+  return minutes ? `${date} · ${minutes} min` : date
+}
+
 export default function Join() {
   const { id } = useParams()
   const toast = useToast()
   const navigate = useNavigate()
   const { identity, loading: authLoading } = useAuth()
   const [kelabo, setKelabo] = useState(null)
-  const [state, setState] = useState('loading') // loading|invalid|ready|joining|error
+  const [state, setState] = useState('loading') // loading|waiting|cancelled|invalid|ready|joining|error
+  const [upcoming, setUpcoming] = useState(null)
   const [name, setName] = useState('')
   const [mode, setMode] = useState(localStorage.getItem('kelabo-mode') || 'audio-board')
   const nameRef = useRef(null)
@@ -29,9 +40,16 @@ export default function Join() {
     setName(localStorage.getItem('kelabo-name') || displayName(identity) || '')
   }, [authLoading, identity])
 
+  // The invitation mail and its calendar event carry THIS link, and people
+  // click a calendar link a few minutes early. Before the host starts, the
+  // server says 409 kelabo_not_started — that is "wait here", not "bad link",
+  // so the page waits and turns into the join form by itself when it goes live.
   useEffect(() => {
-    api.getKelabo(id)
+    let alive = true
+    let timer
+    const load = () => api.getKelabo(id)
       .then(m => {
+        if (!alive) return
         if (m.status === 'ended') {
           // An ended kelabo cannot be joined, but it can be read. Links to
           // /join outlive the kelabo (a journey's Kelabos tab held one for as
@@ -46,7 +64,21 @@ export default function Join() {
           setState('ready')
         }
       })
-      .catch(() => setState('invalid'))
+      .catch(e => {
+        if (!alive) return
+        if (e?.code === 'kelabo_not_started') {
+          setState('waiting')
+          // Title and time for the waiting card; public, like the invite page.
+          api.getInvitation(id).then(inv => alive && setUpcoming(inv)).catch(() => {})
+          timer = setTimeout(load, WAIT_POLL_MS)
+        } else if (e?.code === 'kelabo_cancelled') {
+          setState('cancelled')
+        } else {
+          setState('invalid')
+        }
+      })
+    load()
+    return () => { alive = false; clearTimeout(timer) }
   }, [id, navigate])
 
   const join = async () => {
@@ -78,6 +110,28 @@ export default function Join() {
             <>
               <Skeleton className="skel-title" />
               <Skeleton className="skel-text" />
+            </>
+          )}
+
+          {state === 'waiting' && (
+            <>
+              <h1 className="page-title">{upcoming?.title ? `“${upcoming.title}” hasn't started yet` : "This kelabo hasn't started yet"}</h1>
+              {upcoming && (
+                <p className="page-sub">
+                  {upcoming.hostIdentity} · {whenText(upcoming.scheduledAt, upcoming.durationMinutes)}
+                </p>
+              )}
+              <p className="form-note">Keep this page open — it will let you join as soon as the host starts.</p>
+              <p className="page-sub page-sub-tight">
+                <Link to={`/invite/${id}`}>Let the host know if you can make it</Link>
+              </p>
+            </>
+          )}
+
+          {state === 'cancelled' && (
+            <>
+              <h1 className="page-title">This kelabo was cancelled</h1>
+              <Banner kind="warn">The host cancelled this kelabo.</Banner>
             </>
           )}
 

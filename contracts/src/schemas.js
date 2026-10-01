@@ -347,10 +347,25 @@ export const RSVP_RESPONSES = ["accepted", "declined", "pending"];
 export const rsvpBodySchema = z.object({
   response: z.enum(RSVP_RESPONSES),
   displayName: z.string().min(1).max(64).optional(),
+  // The signed Accept/Decline link from the invitation mail (rsvpLinkSchema).
+  token: z.string().min(1).max(2048).optional(),
 });
 
 export const rsvpCookieSchema = z.object({
   kind: z.literal("rsvp"),
+  kelaboId: z.string().min(1).max(128),
+  inviteKey: z.string().min(1).max(160),
+  exp: z.number(),
+});
+
+/**
+ * The token in an invitation mail's Accept / Decline buttons: "this click is
+ * the person this mail was sent to". Same signing key as the RSVP cookie, so
+ * `kind` is what keeps one from being replayed as the other — a cookie must
+ * never be usable as a mail link, nor a mail link as a cookie.
+ */
+export const rsvpLinkSchema = z.object({
+  kind: z.literal("rsvp_link"),
   kelaboId: z.string().min(1).max(128),
   inviteKey: z.string().min(1).max(160),
   exp: z.number(),

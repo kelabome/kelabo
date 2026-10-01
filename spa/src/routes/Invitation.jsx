@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth, displayName } from '../auth'
 import { TopBar } from '../components/TopBar'
@@ -21,6 +21,12 @@ import { useToast } from '../components/Toaster'
  *
  * Declining is never a lock. The link keeps working, and the answer can be
  * changed right up to the kelabo — people say no and then find they can come.
+ *
+ * The mail's Accept / Decline buttons land here as `?t=<signed token>&r=<answer>`.
+ * The token names the invitee, so the answer is recorded at once, on their own
+ * row, with no name to type; the server then sets the RSVP cookie and the
+ * token is dropped from the address bar, so it is not left in history or
+ * shared by copying the URL.
  */
 
 function whenText(at, minutes) {
@@ -37,6 +43,11 @@ export default function Invitation() {
   const toast = useToast()
   const navigate = useNavigate()
   const { identity, loading: authLoading } = useAuth()
+  const [params] = useSearchParams()
+  // Read once: the URL is cleaned after the first answer is recorded.
+  const [token] = useState(() => params.get('t') || undefined)
+  const [mailAnswer] = useState(() => (['accepted', 'declined'].includes(params.get('r')) ? params.get('r') : null))
+  const applied = useRef(false)
 
   const [invite, setInvite] = useState(null)
   const [state, setState] = useState('loading') // loading | ready | invalid
@@ -44,7 +55,7 @@ export default function Invitation() {
   const [saving, setSaving] = useState(false)
 
   const load = () => {
-    api.getInvitation(id)
+    api.getInvitation(id, token)
       .then(data => {
         setInvite(data)
         setName(prev => prev || data.myName || '')
@@ -60,6 +71,15 @@ export default function Invitation() {
     if (!authLoading && identity) load()
   }, [authLoading, identity]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // One click in the mail is the answer: record it as soon as the invitation
+  // is known to still be answerable, then clean the URL.
+  useEffect(() => {
+    if (applied.current || !mailAnswer || state !== 'ready' || authLoading || !invite) return
+    applied.current = true
+    if (invite.status === 'cancelled' || invite.status === 'ended') return
+    respond(mailAnswer).finally(() => navigate(`/invite/${id}`, { replace: true }))
+  }, [state, authLoading, invite]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const respond = async response => {
     const needName = invite?.needsName && !identity
     const chosen = name.trim()
@@ -69,7 +89,7 @@ export default function Invitation() {
     }
     setSaving(true)
     try {
-      const res = await api.rsvp(id, response, needName ? chosen : undefined)
+      const res = await api.rsvp(id, response, needName ? chosen : undefined, token)
       setInvite(prev => ({ ...prev, myResponse: res.response, myName: res.displayName, needsName: false }))
       toast(response === 'accepted' ? "Great — you're on the list" : 'Thanks for letting them know')
     } catch (e) {

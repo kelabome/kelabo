@@ -182,6 +182,16 @@ would otherwise fire a per-peer "left" fan-out into a room with no subscribers.
 - **Email:** new `sendCancellation` on `createSesSender`
   (`rest-api/src/otp.js`), sent to every `INVITE#` row that has an `email`, except
   the host. Per-recipient, non-fatal — same pattern the invite loop already uses.
+- **Calendar:** every scheduling mail (invite, reschedule, cancel, uninvite)
+  carries an iCalendar event (`rest-api/src/mail/ics.js`) — without one no mail
+  client adds anything to a calendar. UID `kelabo-<kelaboId>@kelabo`, SEQUENCE =
+  send time in seconds (only grows, so a later mail always supersedes), times in
+  UTC. Invite/reschedule are `METHOD:REQUEST`, cancel/uninvite `METHOD:CANCEL`.
+  On SES it is a `text/calendar; method=…` *alternative* (lands in Outlook as a
+  meeting); MailerSend's JSON API cannot express that, so there it is an `.ics`
+  attachment (one click to add). `RSVP=FALSE`: replies are still collected on
+  the invitation page — accepting in Outlook mails the host, it does not update
+  the kelabo's RSVP list.
 - **Agent wire:** `frameKelaboSchema.event` gains `"cancelled"`.
 - **SSE:** the existing `ended` event carries `{ reason: "cancelled" }`. For a
   scheduled kelabo there are usually no browser subscribers, so email is the real

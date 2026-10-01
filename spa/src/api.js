@@ -95,11 +95,13 @@ export const api = {
     apiRequest(`/kelabos/${id}/invitees`, { method: 'POST', body: { invitees } }),
   // Deliberately reachable without a session: the invitation link is meant to
   // work for people who have no account.
-  getInvitation: id => apiRequest(`/kelabos/${id}/invitation`),
-  rsvp: (id, response, displayName) =>
+  // `token` is the signed Accept/Decline link from the invitation mail: it
+  // says which invitee this is, so their answer lands on their own row.
+  getInvitation: (id, token) => apiRequest(`/kelabos/${id}/invitation${qs({ t: token })}`),
+  rsvp: (id, response, displayName, token) =>
     apiRequest(`/kelabos/${id}/rsvp`, {
       method: 'POST',
-      body: { response, ...(displayName ? { displayName } : {}) },
+      body: { response, ...(displayName ? { displayName } : {}), ...(token ? { token } : {}) },
     }),
   // Registered users at your own email domain — see rest-api/scheduling.js.
   searchPeople: q => apiRequest(`/people/search${qs({ q })}`),

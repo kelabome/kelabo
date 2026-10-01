@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { createMailer, mailSettingsFromConfig, MAIL_PROVIDERS } from "../src/mail/index.js";
 import { createMailerSendTransport } from "../src/mail/mailersend.js";
 import { createSesTransport } from "../src/mail/ses.js";
-import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage } from "../src/mail/messages.js";
+import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage, esc } from "../src/mail/messages.js";
 import { loadConfig } from "../../config/loadConfig.mjs";
 import { CREDENTIAL_SLOTS, mailKeyFrom } from "@kelabo/contracts/credentials";
 
@@ -486,6 +486,120 @@ await test("mailSettingsFromConfig keeps the key out of config and the region ou
   // No provider named anywhere still means SES, which is what an untouched
   // deployment has always done.
   assert.equal(mailSettingsFromConfig({ region: "r" }, "").provider, "ses");
+});
+
+// --- Calendar (iTIP) ---------------------------------------------------------
+//
+// The bug: invitations arrived, but never appeared in anybody's Outlook
+// schedule — the mail only *described* a meeting. A client adds an event only
+// for a text/calendar part with an iTIP method, so that part is what is pinned.
+
+const EVENT = { kelaboId: "k-1", organizerEmail: "host@example.com", organizerName: "Host, Esq.", to: "guest@example.com", sequence: 1790000000, stamp: Date.UTC(2026, 9, 1) };
+const unfold = (ics) => ics.replace(/\r\n /g, "");
+
+await test("an invitation with an event carries an iTIP REQUEST for that attendee", async () => {
+  const m = inviteMessage({ hostName: "Host", title: "Plan; review, v2", scheduledAt: Date.UTC(2026, 9, 2, 3, 30), durationMinutes: 45, inviteUrl: "https://p/invite/k-1", event: EVENT });
+  assert.equal(m.calendar.method, "REQUEST");
+  const ics = m.calendar.content;
+  assert.ok(!/[^\r]\n/.test(ics), "iCalendar lines end in CRLF");
+  const u = unfold(ics);
+  for (const line of [
+    "METHOD:REQUEST",
+    "UID:kelabo-k-1@kelabo",
+    "SEQUENCE:1790000000",
+    "DTSTART:20261002T033000Z",
+    "DTEND:20261002T041500Z",
+    "SUMMARY:Plan\\; review\\, v2",
+    'ORGANIZER;CN="Host, Esq.":mailto:host@example.com',
+    "STATUS:CONFIRMED",
+  ]) assert.ok(u.includes(`${line}\r\n`), `missing ${line}\n${u}`);
+  assert.ok(/ATTENDEE[^\r]*:mailto:guest@example\.com\r\n/.test(u));
+  for (const l of ics.split("\r\n")) assert.ok(Buffer.byteLength(l) <= 75, `unfolded line: ${l}`);
+});
+
+await test("cancel and uninvite are iTIP CANCEL on the same UID; reschedule is a REQUEST", async () => {
+  const c = cancellationMessage({ hostName: "H", title: "T", scheduledAt: 0, event: EVENT });
+  assert.equal(c.calendar.method, "CANCEL");
+  assert.ok(c.calendar.content.includes("STATUS:CANCELLED"));
+  assert.ok(c.calendar.content.includes("UID:kelabo-k-1@kelabo"));
+  assert.equal(uninviteMessage({ hostName: "H", title: "T", scheduledAt: 0, event: EVENT }).calendar.method, "CANCEL");
+  const r = rescheduleMessage({ hostName: "H", title: "T", scheduledAt: 0, previousScheduledAt: 1, inviteUrl: "u", event: EVENT });
+  assert.equal(r.calendar.method, "REQUEST");
+  assert.ok(r.calendar.content.includes("UID:kelabo-k-1@kelabo"), "a new UID would add a second event instead of moving it");
+});
+
+await test("the invitation carries the one-click join link — in the mail and as the event's location", async () => {
+  const joinUrl = "https://p/join/k-1";
+  for (const m of [
+    inviteMessage({ hostName: "H", title: "T", scheduledAt: 0, inviteUrl: "https://p/invite/k-1", joinUrl, event: EVENT }),
+    rescheduleMessage({ hostName: "H", title: "T", scheduledAt: 0, previousScheduledAt: 1, inviteUrl: "https://p/invite/k-1", joinUrl, event: EVENT }),
+  ]) {
+    assert.ok(m.text.includes(joinUrl), "plain-text rendering has no join link");
+    assert.ok(m.html.includes(`href="${joinUrl}"`), "HTML rendering has no join link");
+    const u = unfold(m.calendar.content);
+    // LOCATION is what Outlook shows on the event and makes clickable.
+    assert.ok(u.includes(`LOCATION:${joinUrl}\r\n`), u);
+    assert.ok(u.includes(`URL:${joinUrl}\r\n`), u);
+    // RSVP is still reachable — it is the only way to answer.
+    assert.ok(m.text.includes("https://p/invite/k-1"));
+  }
+});
+
+await test("an invitation has Accept and Decline buttons, then the join link", async () => {
+  const acceptUrl = "https://p/invite/k-1?t=tok&r=accepted";
+  const declineUrl = "https://p/invite/k-1?t=tok&r=declined";
+  const joinUrl = "https://p/join/k-1";
+  const m = inviteMessage({ hostName: "H", title: "T", scheduledAt: 0, inviteUrl: "https://p/invite/k-1", joinUrl, acceptUrl, declineUrl });
+  const a = m.html.indexOf(`href="${esc(acceptUrl)}"`);
+  const d = m.html.indexOf(`href="${esc(declineUrl)}"`);
+  const j = m.html.indexOf(`href="${joinUrl}"`);
+  assert.ok(a > 0 && d > a && j > d, "order is Accept, Decline, then Join");
+  assert.ok(/>Accept<\/a>/.test(m.html) && />Decline<\/a>/.test(m.html));
+  for (const u of [acceptUrl, declineUrl, joinUrl]) assert.ok(m.text.includes(u), `text rendering lacks ${u}`);
+  // Rescheduled mails ask again, the same way.
+  const r = rescheduleMessage({ hostName: "H", title: "T", scheduledAt: 0, previousScheduledAt: 1, inviteUrl: "u", joinUrl, acceptUrl, declineUrl });
+  assert.ok(r.html.includes(">Accept</a>") && r.html.includes(">Decline</a>") && r.html.includes(joinUrl));
+});
+
+await test("no event, or an organizer that is not an address, means no calendar part", async () => {
+  assert.ok(!("calendar" in inviteMessage({ hostName: "R", title: "T", scheduledAt: 0, inviteUrl: "u" })));
+  assert.ok(!("calendar" in inviteMessage({ hostName: "R", title: "T", scheduledAt: 0, inviteUrl: "u", event: { ...EVENT, organizerEmail: "guest-123" } })));
+});
+
+await test("folding never splits a multi-byte character", async () => {
+  const title = "会议".repeat(40);
+  const ics = inviteMessage({ hostName: "H", title, scheduledAt: 0, inviteUrl: "u", event: EVENT }).calendar.content;
+  for (const l of ics.split("\r\n")) assert.ok(Buffer.byteLength(l) <= 75);
+  assert.ok(unfold(ics).includes(`SUMMARY:${title}\r\n`));
+});
+
+await test("the mailer makes the envelope recipient the ATTENDEE", async () => {
+  const sent = [];
+  const mailer = createMailer({ resolve: async () => ({ provider: "stub", fromAddress: "f@example.com" }), factories: { stub: () => ({ send: async (m) => sent.push(m) }) } });
+  await mailer.sendInvite({ to: "who@example.com", hostName: "H", title: "T", scheduledAt: 0, inviteUrl: "u", event: { ...EVENT, to: undefined } });
+  assert.ok(/ATTENDEE[^\r]*:mailto:who@example\.com/.test(unfold(sent[0].calendar.content)));
+});
+
+await test("SES sends a calendar mail as raw MIME with text/calendar;method= as an alternative", async () => {
+  const sent = [];
+  const t = createSesTransport({ client: { send: async (cmd) => (sent.push(cmd.input), {}) } });
+  await t.send({ to: "guest@example.com", from: "f@example.com", ...inviteMessage({ hostName: "H", title: "T", scheduledAt: 0, inviteUrl: "u", event: EVENT }) });
+  const raw = Buffer.from(sent[0].Content.Raw.Data).toString("utf8");
+  assert.ok(!sent[0].Content.Simple, "Simple content cannot carry the calendar part");
+  assert.ok(raw.includes("Content-Type: multipart/alternative"));
+  assert.ok(raw.includes("Content-Type: text/calendar; charset=UTF-8; method=REQUEST"));
+  assert.ok(raw.includes("Content-Class: urn:content-classes:calendarmessage"));
+  assert.ok(!/Content-Disposition: attachment/.test(raw), "an .ics attachment is a file to open, not a meeting");
+});
+
+await test("MailerSend carries the event as an .ics attachment", async () => {
+  const { fetch, calls } = stubFetch({ status: 202, headers: { "x-message-id": "abc" } });
+  const t = createMailerSendTransport({ apiKey: "k", fetch });
+  await t.send({ to: "guest@example.com", from: "f@example.com", ...inviteMessage({ hostName: "H", title: "T", scheduledAt: 0, inviteUrl: "u", event: EVENT }) });
+  const [a] = calls[0].body.attachments;
+  assert.equal(a.filename, "invite.ics");
+  assert.equal(a.disposition, "attachment");
+  assert.ok(Buffer.from(a.content, "base64").toString("utf8").includes("METHOD:REQUEST"));
 });
 
 console.log(`rest-api/mail: ${passed} passed`);
