@@ -9,13 +9,18 @@ import { CallDialog } from '../components/CallDialog'
 import { useToast } from '../components/Toaster'
 import { usePresenceContext } from '../presence/PresenceContext'
 import { useTypeAnywhere } from '../useTypeAnywhere'
+import { useAuth } from '../auth'
 
 /**
  * Contacts (docs 18 §4).
  *
  * The list is your favourites — same-org colleagues you have pinned. Everyone
  * else in the org is found by search, where each result shows whether you have
- * favourited them and lets you toggle it in place. Favouriting is private and
+ * favourited them and lets you toggle it in place. Search also covers the
+ * organisation directory an administrator imported (docs 18 §4.7), so a
+ * colleague is findable by name before they have ever signed in; those rows
+ * say so, and can be starred only when they are at your own domain — the same
+ * rule favourites always had. Favouriting is private and
  * one-way: the other person is never told, so there is no "request" and no
  * "pending" here. Presence dots arrive with docs 18 §5; until then a
  * neutral dot is shown.
@@ -36,7 +41,7 @@ function Star({ on, onClick, busy, label }) {
   )
 }
 
-function Row({ email, name, avatarVariant, favourited, onToggle, busy, online, inKelabo, onCall }) {
+function Row({ email, name, avatarVariant, favourited, onToggle, busy, online, inKelabo, onCall, canFavourite = true, notSignedIn = false }) {
   const who = name || email
   const dotCls = online ? 'sdot-live' : 'sdot-ended'
   const dotTitle = !online ? 'Offline' : inKelabo ? 'In a kelabo' : 'Online'
@@ -48,6 +53,7 @@ function Row({ email, name, avatarVariant, favourited, onToggle, busy, online, i
         <div className="row-title">
           {who}
           {online && inKelabo && <span className="chip">in a kelabo</span>}
+          {notSignedIn && <span className="chip chip-sm" title="In your organisation's directory">not signed in yet</span>}
         </div>
         {name && name !== email && <div className="row-sub">{email}</div>}
       </div>
@@ -61,12 +67,14 @@ function Row({ email, name, avatarVariant, favourited, onToggle, busy, online, i
           <Icon name="phone" size={16} />
         </button>
       )}
-      <Star
-        on={favourited}
-        busy={busy}
-        onClick={() => onToggle(email, !favourited)}
-        label={favourited ? `Remove ${who} from favourites` : `Add ${who} to favourites`}
-      />
+      {canFavourite && (
+        <Star
+          on={favourited}
+          busy={busy}
+          onClick={() => onToggle(email, !favourited)}
+          label={favourited ? `Remove ${who} from favourites` : `Add ${who} to favourites`}
+        />
+      )}
     </div>
   )
 }
@@ -74,6 +82,8 @@ function Row({ email, name, avatarVariant, favourited, onToggle, busy, online, i
 export default function Contacts() {
   const toast = useToast()
   const presence = usePresenceContext()
+  const { identity } = useAuth()
+  const myDomain = (identity?.email || '').split('@')[1]?.toLowerCase() || ''
   const [favourites, setFavourites] = useState(null)
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState({})
@@ -171,7 +181,7 @@ export default function Contacts() {
           <div className="section-title">Search results</div>
           {searching && results.length === 0 && <SkeletonRows n={2} />}
           {!searching && results.length === 0 && (
-            <div className="empty">No colleague matches “{q.trim()}”.</div>
+            <div className="empty">Nobody matches “{q.trim()}”.</div>
           )}
           {results.map(r => (
             <Row
@@ -185,6 +195,8 @@ export default function Contacts() {
               online={presence.isOnline(r.email)}
               inKelabo={presence.inKelabo(r.email)}
               onCall={setCallTo}
+              canFavourite={!myDomain || r.email.split('@')[1] === myDomain}
+              notSignedIn={r.registered === false}
             />
           ))}
         </>

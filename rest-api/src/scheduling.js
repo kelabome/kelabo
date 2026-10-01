@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { RTC_MODES } from "@kelabo/contracts";
 import { err } from "./errors.js";
+import { createPeople } from "./people.js";
 
 /**
  * Scheduled kelabos, invitations and RSVPs.
@@ -17,7 +18,7 @@ import { err } from "./errors.js";
  * ever gave a name. One query over the prefix lists everybody, whichever they
  * are.
  */
-export function createScheduling({ config, db, mailer, internal, opConfig }) {
+export function createScheduling({ config, db, mailer, internal, opConfig, people = createPeople({ db }) }) {
   // Conference default and retention, published (contracts/src/opconfig.js).
   const settings = async () => (opConfig ? await opConfig.effective() : config);
   const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
@@ -555,18 +556,22 @@ export function createScheduling({ config, db, mailer, internal, opConfig }) {
   }
 
   /**
-   * Colleagues to suggest: the people registered at the caller's own email
-   * domain. Everyone in a domain can see everyone else in it — that is the
-   * point of a shared workspace — and the tenant is the partition key, so the
-   * query cannot reach another domain.
+   * People to suggest while somebody types a name or an address (docs 18
+   * §4.8): the registered users at the caller's own tenant plus the
+   * organisation directory imported for it (docs 18 §4.7), merged and ranked by
+   * contracts/src/peopleSearch.js. The tenant is the partition key of every
+   * read, so nothing from another domain can appear.
    *
-   * Addresses are stored whole, so a bare local part ("ma") and a partial
-   * address ("ma@their-dom") are the same prefix query.
+   * An empty query is not a search; it keeps returning the first registered
+   * colleagues, which is what the pickers show before anything is typed.
+   *
+   * `registered` tells a caller who can be rung (only people who have signed
+   * in can); `source` says where the entry came from. Neither restricts what
+   * may be invited — any address can be.
    */
   async function suggestPeople({ identity, prefix }) {
     const tenantId = tenantOf(identity);
-    const q = (prefix || "").trim().toLowerCase();
-    const items = await db.listUsersByTenant(tenantId, q, 8);
+    const q = (prefix || "").trim();
     // Surface favourite state on each result so a colleague can be pinned or
     // unpinned straight from a search result (docs 18 §4.1a) without a second
     // round-trip. Best-effort: a favourites read failure must not break search.
@@ -577,15 +582,24 @@ export function createScheduling({ config, db, mailer, internal, opConfig }) {
     } catch {
       favSet = new Set();
     }
-    const visible = items.filter((u) => u.email && u.email !== identity);
+    const found = q
+      ? await people.search({ tenantId, query: q, exclude: [identity], favourites: favSet, limit: 8 })
+      : (await db.listUsersByTenant(tenantId, "", 8))
+          .filter((u) => u.email && u.email !== identity)
+          .map((u) => ({ email: u.email, displayName: u.displayName, registered: true, source: "user" }));
     return {
       suggestions: await Promise.all(
-        visible.map(async (u) => ({
-          email: u.email,
-          displayName: u.displayName,
-          favourited: favSet.has(u.email),
-          // Settings are not projected on the tenant index; ≤8 parallel reads.
-          avatarVariant: Number((await db.getUserSettings(u.email).catch(() => null))?.settings?.avatar) || 0,
+        found.map(async (p) => ({
+          email: p.email,
+          displayName: p.displayName,
+          favourited: favSet.has(p.email),
+          registered: p.registered,
+          source: p.source,
+          // Settings are not projected on the tenant index; ≤8 parallel reads,
+          // and none for somebody who has never signed in and so has none.
+          avatarVariant: p.registered
+            ? Number((await db.getUserSettings(p.email).catch(() => null))?.settings?.avatar) || 0
+            : 0,
         }))
       ),
     };

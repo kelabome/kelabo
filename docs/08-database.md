@@ -18,7 +18,7 @@ where it fits (ARCHITECTURE §15.8), add OTP + MCP.
 | `kelabo-<env>-otp` | `OTP#<email>` | — | — | yes (~10 min) | pending OTP codes + rate counters |
 | `kelabo-<env>-refresh` | `RT#<tokenId>` | — | `identity-index` | yes (~30–90d) | rotating, revocable refresh tokens (long sessions) |
 | `kelabo-<env>-mcp` | `MCP#<scope>` | `SK` | — | none | org/host/kelabo MCP config |
-| `kelabo-<env>-contacts` | `CONTACT#<owner>` | `SK` | — | on external decline-cleanup | favourites (`FAV#`) + external links (`PEER#`) — docs 18 §4 |
+| `kelabo-<env>-contacts` | `CONTACT#<owner>` / `DIR#<tenant>` / `DIRECTORY` | `SK` | — | on external decline-cleanup | favourites (`FAV#`) + external links (`PEER#`), and the organisation directory — docs 18 §4, §4.7 |
 | `kelabo-<env>-credentials` | `CRED#<slot>` | `META` | — | **none, deliberately** | supplier keys (LLM, STT, Cloudflare Realtime, mail) — §6c |
 | `kelabo-<env>-journeys` | `PK` | `SK` | `tenant-status-index`, `accessor-index` | **none, deliberately** | journeys: container linking related kelabos — docs 20, §6b |
 | `kelabo-<env>-config` | `PK` | `SK` | — | **none, deliberately** | operational configuration versions + the admin roster — §6d, docs 23 |
@@ -174,12 +174,14 @@ No TTL — records are permanent (registered participants can always access).
 | `tenantId` | |
 
 **GSI `tenant-index`:** PK `tenantId`, SK `email`, projecting `displayName`.
-Answers "who is registered at this email domain, whose address starts with…" —
-which is the invitee autocomplete on the schedule page. There is deliberately no
-separate address-book table: the registered users *are* the list, and a parallel
-copy could only ever drift from them. Everyone in a domain may see the names and
-addresses of everyone else in it; the tenant is the partition key, so a query
-cannot cross a domain boundary even by mistake.
+Answers "who is registered at this email domain" — half of the name search behind
+the invite field (docs 18 §4.8), read whole per tenant and ranked in memory. The
+other half is the organisation directory (§6a below), the one copy of people this
+schema keeps: it is replaced wholesale from the organisation's own export on every
+import rather than maintained alongside the users table, so it cannot drift
+further than the last export. Everyone in a domain may see the names and
+addresses of everyone else in it; the tenant is the partition key of both reads,
+so a query cannot cross a domain boundary even by mistake.
 
 Guests are **not** stored here (ephemeral; identity `guest:<uuid>` lives only in the
 participant cookie + kelabo participants[]).
@@ -281,15 +283,18 @@ Org-wide MCP and group ACLs are not built (would add scope rows + a resolver ste
 
 ---
 
-## 6a. `contacts` table (favourites + external links)
+## 6a. `contacts` table (favourites, external links, organisation directory)
 
 One partition per owner, `PK = CONTACT#<ownerEmail>`, holding two item kinds by
-SK prefix (docs 18 §4). No GSI.
+SK prefix (docs 18 §4); one partition per tenant for its imported directory; and
+one fixed `DIRECTORY` partition registering which tenants have one. No GSI.
 
 | Item | PK | SK | Content |
 |------|----|----|---------|
 | favourite | `CONTACT#<owner>` | `FAV#<peer>` | `{owner, peer, tenantId, createdAt}` — a **private, one-way** marker pinning a same-org colleague. No row on the peer's side; nobody can query who favourited them. |
 | external link | `CONTACT#<owner>` | `PEER#<peer>` | `{owner, peer, state:"outgoing"\|"incoming"\|"accepted", createdAt, respondedAt?, tenantId, peerTenantId, ttl?}` — one side of a **mirrored** cross-org link (docs 18 §4.3). |
+| directory entry | `DIR#<tenant>` | `EMAIL#<email>` | `{email, name, tenantId, importedAt}` — one person an administrator imported for `tenant` (docs 18 §4.7). The address may be at any domain; `tenant` is who can find it. |
+| directory register | `DIRECTORY` | `TENANT#<tenant>` | `{tenantId, count, importedAt, importedBy, fileName, added, updated, removed}` — the last import's summary, so `/admin` lists directories with one query. |
 
 Favourites (`FAV#`) are implemented: add is a conditional-free `Put`
 (idempotent), remove a `Delete`, list a `begins_with(SK, "FAV#")` query — **no
@@ -306,6 +311,14 @@ routes that create them return `external_contacts_unavailable` until
 
 Because links are mirrored, a single `Query PK = CONTACT#<me>` answers both "who I
 watch" and "who watches me", which is why there is no GSI.
+
+Directory entries are written only by `POST /admin/directory/import`, which
+replaces the tenant's partition with the uploaded file: `BatchWrite` puts for new
+and renamed people first, then deletes for people no longer in it, so a failure
+part-way over-includes rather than loses anyone. Nothing else writes them;
+`/people/search` reads the partition whole (paged) and caches it per tenant for
+60 s. Account closure does not touch them — an entry is the organisation's record
+of a person, not that person's data, and the next import is what removes it.
 
 ---
 

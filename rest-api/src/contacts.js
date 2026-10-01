@@ -18,7 +18,7 @@ import { err } from "./errors.js";
  * A favourite is only valid for a same-tenant identity. Favouriting an outside
  * address is `not_a_colleague` — that is what external contacts are for.
  */
-export function createContacts({ config, db, opConfig }) {
+export function createContacts({ config, db, opConfig, people }) {
   const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
   // Published operational config (contracts/src/opconfig.js). Async now, so
   // turning external contacts on or off takes effect on the next request
@@ -45,7 +45,14 @@ export function createContacts({ config, db, opConfig }) {
       await Promise.all(
         favRows.map(async (r) => ({
           email: r.peer,
-          displayName: nameByEmail.get(r.peer) || r.peer,
+          // The merged entry (people.js) when available: it prefers a name
+          // the person chose, then the organisation directory's, over the
+          // local part sign-in writes by default — and it names a favourited
+          // colleague who has not signed in yet at all.
+          displayName:
+            (await people?.lookup(tenantId, r.peer).catch(() => null))?.displayName ||
+            nameByEmail.get(r.peer) ||
+            r.peer,
           avatarVariant: Number((await db.getUserSettings(r.peer).catch(() => null))?.settings?.avatar) || 0,
         }))
       )
