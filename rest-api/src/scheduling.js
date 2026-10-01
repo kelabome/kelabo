@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { RTC_MODES } from "@kelabo/contracts";
 import { err } from "./errors.js";
+import { mintCookie } from "./cookies.js";
 import { createPeople } from "./people.js";
 
 /**
@@ -18,7 +19,7 @@ import { createPeople } from "./people.js";
  * ever gave a name. One query over the prefix lists everybody, whichever they
  * are.
  */
-export function createScheduling({ config, db, mailer, internal, opConfig, people = createPeople({ db }) }) {
+export function createScheduling({ config, db, mailer, internal, opConfig, secrets, people = createPeople({ db }) }) {
   // Conference default and retention, published (contracts/src/opconfig.js).
   const settings = async () => (opConfig ? await opConfig.effective() : config);
   const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
@@ -46,6 +47,40 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
       inviteUrl: config.inviteUrl(item.kelaboId),
       rsvp: counts,
     };
+  }
+
+  /**
+   * What a scheduling mail needs to also be a calendar event (mail/ics.js).
+   * SEQUENCE is the send time in seconds: it only ever grows, so a reschedule
+   * or cancel always supersedes what the recipient's calendar already holds,
+   * without a counter to store and race on.
+   */
+  function calendarEvent(meta, organizerName) {
+    const at = Date.now();
+    return {
+      kelaboId: meta.kelaboId,
+      organizerEmail: meta.hostIdentity,
+      organizerName: organizerName || undefined,
+      sequence: Math.floor(at / 1000),
+      stamp: at,
+    };
+  }
+
+  /**
+   * The mail's Accept / Decline buttons for one invitee: the invitation page
+   * plus a signed token naming them, so the click is recorded on THEIR invite
+   * row — not as a new anonymous guest, which is what an un-signed-in click on
+   * the bare invitation link does. Valid until 30 days after the kelabo, so an
+   * old mail cannot answer forever. No `secrets` (a test without them) means
+   * no buttons, and the mail falls back to the plain RSVP link.
+   */
+  async function rsvpLinks(kelaboId, email, scheduledAt) {
+    if (!secrets) return {};
+    const key = await secrets.getCookieKey(config);
+    const exp = Math.floor(Math.max(Date.now(), scheduledAt || 0) / 1000) + 30 * 86400;
+    const t = encodeURIComponent(mintCookie({ kind: "rsvp_link", kelaboId, inviteKey: email, exp }, key));
+    const base = config.inviteUrl(kelaboId);
+    return { acceptUrl: `${base}?t=${t}&r=accepted`, declineUrl: `${base}?t=${t}&r=declined` };
   }
 
   async function schedule({ identity, displayName, body }) {
@@ -131,6 +166,9 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
           durationMinutes: meta.durationMinutes,
           note: meta.note,
           inviteUrl,
+          joinUrl: config.joinUrl(kelaboId),
+          ...(await rsvpLinks(kelaboId, email, meta.scheduledAt)),
+          event: calendarEvent({ ...meta, kelaboId }, displayName),
         });
       } catch (e) {
         sent = false;
@@ -299,7 +337,9 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
           hostName: meta.hostIdentity,
           title: meta.title,
           scheduledAt: meta.scheduledAt,
+          durationMinutes: meta.durationMinutes,
           reason,
+          event: calendarEvent({ ...meta, kelaboId }),
         });
       } catch (e) {
         console.warn(JSON.stringify({ level: "warn", msg: "cancellation email failed", to: inv.email, error: String(e) }));
@@ -375,6 +415,9 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
             previousScheduledAt: meta.scheduledAt,
             durationMinutes: updates.durationMinutes ?? meta.durationMinutes,
             inviteUrl: config.inviteUrl(kelaboId),
+            joinUrl: config.joinUrl(kelaboId),
+            ...(await rsvpLinks(kelaboId, inv.email, body.scheduledAt)),
+            event: calendarEvent({ ...meta, kelaboId }),
           });
         } catch (e) {
           console.warn(JSON.stringify({ level: "warn", msg: "reschedule email failed", to: inv.email, error: String(e) }));
@@ -454,6 +497,9 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
           durationMinutes: meta.durationMinutes,
           note: meta.note,
           inviteUrl,
+          joinUrl: config.joinUrl(kelaboId),
+          ...(await rsvpLinks(kelaboId, email, meta.scheduledAt)),
+          event: calendarEvent({ ...meta, kelaboId }, displayName),
         });
       } catch (e) {
         sent = false;
@@ -468,7 +514,14 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
       let sent = true;
       let reason;
       try {
-        await mailer.sendUninvite({ to: email, hostName, title: meta.title, scheduledAt: meta.scheduledAt });
+        await mailer.sendUninvite({
+          to: email,
+          hostName,
+          title: meta.title,
+          scheduledAt: meta.scheduledAt,
+          durationMinutes: meta.durationMinutes,
+          event: calendarEvent({ ...meta, kelaboId }, displayName),
+        });
       } catch (e) {
         sent = false;
         reason = e.code || e.name || "send_failed";
@@ -526,14 +579,19 @@ export function createScheduling({ config, db, mailer, internal, opConfig, peopl
     if (meta.status === "cancelled") throw err(409, "kelabo_cancelled");
 
     let inviteKey = identity || rsvpKey;
-    let isGuest = !identity;
+    // Someone answering without a session whose key names a row the HOST made
+    // — an invitee by email, arriving through the mail's Accept/Decline link —
+    // is that invitee, not a guest: their answer must land on their own row,
+    // which is the one the host's list shows, and needs no name typed.
+    const prior = !identity && rsvpKey ? await db.getInvite(kelaboId, rsvpKey) : null;
+    const invitedByEmail = !!(prior?.email && !prior.isGuest);
+    let isGuest = !identity && !invitedByEmail;
     let name = identity ? displayName || identity : body.displayName?.trim();
 
-    if (isGuest) {
-      const existing = rsvpKey ? await db.getInvite(kelaboId, rsvpKey) : null;
+    if (!identity) {
       // A guest changing their mind keeps the name they already gave, so the
       // second answer does not demand it again.
-      if (!name) name = existing?.displayName;
+      if (!name) name = prior?.displayName || (invitedByEmail ? prior.email : undefined);
       if (!name) throw err(400, "name_required");
       if (!inviteKey) inviteKey = `g:${randomUUID()}`;
     }

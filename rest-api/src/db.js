@@ -1109,13 +1109,14 @@ export function createDb({ config, client } = {}) {
         new QueryCommand({
           TableName: T.journeys,
           KeyConditionExpression: "PK = :pk",
-          FilterExpression: "SK <> :meta",
-          ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":meta": "META" },
+          // No FilterExpression on SK: DynamoDB rejects a key attribute in a
+          // filter (ValidationException), so META is skipped here instead.
+          ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}` },
           ProjectionExpression: "PK, SK",
           ExclusiveStartKey,
         })
       );
-      const items = res.Items || [];
+      const items = (res.Items || []).filter((it) => it.SK !== "META");
       for (let i = 0; i < items.length; i += 25) {
         const chunk = items.slice(i, i + 25);
         let unprocessed = {

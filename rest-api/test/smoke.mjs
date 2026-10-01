@@ -218,7 +218,7 @@ const sessions = createSessions({ config, db, secrets });
 const oidc = createOidc({ config, secrets, fetchImpl: async () => ({ ok: false }) });
 const auth = createAuthProvider({ otp, oidc, sessions });
 const kelabos = createKelabos({ config, db, internal });
-const scheduling = createScheduling({ config, db, mailer, internal });
+const scheduling = createScheduling({ config, db, mailer, internal, secrets });
 const contacts = createContacts({ config, db });
 const huddle = createHuddle({ config, db, internal, kelabos });
 const join = createJoin({ config, db, secrets });
@@ -1468,6 +1468,48 @@ await test("a guest RSVP needs a name, then is remembered by cookie", async () =
   const guests = invites.filter((i) => i.isGuest);
   assert.equal(guests.length, 1, "one guest, not two");
   assert.equal(guests[0].response, "declined");
+});
+
+await test("the mail's Accept/Decline buttons answer for that invitee, on their own row, in one click", async () => {
+  // Before these links, an invitee who was not signed in could only answer as
+  // an anonymous guest — a second row, while their own stayed "pending" on the
+  // host's list.
+  const mail = sentInvites.find((m) => m.to === "matt@example.com" && m.title === "Sprint review");
+  assert.ok(mail?.acceptUrl && mail?.declineUrl, "the invitation carries per-invitee answer links");
+  assert.ok(mail.joinUrl.endsWith(`/join/${scheduledId}`), "and the join link");
+  const url = new URL(mail.acceptUrl);
+  assert.equal(url.pathname, `/invite/${scheduledId}`);
+  assert.equal(url.searchParams.get("r"), "accepted");
+  assert.equal(new URL(mail.declineUrl).searchParams.get("r"), "declined");
+  const token = url.searchParams.get("t");
+
+  const seen = await call("GET", `/kelabos/${scheduledId}/invitation?t=${encodeURIComponent(token)}`);
+  assert.equal(seen.json.needsName, false, "the link already says who this is");
+
+  const before = (await db.listInvites(scheduledId)).length;
+  const res = await call("POST", `/kelabos/${scheduledId}/rsvp`, { body: { response: "accepted", token } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.isGuest, false);
+  assert.equal(res.json.inviteKey, "matt@example.com");
+  assert.equal((await db.getInvite(scheduledId, "matt@example.com")).response, "accepted");
+  assert.equal((await db.listInvites(scheduledId)).length, before, "no second person was added");
+  assert.ok(cookieValue(res, "kelabo_rsvp"), "a cookie remembers them, so the token can leave the URL");
+
+  // Decline from the same mail later flips the same row.
+  await call("POST", `/kelabos/${scheduledId}/rsvp`, { body: { response: "declined", token } });
+  assert.equal((await db.getInvite(scheduledId, "matt@example.com")).response, "declined");
+});
+
+await test("a forged or foreign answer link is not an identity", async () => {
+  const forged = await call("POST", `/kelabos/${scheduledId}/rsvp`, { body: { response: "accepted", token: "a.b.c" } });
+  assert.equal(forged.json.error, "name_required", "falls back to an anonymous guest");
+  // A link for one kelabo does not answer another.
+  const other = sentInvites.find((m) => m.acceptUrl && !m.acceptUrl.includes(scheduledId));
+  if (other) {
+    const t = new URL(other.acceptUrl).searchParams.get("t");
+    const res = await call("POST", `/kelabos/${scheduledId}/rsvp`, { body: { response: "accepted", token: t } });
+    assert.equal(res.json.error, "name_required");
+  }
 });
 
 await test("a signed-in invitee RSVPs under their address, no name needed", async () => {

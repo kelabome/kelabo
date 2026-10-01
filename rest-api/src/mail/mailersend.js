@@ -51,7 +51,7 @@ export function createMailerSendTransport({
 
   return {
     id: "mailersend",
-    async send({ to, from, subject, text, html, inline = [] }) {
+    async send({ to, from, subject, text, html, inline = [], calendar }) {
       if (!apiKey) throw err(502, "mail_not_configured", "No MailerSend API key is configured for this deployment.");
 
       const payload = {
@@ -60,17 +60,33 @@ export function createMailerSendTransport({
         subject,
         text,
         html,
-        ...(inline.length
+        ...(inline.length || calendar
           ? {
-              attachments: inline.map((part) => ({
-                // Flat base64. The asset is stored wrapped for MIME's sake and
-                // `messages.js` unwraps it; newlines here are rejected.
-                content: part.base64,
-                filename: part.filename,
-                disposition: "inline",
-                // What `<img src="cid:…">` in the HTML resolves against.
-                id: part.cid,
-              })),
+              attachments: [
+                ...inline.map((part) => ({
+                  // Flat base64. The asset is stored wrapped for MIME's sake and
+                  // `messages.js` unwraps it; newlines here are rejected.
+                  content: part.base64,
+                  filename: part.filename,
+                  disposition: "inline",
+                  // What `<img src="cid:…">` in the HTML resolves against.
+                  id: part.cid,
+                })),
+                // MailerSend's JSON API cannot add a `text/calendar; method=`
+                // alternative, so the event travels as an .ics attachment.
+                // Outlook and Gmail still offer "Add to calendar" from it, but
+                // it is one click, not automatic — SES's Raw path is the one
+                // that lands in the calendar by itself.
+                ...(calendar
+                  ? [
+                      {
+                        content: Buffer.from(calendar.content, "utf8").toString("base64"),
+                        filename: calendar.method === "CANCEL" ? "cancel.ics" : "invite.ics",
+                        disposition: "attachment",
+                      },
+                    ]
+                  : []),
+              ],
             }
           : {}),
       };

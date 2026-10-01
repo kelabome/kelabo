@@ -105,4 +105,28 @@ assert.deepEqual(
     .join("\n")
 );
 
-console.log(`rest-api/reserved: ${[...src.matchAll(EXPRESSION)].length} expressions scanned, 0 reserved words un-aliased`);
+// A FilterExpression may not name the table's own key attributes. `deleteJourney`
+// filtered `SK <> :meta`, DynamoDB answered "Filter Expression can only contain
+// non-primary key attributes", and every journey delete came back 500 — while
+// the Map-backed stub deleted it happily. Same blind spot, same remedy: read the
+// source. Applies to both services' db.js; every table here keys on PK/SK.
+const FILTER = /FilterExpression:\s*("[^"]*"|`[^`]*`|'[^']*')/g;
+const KEY_IN_FILTER = /(^|[^#:.\w$])(PK|SK)\b/;
+const keyOffences = [];
+for (const rel of ["../src/db.js", "../../gateway/src/db.js"]) {
+  let text;
+  try {
+    text = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+  } catch {
+    continue;
+  }
+  for (const m of text.matchAll(FILTER)) {
+    const scanned = m[1].replace(/\$\{[^}]*\}/g, " ");
+    if (KEY_IN_FILTER.test(scanned)) {
+      keyOffences.push(`${rel.replace(/^(\.\.\/)+/, "")}:${text.slice(0, m.index).split("\n").length} filters on a key attribute — use the KeyConditionExpression or filter the items in code\n    ${m[1]}`);
+    }
+  }
+}
+assert.deepEqual(keyOffences, [], keyOffences.join("\n"));
+
+console.log(`rest-api/reserved: ${[...src.matchAll(EXPRESSION)].length} expressions scanned, 0 reserved words un-aliased, 0 key attributes filtered`);

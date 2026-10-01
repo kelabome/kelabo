@@ -45,8 +45,15 @@ const headerValue = (v) => String(v ?? "").replace(/[\r\n]+/g, " ").trim();
 const wrap76 = (s) => (String(s).match(/.{1,76}/g) || []).join(CRLF);
 const b64Body = (s) => wrap76(Buffer.from(s, "utf8").toString("base64"));
 
-/** The text/plain + text/html pair, which is one message in two renderings. */
-function alternativePart({ text, html, boundary }) {
+/**
+ * The text/plain + text/html pair, which is one message in two renderings —
+ * and, for a scheduling mail, a third rendering: the `text/calendar` part with
+ * its iTIP `method`. That is the shape Outlook, Gmail and Apple Mail recognise
+ * as a meeting (an Accept/Decline bar, and onto the calendar). It must be an
+ * *alternative*, not an attachment: an `.ics` attachment is shown as a file to
+ * open, which is exactly the "not in my schedule" behaviour.
+ */
+function alternativePart({ text, html, calendar, boundary }) {
   return [
     `--${boundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
@@ -58,21 +65,32 @@ function alternativePart({ text, html, boundary }) {
     `Content-Transfer-Encoding: base64`,
     ``,
     b64Body(html),
+    ...(calendar
+      ? [
+          `--${boundary}`,
+          `Content-Type: text/calendar; charset=UTF-8; method=${headerValue(calendar.method)}`,
+          `Content-Transfer-Encoding: base64`,
+          ``,
+          b64Body(calendar.content),
+        ]
+      : []),
     `--${boundary}--`,
     ``,
   ];
 }
 
-export function buildMimeMessage({ to, from, subject, text, html, inline = [] }) {
+export function buildMimeMessage({ to, from, subject, text, html, inline = [], calendar }) {
   const alternative = `alt_${randomUUID()}`;
   const head = [`From: ${headerValue(from)}`, `To: ${headerValue(to)}`, `Subject: ${headerValue(subject)}`, `MIME-Version: 1.0`];
+  // Exchange/Outlook's own marker for a meeting message; harmless elsewhere.
+  if (calendar) head.push(`Content-Class: urn:content-classes:calendarmessage`);
 
   if (!inline.length) {
     return [
       ...head,
       `Content-Type: multipart/alternative; boundary="${alternative}"`,
       ``,
-      ...alternativePart({ text, html, boundary: alternative }),
+      ...alternativePart({ text, html, calendar, boundary: alternative }),
     ].join(CRLF);
   }
 
@@ -84,7 +102,7 @@ export function buildMimeMessage({ to, from, subject, text, html, inline = [] })
     `--${related}`,
     `Content-Type: multipart/alternative; boundary="${alternative}"`,
     ``,
-    ...alternativePart({ text, html, boundary: alternative }),
+    ...alternativePart({ text, html, calendar, boundary: alternative }),
     ...inline.flatMap((part) => [
       `--${related}`,
       `Content-Type: ${part.contentType}`,

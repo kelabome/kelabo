@@ -21,9 +21,11 @@ export function createSesTransport({ region, configurationSet, client: injectedC
 
   return {
     id: "ses",
-    async send({ to, from, subject, text, html, inline = [] }) {
-      const Content = inline.length
-        ? { Raw: { Data: Buffer.from(buildMimeMessage({ to, from, subject, text, html, inline }), "utf8") } }
+    async send({ to, from, subject, text, html, inline = [], calendar }) {
+      // Raw for anything Simple cannot carry: an inline image, or the
+      // text/calendar part that puts a scheduled kelabo on a calendar.
+      const Content = inline.length || calendar
+        ? { Raw: { Data: Buffer.from(buildMimeMessage({ to, from, subject, text, html, inline, calendar }), "utf8") } }
         : { Simple: { Subject: { Data: subject }, Body: { Text: { Data: text }, Html: { Data: html } } } };
       try {
         await client.send(

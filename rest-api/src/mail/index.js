@@ -88,6 +88,9 @@ export function createMailer({ resolve, sendEmail, factories = FACTORIES } = {})
     return { transport: cached.transport, settings };
   }
 
+  /** The calendar ATTENDEE is the envelope recipient — one mail, one attendee. */
+  const withAttendee = (rest, to) => (rest.event ? { ...rest, event: { ...rest.event, to } } : rest);
+
   /** Every kind of mail funnels through here, so the defaults hold for all of them. */
   async function deliver(to, from, message) {
     const { transport, settings } = await transportFor();
@@ -96,9 +99,9 @@ export function createMailer({ resolve, sendEmail, factories = FACTORIES } = {})
 
   return {
     sendOtp: ({ to, code, from }) => deliver(to, from, otpMessage({ code })),
-    sendInvite: ({ to, from, ...rest }) => deliver(to, from, inviteMessage(rest)),
-    sendCancellation: ({ to, from, ...rest }) => deliver(to, from, cancellationMessage(rest)),
-    sendReschedule: ({ to, from, ...rest }) => deliver(to, from, rescheduleMessage(rest)),
-    sendUninvite: ({ to, from, ...rest }) => deliver(to, from, uninviteMessage(rest)),
+    sendInvite: ({ to, from, ...rest }) => deliver(to, from, inviteMessage(withAttendee(rest, to))),
+    sendCancellation: ({ to, from, ...rest }) => deliver(to, from, cancellationMessage(withAttendee(rest, to))),
+    sendReschedule: ({ to, from, ...rest }) => deliver(to, from, rescheduleMessage(withAttendee(rest, to))),
+    sendUninvite: ({ to, from, ...rest }) => deliver(to, from, uninviteMessage(withAttendee(rest, to))),
   };
 }
