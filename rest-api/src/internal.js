@@ -35,6 +35,11 @@ export function createInternal({ config, secrets, fetchImpl = fetch }) {
       return res.json().catch(() => ({ ok: true, archived: true }));
     },
     requestMinutes: (kelaboId, identity) => post(`/internal/kelabos/${kelaboId}/minutes`, identity),
+    // A board post was soft-deleted here; the Gateway fans `contribution_removed`
+    // to every open board. Best-effort at the call site: the row is already
+    // stamped, and a board that missed the event loses the card on its next reload.
+    contributionRemoved: (kelaboId, identity, { id, removedAt, removedBy }) =>
+      post(`/internal/kelabos/${kelaboId}/contribution-removed`, identity, { id, removedAt, removedBy }),
     // Tear down any prep binding for a cancelled scheduled kelabo (docs 18
     // §2.4). Best-effort at the call site: the kelabo is cancelled in DynamoDB
     // regardless of whether the gateway is reachable.

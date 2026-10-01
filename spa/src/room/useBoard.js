@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, boardStreamUrl, getCaptionHistory, postCaption } from '../api'
 import { useToast } from '../components/Toaster'
 import { notifyBoard } from '../notify'
+import { withoutContribution } from './boardRemoval.js'
 
 /**
  * The kelabo's single EventSource, and the board state it feeds.
@@ -65,6 +66,9 @@ export function useBoard({
   const onEndedRef = useRef(onEnded)
   onEndedRef.current = onEnded
 
+  // Ids taken off the board (by anyone). Kept so a contribution event or a
+  // backfill page that crosses the removal on the wire cannot put it back.
+  const removedRef = useRef(new Set())
   const seenRef = useRef(new Set())
   const lastAtRef = useRef(0)
   // Once the kelabo ends, the server closes the SSE stream on purpose. That is
@@ -79,6 +83,7 @@ export function useBoard({
       let next = prev
       for (const c of items) {
         const id = c.id
+        if (id && removedRef.current.has(id)) continue
         const isClear = c.status === 'done' && !c.title && !c.markdown
         const idx = id ? next.findIndex(x => x.id === id) : -1
         // A card that stops working stops carrying its live status: merging
@@ -114,6 +119,12 @@ export function useBoard({
       }
       return next.slice().sort((a, b) => (a.at || 0) - (b.at || 0))
     })
+  }, [])
+
+  const dropLocal = useCallback(id => {
+    if (!id) return
+    removedRef.current.add(id)
+    setContributions(prev => withoutContribution(prev, id))
   }, [])
 
   useEffect(() => {
@@ -167,6 +178,13 @@ export function useBoard({
       es.addEventListener('contribution', e => {
         mark()
         try { push([JSON.parse(e.data)]) } catch {}
+      })
+      // The host or the post's author took a card down (soft delete — the row
+      // stays, every board read drops it). Same for everyone, the remover
+      // included, so there is one path out of the list.
+      es.addEventListener('contribution_removed', e => {
+        mark()
+        try { dropLocal(JSON.parse(e.data)?.id) } catch {}
       })
       es.addEventListener('rename', e => {
         mark()
@@ -309,5 +327,14 @@ export function useBoard({
     }])
   }, [kelaboId, authorName, push, toast])
 
-  return { contributions, status, postNote, focusSignal }
+  // Remove a card. Applied locally on success rather than waiting for the
+  // event, because the fan-out is best-effort on the server side and the
+  // remover must not see their own removal fail to land. Throws for the
+  // caller to report.
+  const removeContribution = useCallback(async contributionId => {
+    await api.removeContribution(kelaboId, contributionId)
+    dropLocal(contributionId)
+  }, [kelaboId, dropLocal])
+
+  return { contributions, status, postNote, removeContribution, focusSignal }
 }

@@ -56,7 +56,10 @@ function fmtAt(at, now = Date.now()) {
   }
 }
 
-export function ContributionCard({ con }) {
+// `onRemove` is passed only when the viewer may take this card down (the
+// host, or its author — room/boardRemoval.js); without it there is no control,
+// which is also how the record page shows the same card read-only.
+export function ContributionCard({ con, onRemove }) {
   const [open, setOpen] = useState(false)
   const kind = con.kind || 'note'
   const working = con.status === 'working'
@@ -144,6 +147,18 @@ export function ContributionCard({ con }) {
           >
             <Icon name="terminal" size={11} />
           </span>
+        )}
+        {onRemove && (
+          <button
+            type="button"
+            className="con-remove"
+            title="Remove from the board"
+            aria-label="Remove from the board"
+            onClick={e => { e.stopPropagation(); onRemove(con) }}
+            onKeyDown={e => e.stopPropagation()}
+          >
+            <Icon name="trash" size={11} />
+          </button>
         )}
       </div>
 

@@ -1,6 +1,6 @@
 import http from "node:http";
 import { pathToFileURL } from "node:url";
-import { COOKIE_PARTICIPANT, COOKIE_SESSION } from "@kelabo/contracts";
+import { COOKIE_PARTICIPANT, COOKIE_SESSION, contributionRemovedSchema } from "@kelabo/contracts";
 import { createContainer } from "./container.js";
 import { parseCookies, verifyParticipantCookie, verifySessionCookie, verifyInternalJwt, bearerToken } from "./cookies.js";
 import { createSseHub, setCorsHeaders } from "./sseHub.js";
@@ -149,6 +149,22 @@ async function route(c, req, res) {
       targets: Array.isArray(body.targets) ? body.targets : [],
     });
     return send(res, 200, { rung, offline });
+  }
+
+  // A board post was soft-deleted by the control plane (rest-api
+  // kelabos.removeContribution), which authorised it and stamped the row.
+  // This is only the fan-out, so every open board drops the card at once.
+  const removedMatch = path.match(/^\/internal\/kelabos\/([^/]+)\/contribution-removed$/);
+  if (method === "POST" && removedMatch) {
+    const [, kelaboId] = removedMatch;
+    const key = await c.getCookieKey();
+    const payload = verifyInternalJwt(bearerToken(req), key);
+    if (!payload) return send(res, 401, { error: "unauthenticated" });
+    const body = contributionRemovedSchema.safeParse(await readJson(req).catch(() => ({})));
+    if (!body.success) return send(res, 400, { error: "bad_request" });
+    c.log("internal_request", { kelaboId, action: "contribution_removed", sub: payload.sub, id: body.data.id });
+    const subscribers = c.sseHub.removeContribution(kelaboId, body.data);
+    return send(res, 200, { ok: true, subscribers });
   }
 
   const internalMatch = path.match(/^\/internal\/kelabos\/([^/]+)\/(end|minutes|cancel|reschedule)$/);

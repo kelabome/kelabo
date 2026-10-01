@@ -11,6 +11,8 @@ import {
   upFrameSchema,
   downFrameSchema,
 } from "../src/frames.js";
+import { contributionRemovedSchema, contributionSchema } from "../src/schemas.js";
+import { SSE_EVENT_CONTRIBUTION_REMOVED } from "../src/constants.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -466,6 +468,28 @@ test("every declared frame type parses", () => {
   // No type may appear in both directions: the bridge and the Gateway each
   // parse exactly one union, so an overlap would be ambiguous at one end.
   for (const t of upTypes) assert.equal(downTypes.has(t), false, `${t} in both unions`);
+});
+
+// --- board removal (SSE, not a KAP frame — but the same "second implementation"
+// argument applies: the SPA and the Gateway both read this payload) ----------
+
+test("contribution_removed: id, removedAt and removedBy are all required", () => {
+  const ok = contributionRemovedSchema.safeParse({ id: "c1", removedAt: 1, removedBy: "h@x.com" });
+  assert.equal(ok.success, true);
+  assert.equal(SSE_EVENT_CONTRIBUTION_REMOVED, "contribution_removed");
+  for (const missing of ["id", "removedAt", "removedBy"]) {
+    const body = { id: "c1", removedAt: 1, removedBy: "h@x.com" };
+    delete body[missing];
+    assert.equal(contributionRemovedSchema.safeParse(body).success, false, missing);
+  }
+  assert.equal(contributionRemovedSchema.safeParse({ id: "", removedAt: 1, removedBy: "h" }).success, false);
+  assert.equal(contributionRemovedSchema.safeParse({ id: "c", removedAt: "now", removedBy: "h" }).success, false);
+});
+
+test("a contribution may carry authorIdentity, and need not", () => {
+  const base = { id: "c", kelaboId: "k", tag: "LLM_CON", kind: "answer", title: "t", to: "all", markdown: "m", author: "assistant", at: 1 };
+  assert.equal(contributionSchema.safeParse(base).success, true);
+  assert.equal(contributionSchema.safeParse({ ...base, authorIdentity: "dev@x.com" }).success, true);
 });
 
 console.log(`contracts/frames: ${passed} passed`);

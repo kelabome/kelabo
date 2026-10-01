@@ -14,6 +14,7 @@ import { useRoomFavourites } from './useRoomFavourites'
 import { isStageLayout, loadLayout } from './layouts'
 import { roomTitle } from '../kelaboTitle'
 import { useToast } from '../components/Toaster'
+import { canRemoveContribution } from './boardRemoval.js'
 
 /**
  * The kelabo room.
@@ -581,6 +582,10 @@ export function RoomShell({
             contributions={board.contributions}
             boardStatus={board.status}
             onPostNote={board.postNote}
+            // Offered to the host and to a card's author (room/boardRemoval.js);
+            // `kelabo.me` is the participant identity the server compares.
+            canRemove={con => canRemoveContribution(con, { isHost, me: kelabo?.me || '', ended })}
+            onRemove={board.removeContribution}
             focusSignal={board.focusSignal}
             ended={ended}
             onHold={chrome.hold}

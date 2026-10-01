@@ -122,8 +122,25 @@ export const contributionSchema = z.object({
   steps: z.array(z.string()).optional(),
   // Why a "skipped" card was not posted, in one plain sentence.
   reason: z.string().optional(),
+  // The person on whose behalf it was posted, when there is one: the writer of
+  // a typed note, or the developer whose local agent wrote it (`author` stays
+  // "assistant" there — that is who to render, this is who may take it down).
+  // Absent on server-agent posts, which only the host may remove.
+  authorIdentity: z.string().optional(),
   at: z.number(),
   tenantId: z.string().optional(),
+});
+
+/**
+ * `contribution_removed` (SSE): a stored board post was soft-deleted by the
+ * kelabo's host or its author. The row stays, stamped with `removedAt` (epoch
+ * ms, like every other `…At` on a kelabo) and `removedBy`; every reader of the
+ * board drops it.
+ */
+export const contributionRemovedSchema = z.object({
+  id: z.string().min(1).max(200),
+  removedAt: z.number(),
+  removedBy: z.string().min(1).max(320),
 });
 
 export const captionRenameSchema = z.object({

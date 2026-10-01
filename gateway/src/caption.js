@@ -200,6 +200,10 @@ export async function handleCaptionPost(c, req, res) {
       to: "all",
       markdown: post.text,
       author: participant.identity,
+      // Same as `author` here — a note is its writer's own — but stated in the
+      // one field every remover checks (rest-api kelabos.removeContribution),
+      // so a guest can take down their own note and nobody else's.
+      authorIdentity: participant.identity,
       at: Date.now(),
       tenantId: participant.tenantId,
     };

@@ -336,10 +336,66 @@ export function createKelabos({ config, db, internal, credentials, opConfig }) {
       throw err(403, "forbidden");
     }
     const items = await db.queryContributions(kelaboId, { since, limit });
-    const contributions = items.map(({ PK, SK, tenantStatus, ...c }) => c);
-    const nextSince = contributions.length ? contributions[contributions.length - 1].at : undefined;
+    // The cursor comes from the page as read, before removed rows are dropped:
+    // a page whose newest rows were all removed must still move the cursor
+    // past them, or the next `since` read returns the same page forever.
+    const nextSince = items.length ? items[items.length - 1].at : undefined;
+    const contributions = items
+      .filter((i) => i.removedAt == null)
+      .map(({ PK, SK, tenantStatus, removedAt, removedBy, ...c }) => c);
     return { contributions, ...(nextSince !== undefined ? { nextSince } : {}) };
   }
 
-  return { createKelabo, listKelabos, getKelabo, startKelabo, endKelabo, requestMinutes, board, toSummary };
+  /**
+   * Take a post off a live kelabo's board. A soft delete: the row stays,
+   * stamped `removedAt` (epoch ms) and `removedBy`, and every board reader
+   * drops it — this read, the agent's backfill and the archive (gateway).
+   *
+   * Who may: the kelabo's host, or the post's author — `authorIdentity`: the
+   * participant who typed a note, or the developer whose local agent posted
+   * an answer. Notes written before that field existed fall back to `author`,
+   * which on a note is the same identity. Server-agent posts have no author
+   * but the assistant, so they are the host's alone. A guest may remove their
+   * own note; their identity is a generated id, so it can never match anybody
+   * else's post or the host.
+   *
+   * Live kelabos only: once ended, the record in S3 is the copy that is kept
+   * and these rows are on their way out with the retention TTL — stamping
+   * them would change nothing anybody can see.
+   */
+  async function removeContribution({ kelaboId, contributionId, participant }) {
+    const meta = await db.getKelaboMeta(kelaboId);
+    if (!meta) throw err(404, "kelabo_not_found");
+    if (meta.status !== "active") throw err(410, "kelabo_ended");
+    const identity = participant.identity;
+    const isHost = meta.hostIdentity === identity;
+    const isParticipant = (meta.participants || []).some((p) => p.identity === identity);
+    if (!isParticipant && !isHost) throw err(403, "forbidden");
+    const rows = await db.findContributionRows(kelaboId, contributionId);
+    if (!rows.length) throw err(404, "contribution_not_found");
+    const isAuthor = rows.some(
+      (r) => (r.authorIdentity ?? (r.tag === "note" ? r.author : undefined)) === identity
+    );
+    if (!isHost && !isAuthor) throw err(403, "not_host_or_author");
+    // Idempotent: removing twice lands on the same state, reports who did it
+    // first, and does not fan out again.
+    const live = rows.filter((r) => r.removedAt == null);
+    if (!live.length) {
+      return { id: contributionId, removedAt: rows[0].removedAt, removedBy: rows[0].removedBy, alreadyRemoved: true };
+    }
+    const removed = { id: contributionId, removedAt: Date.now(), removedBy: identity };
+    await db.markContributionsRemoved(kelaboId, live.map((r) => r.SK), removed);
+    // The row is the truth; the fan-out only spares open boards a reload.
+    // Last, outside the write, and never fatal — the same placement as every
+    // other control-plane → Gateway notification: a Gateway that is rolling
+    // must not turn a removal that happened into an error the host retries.
+    try {
+      await internal.contributionRemoved(kelaboId, identity, removed);
+    } catch (e) {
+      console.warn(JSON.stringify({ level: "warn", msg: "gateway contribution_removed call failed", kelaboId, error: String(e) }));
+    }
+    return removed;
+  }
+
+  return { createKelabo, listKelabos, getKelabo, startKelabo, endKelabo, requestMinutes, board, removeContribution, toSummary };
 }

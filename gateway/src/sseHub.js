@@ -1,4 +1,4 @@
-import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_NOTICE, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_ROSTER, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
+import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_CONTRIBUTION_REMOVED, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_NOTICE, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_ROSTER, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
 import { putContrib } from "./db.js";
 import { effectiveConfigNow } from "./opconfig.js";
 
@@ -255,6 +255,22 @@ export function createSseHub(c) {
     });
   }
 
+  /**
+   * A stored board post was taken down (rest-api kelabos.removeContribution,
+   * via /internal/kelabos/:id/contribution-removed). The row is already
+   * stamped by the time this runs, so this is only the live half: there is no
+   * board cache or replay buffer in this process to evict from — a late joiner
+   * backfills from the REST board read, which drops removed rows itself.
+   * Returns how many streams were told.
+   */
+  function removeContribution(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return 0;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_CONTRIBUTION_REMOVED, payload);
+    c.log("contribution_removed_fanned", { kelaboId, id: payload.id, removedBy: payload.removedBy, subscribers: subs.size });
+    return subs.size;
+  }
+
   function rename(kelaboId, payload) {
     const subs = c.state.sseSubscribers.get(kelaboId);
     if (!subs) return;
@@ -343,7 +359,7 @@ export function createSseHub(c) {
     c.log("sse_ended", { kelaboId, subscribers: subs?.size ?? 0 });
   }
 
-  return { subscribe, publish, rename, notice, debug, utterance, rtc, rtcTo, agent, ended, roster: rosterPayload, writeEvent };
+  return { subscribe, publish, removeContribution, rename, notice, debug, utterance, rtc, rtcTo, agent, ended, roster: rosterPayload, writeEvent };
 }
 
 function writeRaw(res, chunk) {

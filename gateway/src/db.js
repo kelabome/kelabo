@@ -164,6 +164,9 @@ export async function putContrib(c, contribution) {
         // did live (docs 16).
         runtime: contribution.runtime,
         agentLabel: contribution.agentLabel,
+        // Who may take it down besides the host (rest-api kelabos.removeContribution).
+        // Undefined on server-agent posts; the document client drops it.
+        authorIdentity: contribution.authorIdentity,
         at: contribution.at,
         tenantId: contribution.tenantId,
       },
@@ -196,6 +199,14 @@ export async function queryKelaboItems(c, kelaboId, skPrefix, { limit, desc = fa
 
 export const queryUtt = (c, kelaboId, opts) => queryKelaboItems(c, kelaboId, "UTT#", opts);
 export const queryContrib = (c, kelaboId, opts) => queryKelaboItems(c, kelaboId, "CONTRIB#", opts);
+
+/**
+ * A board post the host or its author took down. The row is soft-deleted —
+ * stamped `removedAt`/`removedBy` by the control plane, never deleted — so
+ * every reader of CONTRIB# rows must drop these itself: the agent's board
+ * backfill, the archive, and rest-api's board read all do.
+ */
+export const isRemovedContrib = (item) => item?.removedAt != null;
 
 /**
  * Stamp the retention TTL onto every remaining row of a kelabo's partition.

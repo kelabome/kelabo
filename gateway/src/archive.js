@@ -4,6 +4,7 @@ import {
   updateMeta,
   queryUtt,
   queryContrib,
+  isRemovedContrib,
   queryKelaboItems,
   putHistoryRow,
   markHistoryMinutesSkipped,
@@ -63,7 +64,20 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
     // can span days, and meeting-relative offsets stop meaning anything then.
     ...(typeof i.at === "number" ? { at: i.at } : {}),
   }));
-  const board = sessionArchive?.board ?? (await queryContrib(c, kelaboId)).map((i) => ({
+  // Removed posts (soft-deleted by the host or their author) are not part of
+  // the record. The table is the authority on removal even in developer mode:
+  // the bridge's own archive was assembled from what its agent posted and
+  // knows nothing of a removal made in the room, so its board is filtered by
+  // the ids the table has stamped. A failed read there costs the filter, not
+  // the archive — the dev-mode board is still the one used.
+  const contribRows = sessionArchive?.board
+    ? await queryContrib(c, kelaboId).catch((err) => {
+        c.logError("archive_removed_lookup_failed", err, { kelaboId });
+        return [];
+      })
+    : await queryContrib(c, kelaboId);
+  const removedIds = new Set(contribRows.filter(isRemovedContrib).map((i) => i.id).filter(Boolean));
+  const board = sessionArchive?.board?.filter((b) => !removedIds.has(b.id)) ?? contribRows.filter((i) => !isRemovedContrib(i)).map((i) => ({
     id: i.id ?? `${kelaboId}:${i.SK}`,
     kelaboId,
     tag: i.tag,

@@ -160,6 +160,9 @@ export const api = {
   startKelabo: id => apiRequest(`/kelabos/${id}/start`, { method: 'POST' }),
   generateMinutes: id => apiRequest(`/kelabos/${id}/minutes`, { method: 'POST' }),
   getBoard: (id, { limit, since } = {}) => apiRequest(`/kelabos/${id}/board${qs({ limit, since })}`),
+  // Host or the post's author; the server applies the rule (soft delete).
+  removeContribution: (id, contributionId) =>
+    apiRequest(`/kelabos/${id}/board/${encodeURIComponent(contributionId)}`, { method: 'DELETE' }),
   sttToken: (id, opts = {}) =>
     apiRequest(`/kelabos/${id}/stt-token`, {
       method: 'POST',

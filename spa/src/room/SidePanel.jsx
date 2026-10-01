@@ -4,6 +4,7 @@ import { Button } from '../components/ui/Button'
 import { Icon } from '../components/ui/Icon'
 import { SpeakerTag } from '../components/SpeakerTag'
 import { usePrompt } from '../components/PromptDialog'
+import { useConfirm } from '../components/ConfirmDialog'
 import { useToast } from '../components/Toaster'
 import { renameSpeaker as apiRenameSpeaker } from '../api'
 import { messageParts } from '../transcript/transcriptStore'
@@ -164,9 +165,30 @@ function TranscriptTab({ capture, diarize, kelaboId, boardOnly, history }) {
   )
 }
 
-function BoardTab({ contributions, onPostNote, focusSignal, ended }) {
+function BoardTab({ contributions, onPostNote, focusSignal, ended, canRemove, onRemove }) {
   const scroll = useFollowingScroll(contributions, true)
   const inputRef = useRef(null)
+  const confirm = useConfirm()
+  const toast = useToast()
+
+  // Host or the card's author only (canRemove mirrors the server's rule; the
+  // server enforces it). Asked first: there is no undo from the room.
+  const remove = async con => {
+    const ok = await confirm({
+      title: 'Remove this from the board?',
+      body: 'It disappears for everyone in the kelabo and is left out of the record.',
+      confirmLabel: 'Remove',
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await onRemove(con.id)
+    } catch (e) {
+      toast(e?.code === 'not_host_or_author'
+        ? 'Only the host or the person who posted it can remove that.'
+        : 'Could not remove that from the board.')
+    }
+  }
 
   // A tap on a board notification should land on the newest contribution.
   useEffect(() => {
@@ -187,7 +209,13 @@ function BoardTab({ contributions, onPostNote, focusSignal, ended }) {
         {contributions.length === 0 && (
           <div className="empty">Contributions from the assistant appear here as the kelabo goes.</div>
         )}
-        {contributions.map(c => <ContributionCard key={conKey(c)} con={c} />)}
+        {contributions.map(c => (
+          <ContributionCard
+            key={conKey(c)}
+            con={c}
+            onRemove={onRemove && canRemove?.(c) ? remove : undefined}
+          />
+        ))}
       </div>
 
       {scroll.pinned && (
@@ -225,6 +253,8 @@ export function SidePanel({
   contributions,
   boardStatus,
   onPostNote,
+  canRemove,
+  onRemove,
   focusSignal,
   ended,
   onHold,
@@ -306,6 +336,8 @@ export function SidePanel({
           onPostNote={onPostNote}
           focusSignal={focusSignal}
           ended={ended}
+          canRemove={canRemove}
+          onRemove={onRemove}
         />
       )}
     </aside>

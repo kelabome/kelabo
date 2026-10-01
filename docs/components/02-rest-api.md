@@ -222,7 +222,26 @@ Board backfill for late-comers and SSE-reconnect gaps.
   `Contribution`s (newest N, or those after `since`). The SPA calls this **before**
   opening the SSE stream so a person joining at minute 20 sees earlier AI messages.
 - **200:** `{ contributions: [Contribution], nextSince?: number }`
+- Removed posts (below) are left out; `nextSince` is taken from the page as
+  read, so a page of removed rows still advances the cursor.
 - **Errors:** `kelabo_not_found` (404).
+
+#### `DELETE /kelabos/:id/board/:contributionId` 🎟
+Take a post off a live kelabo's board. **Soft delete:** every `CONTRIB#` row
+carrying that id (one card can own several) is stamped `removedAt` (epoch ms) and
+`removedBy`; nothing is deleted. The rows are found by a `begins_with(CONTRIB#)`
+query filtered on `id` — there is no index by id, and the client's `at` is not a
+safe handle on the sort key. Allowed for the **host** or the post's **author**:
+`authorIdentity` (the writer of a typed note — a guest included — or the developer
+whose local agent posted it; pre-field notes fall back to `author`). Server-agent
+posts are the host's alone. Then `POST /internal/kelabos/:id/contribution-removed`
+asks the Gateway to fan `contribution_removed` `{ id, removedAt, removedBy }` to
+open boards — best-effort; the row is the truth. Every board reader (this
+backfill, the agent's `board_request`, the archive) drops removed rows.
+- **200:** `{ id, removedAt, removedBy, alreadyRemoved? }` — idempotent; a second
+  removal reports the first and does not fan out again.
+- **Errors:** `contribution_not_found` (404), `not_host_or_author` (403),
+  `forbidden` (403, not in the kelabo), `kelabo_ended` (410).
 
 ### 3.2a Scheduling & invitations
 

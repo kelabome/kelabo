@@ -958,6 +958,24 @@ export function createApp(deps) {
         };
       },
     },
+    // Take a post off the board (soft delete). Participant cookie, like the
+    // board read above: the authority is "you are in this kelabo", and the
+    // host-or-author rule is applied in kelabos.removeContribution.
+    {
+      method: "DELETE",
+      pattern: "/kelabos/:id/board/:contributionId",
+      handle: async (req) => {
+        const participant = await requireParticipant(req, req.params.id);
+        return {
+          status: 200,
+          body: await kelabos.removeContribution({
+            kelaboId: req.params.id,
+            contributionId: req.params.contributionId,
+            participant,
+          }),
+        };
+      },
+    },
     {
       method: "POST",
       pattern: "/kelabos/:id/join",
