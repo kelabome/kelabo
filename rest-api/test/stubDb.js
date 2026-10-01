@@ -1,4 +1,11 @@
 import { CREDENTIAL_STATUS_ATTRS } from "@kelabo/contracts/credentials";
+import {
+  DIRECTORY_ENTRY_PREFIX,
+  DIRECTORY_INDEX_PK,
+  directoryIndexSk,
+  directoryPk,
+  directorySk,
+} from "@kelabo/contracts/directory";
 
 // 13, matching the Gateway's writer and the real reader. The stub used to pad to
 // 15 as well, which is why it agreed with the bug instead of catching it.
@@ -152,6 +159,39 @@ export function createDb() {
         .filter((r) => r.PK === `CONTACT#${owner}` && String(r.SK).startsWith("PEER#") && r.state === "accepted")
         .map((r) => r.peer);
     },
+    async listAllUsersByTenant(tenantId, cap = 20000) {
+      return [...users.values()]
+        .filter((u) => u.tenantId === tenantId && u.email)
+        .sort((a, b) => a.email.localeCompare(b.email))
+        .slice(0, cap);
+    },
+    // --- organisation directory (docs 18 §4.7), same keys as src/db.js ---
+    async listDirectory(tenantId) {
+      const pk = directoryPk(tenantId);
+      return [...contacts.values()]
+        .filter((r) => r.PK === pk && String(r.SK).startsWith(DIRECTORY_ENTRY_PREFIX))
+        .sort((a, b) => a.SK.localeCompare(b.SK));
+    },
+    async putDirectoryEntries(tenantId, entries) {
+      for (const e of entries) {
+        const PK = directoryPk(tenantId);
+        const SK = directorySk(e.email);
+        contacts.set(mkey(PK, SK), { PK, SK, tenantId, ...e });
+      }
+    },
+    async deleteDirectoryEntries(tenantId, emails) {
+      for (const email of emails) contacts.delete(mkey(directoryPk(tenantId), directorySk(email)));
+    },
+    async listDirectoryTenants() {
+      return [...contacts.values()].filter((r) => r.PK === DIRECTORY_INDEX_PK);
+    },
+    async putDirectoryIndex(tenantId, summary) {
+      const SK = directoryIndexSk(tenantId);
+      contacts.set(mkey(DIRECTORY_INDEX_PK, SK), { PK: DIRECTORY_INDEX_PK, SK, tenantId, ...summary });
+    },
+    async deleteDirectoryIndex(tenantId) {
+      contacts.delete(mkey(DIRECTORY_INDEX_PK, directoryIndexSk(tenantId)));
+    },
 
     // Legacy cleanup only, matching src/db.js: nothing writes guard rows now.
     async deleteHostGuard(hostIdentity) {
@@ -275,6 +315,9 @@ export function createDb() {
       };
       users.set(k, user);
       return user;
+    },
+    async deleteUser(email) {
+      users.delete(`USER#${email}`);
     },
     async putRefreshToken(item) {
       refresh.set(`RT#${item.tokenId}`, { PK: `RT#${item.tokenId}`, ...item });

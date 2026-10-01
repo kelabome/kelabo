@@ -81,9 +81,9 @@ There is **no linter, formatter, typechecker, or CI**. The only gates are:
 ```
 make check                       # node --check over every .js/.mjs (syntax only)
 make test                        # rest-api + gateway + connector smoke, spa test + build, cdk synth
-cd contracts && npm test         # frames (the agent wire protocol), mention, speaker, orgs, credentials, entitlement, opconfig
+cd contracts && npm test         # frames (the agent wire protocol), mention, speaker, orgs, credentials, entitlement, opconfig, directory, peopleSearch
 cd gateway  && npm test          # agent, mcp, rtc, roster, presence, repairJson, minutesAnswer, cors, opconfig, smoke, journeys, journeyLegs
-cd rest-api && npm test          # smoke, wiring, reserved, admin, mail, otpMail, journeys, closeAccount
+cd rest-api && npm test          # smoke, wiring, reserved, admin, mail, otpMail, journeys, closeAccount, directory
 cd connector && npm test         # queue + envelope + persona + cards + install + runtimes + launch + channel + control (pure), smoke, pack
 cd infra && npm test             # config/template.json: nothing CDK writes is "undefined", no published block crept back
 cd spa && npm test               # test/transcript.mjs (compose + project) + test/rtc.mjs (pull reconcile, retry policy) + test/presence.mjs
@@ -392,6 +392,15 @@ Order matters and is non-obvious:
   exfiltrate the keys it runs on. That application limit is what replaced the IAM
   attribute fence, which no longer binds now the Lambda holds `PutItem` on the
   `CRED#` partitions (docs 23 §5).
+- **The organisation directory is replaced, never appended to** (docs 18
+  §4.7). `POST /admin/directory/import` makes the uploaded file the whole truth
+  for one tenant — that is what stops it drifting from the mail system it was
+  exported from, and how leavers drop out. Do not add a per-row add/edit route
+  to it; that is a second source of truth. What is *read* from the file lives in
+  `contracts/src/directory.js` (pure, one alias table, no per-vendor branches);
+  who is *found* for a query lives in `contracts/src/peopleSearch.js` (pure).
+  A directory entry is findable, not ringable: the ring pickers filter on
+  `registered`, and huddle authorisation is unchanged.
 - Speaker is either an authenticated identity or an STT diarization label
   (`A`/`B`/`C`); both are treated identically downstream.
 - **One `getUserMedia` per kelabo.** `spa/src/rtc/useMicStream.js` owns the

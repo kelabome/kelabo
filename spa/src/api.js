@@ -48,6 +48,17 @@ export const api = {
   adminGrant: email => apiRequest('/admin/roster', { method: 'POST', body: { email } }),
   adminRevoke: email =>
     apiRequest(`/admin/roster/${encodeURIComponent(email)}`, { method: 'DELETE' }),
+  // The organisation directory (docs 18 §4.7). The file travels as text and is
+  // parsed server-side by the one reader; preview writes nothing, import
+  // replaces the tenant's directory with the file.
+  adminDirectory: () => apiRequest('/admin/directory'),
+  adminDirectoryPreview: ({ tenantId, csv, fileName }) =>
+    apiRequest('/admin/directory/preview', { method: 'POST', body: { tenantId, csv, fileName } }),
+  adminDirectoryImport: ({ tenantId, csv, fileName, force }) =>
+    apiRequest('/admin/directory/import', { method: 'POST', body: { tenantId, csv, fileName, ...(force ? { force: true } : {}) } }),
+  adminDirectoryEntries: tenantId => apiRequest(`/admin/directory/${encodeURIComponent(tenantId)}`),
+  adminDirectoryRemove: tenantId =>
+    apiRequest(`/admin/directory/${encodeURIComponent(tenantId)}`, { method: 'DELETE' }),
   getSettings: () => apiRequest('/me/settings'),
   putSettings: body => apiRequest('/me/settings', { method: 'PUT', body }),
   getMcp: () => apiRequest('/me/mcp'),
@@ -103,7 +114,10 @@ export const api = {
       method: 'POST',
       body: { response, ...(displayName ? { displayName } : {}), ...(token ? { token } : {}) },
     }),
-  // Registered users at your own email domain — see rest-api/scheduling.js.
+  // Registered users and the organisation directory at your own email domain,
+  // ranked by name (docs 18 §4.8) — see rest-api/scheduling.js. Each result
+  // says whether the person has signed in (`registered`), since only they can
+  // be rung.
   searchPeople: q => apiRequest(`/people/search${qs({ q })}`),
 
   // --- contacts / favourites (docs 18 §4) -----------------------------------

@@ -1254,9 +1254,13 @@ await test("suggestions are the registered users at your own domain", async () =
   assert.equal(res.statusCode, 200);
   // Each suggestion now carries favourite state so a result can be pinned in
   // place (docs 18 §4.1a); nobody is favourited yet here.
-  assert.deepEqual(res.json.suggestions, [{ email: "maria@example.com", displayName: "Maria Diaz", favourited: false, avatarVariant: 0 }]);
+  // `registered`/`source` say who can be rung and where the entry came from
+  // (docs 18 §4.8); maria has signed in, so she is a user, not a directory row.
+  assert.deepEqual(res.json.suggestions, [
+    { email: "maria@example.com", displayName: "Maria Diaz", favourited: false, registered: true, source: "user", avatarVariant: 0 },
+  ]);
 
-  // Prefix search, not substring: "aria" is not how anyone types an address.
+  // Nobody's name or address resembles "zz".
   const none = await call("GET", "/people/search?q=zz", { cookies: sessionCookies });
   assert.deepEqual(none.json.suggestions, []);
 });

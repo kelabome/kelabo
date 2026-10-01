@@ -55,7 +55,9 @@ export function CallDialog({ initial, onClose }) {
     const t = setTimeout(() => {
       api.searchPeople(q)
         .then(d => {
-          const found = d.suggestions || []
+          // Ringing reaches people who have signed in, not directory entries
+          // who never have (docs 18 §4.8).
+          const found = (d.suggestions || []).filter(s => s.registered !== false)
           setResults(found)
           setNames(n => ({ ...Object.fromEntries(found.filter(r => r.displayName).map(r => [r.email, r.displayName])), ...n }))
         })

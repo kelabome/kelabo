@@ -3,12 +3,13 @@ import { api } from '../api'
 import { Icon } from './ui/Icon'
 
 /**
- * Who to invite: a list of chips plus one input that suggests colleagues.
+ * Who to invite: a list of chips plus one input that suggests people by name.
  *
- * Suggestions are the people registered at your own email domain, read from
- * the users table. Not a private contact list — there is no such thing here,
- * and a per-user one would start empty for everybody. Everyone in a domain can
- * see everyone else in it.
+ * Suggestions are everyone at your own email domain who has signed in, plus
+ * the organisation directory an administrator imported for it (docs 18 §4.7),
+ * ranked by how well they match what has been typed so far — a first name, a
+ * surname, initials, a misspelling or the start of the address (docs 18 §4.8).
+ * Everyone in a domain can see everyone else in it.
  *
  * It is a suggestion and never a restriction: the input takes any valid
  * address, so inviting somebody outside the company, or a colleague who has not
@@ -165,8 +166,17 @@ export function EmailPicker({ value, onChange, disabled, hostDomain }) {
                 onMouseEnter={() => setActive(i)}
                 onClick={() => { add(s.email); setText(''); setOpen(false) }}
               >
-                <span className="epick-option-email">{s.email}</span>
-                {s.displayName && <span className="epick-option-name">{s.displayName}</span>}
+                {/* Name first: it is what was typed, and the address under it
+                    is what gets invited. */}
+                <span className="epick-option-main">
+                  <span className="epick-option-email">{s.displayName || s.email}</span>
+                  {s.displayName && <span className="epick-option-name">{s.email}</span>}
+                </span>
+                {s.registered === false && (
+                  <span className="epick-option-tag" title="In your organisation's directory; has not signed in yet">
+                    directory
+                  </span>
+                )}
               </button>
             </li>
           ))}

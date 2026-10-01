@@ -16,6 +16,13 @@ import {
   mcpSecretSk,
 } from "@kelabo/contracts/credentials";
 import { ADMIN_PK, OPCONFIG_PK, adminSk } from "@kelabo/contracts/opconfig";
+import {
+  DIRECTORY_ENTRY_PREFIX,
+  DIRECTORY_INDEX_PK,
+  directoryIndexSk,
+  directoryPk,
+  directorySk,
+} from "@kelabo/contracts/directory";
 
 // The status projection, precomputed once. Every attribute goes through
 // `ExpressionAttributeNames` rather than only the ones that happen to be
@@ -460,6 +467,113 @@ export function createDb({ config, client } = {}) {
       })
     );
     return (res.Items || []).filter((r) => r.state === "accepted").map((r) => r.peer);
+  }
+
+  /**
+   * Every registered user at one tenant, paged to the end (up to `cap`). The
+   * suggestion path ranks names in memory (contracts/src/peopleSearch.js), so
+   * it needs the whole list rather than one address-prefix page of it.
+   */
+  async function listAllUsersByTenant(tenantId, cap = 20000) {
+    const out = [];
+    let ExclusiveStartKey;
+    do {
+      const res = await doc.send(
+        new QueryCommand({
+          TableName: T.users,
+          IndexName: "tenant-index",
+          KeyConditionExpression: "tenantId = :t",
+          ExpressionAttributeValues: { ":t": tenantId },
+          ExclusiveStartKey,
+        })
+      );
+      out.push(...(res.Items || []));
+      ExclusiveStartKey = res.LastEvaluatedKey;
+    } while (ExclusiveStartKey && out.length < cap);
+    return out.slice(0, cap);
+  }
+
+  // --- organisation directory (docs 18 §4.7) --------------------------------
+  //
+  // Imported from /admin, in the contacts table: `PK = DIR#<tenant>`,
+  // `SK = EMAIL#<email>` per person, and one register row per tenant under
+  // `PK = DIRECTORY`. Keys come from contracts/src/directory.js.
+
+  async function listDirectory(tenantId) {
+    const out = [];
+    let ExclusiveStartKey;
+    do {
+      const res = await doc.send(
+        new QueryCommand({
+          TableName: T.contacts,
+          KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+          ExpressionAttributeValues: { ":pk": directoryPk(tenantId), ":sk": DIRECTORY_ENTRY_PREFIX },
+          ExclusiveStartKey,
+        })
+      );
+      out.push(...(res.Items || []));
+      ExclusiveStartKey = res.LastEvaluatedKey;
+    } while (ExclusiveStartKey);
+    return out;
+  }
+
+  /** Batch writes of 25, retrying what DynamoDB hands back unprocessed. */
+  async function batchContacts(requests, what) {
+    for (let i = 0; i < requests.length; i += 25) {
+      let unprocessed = { [T.contacts]: requests.slice(i, i + 25) };
+      for (let attempt = 0; attempt < 6 && unprocessed[T.contacts]?.length; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+        const out = await doc.send(new BatchWriteCommand({ RequestItems: unprocessed }));
+        unprocessed = out.UnprocessedItems || {};
+      }
+      if (unprocessed[T.contacts]?.length) {
+        throw new Error(`${what}: ${unprocessed[T.contacts].length} items were not written`);
+      }
+    }
+  }
+
+  async function putDirectoryEntries(tenantId, entries) {
+    await batchContacts(
+      entries.map((e) => ({
+        PutRequest: {
+          Item: { PK: directoryPk(tenantId), SK: directorySk(e.email), tenantId, ...e },
+        },
+      })),
+      `directory ${tenantId}`
+    );
+  }
+
+  async function deleteDirectoryEntries(tenantId, emails) {
+    await batchContacts(
+      emails.map((email) => ({ DeleteRequest: { Key: { PK: directoryPk(tenantId), SK: directorySk(email) } } })),
+      `directory ${tenantId}`
+    );
+  }
+
+  async function listDirectoryTenants() {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.contacts,
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: { ":pk": DIRECTORY_INDEX_PK },
+      })
+    );
+    return res.Items || [];
+  }
+
+  async function putDirectoryIndex(tenantId, summary) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.contacts,
+        Item: { PK: DIRECTORY_INDEX_PK, SK: directoryIndexSk(tenantId), tenantId, ...summary },
+      })
+    );
+  }
+
+  async function deleteDirectoryIndex(tenantId) {
+    await doc.send(
+      new DeleteCommand({ TableName: T.contacts, Key: { PK: DIRECTORY_INDEX_PK, SK: directoryIndexSk(tenantId) } })
+    );
   }
 
   // --- Journeys (docs 20) ---------------------------------------------------
@@ -1823,6 +1937,13 @@ export function createDb({ config, client } = {}) {
     putFavourite,
     deleteFavourite,
     listAcceptedContacts,
+    listAllUsersByTenant,
+    listDirectory,
+    putDirectoryEntries,
+    deleteDirectoryEntries,
+    listDirectoryTenants,
+    putDirectoryIndex,
+    deleteDirectoryIndex,
     deleteHostGuard,
     listKelabosByStatus,
     listKelabosByStatusForIdentity,
