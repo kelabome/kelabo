@@ -169,6 +169,15 @@ SSE hub keys strictly on the **server-known kelaboId**, never a value claimed in
 frame. Every fanned Contribution is also **persisted** (`CONTRIB#`) so late-comers
 can backfill — including ones written before the kelabo started.
 
+A persisted post can be **removed** by the host or its author (rest-api
+`DELETE /kelabos/:id/board/:cid`, docs 02). The control plane stamps the row and
+calls `/internal/kelabos/:id/contribution-removed`; `sseHub.removeContribution`
+fans `contribution_removed` `{ id, removedAt, removedBy }`. There is no in-process
+board cache to evict — late joiners backfill through REST, which filters — but
+`board_request` and the archive read `CONTRIB#` here and drop removed rows too
+(`isRemovedContrib`), and the archive filters a dev-mode bridge's own board by
+the ids the table has stamped.
+
 ### 5.1 Live roster — who is in the kelabo *now*
 
 `sseSubscribers` is the only thing that knows. The kelabo META's `participants`

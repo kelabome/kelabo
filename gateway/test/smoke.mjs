@@ -108,6 +108,8 @@ const journeyPrivateReportItem = {
 const journeyLinkRows = [{ kelaboId: KELABO, titleSnapshot: "Smoke Kelabo", linkedAt: NOW - 5000 }];
 
 const calls = { puts: [], updates: [], deletes: [], s3Puts: [] };
+/** id -> { removedAt, removedBy }: rows rest-api soft-deleted (kelabos.removeContribution). */
+const contribRemovals = new Map();
 const db = {
   send: async (cmd) => {
     const name = cmd.constructor.name;
@@ -182,6 +184,18 @@ const db = {
           .filter((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#"))
           .map((p) => p.Item)
           .filter((i) => !before || i.SK <= before)
+          .sort((a, b) => (a.SK < b.SK ? -1 : 1));
+        if (input.ScanIndexForward === false) items.reverse();
+        if (input.Limit) items = items.slice(0, input.Limit);
+        return { Items: items };
+      }
+      // Board rows, likewise from what was actually persisted — with any
+      // removal the control plane stamped (`contribRemovals`, keyed by id)
+      // applied, since that write happens in rest-api and never passes here.
+      if (sk === "CONTRIB#" && pk === `KELABO#${KELABO}`) {
+        let items = calls.puts
+          .filter((p) => p.TableName === "t-kelabos" && p.Item.PK === pk && String(p.Item.SK).startsWith("CONTRIB#"))
+          .map((p) => ({ ...p.Item, ...(contribRemovals.get(p.Item.id) ?? {}) }))
           .sort((a, b) => (a.SK < b.SK ? -1 : 1));
         if (input.ScanIndexForward === false) items.reverse();
         if (input.Limit) items = items.slice(0, input.Limit);
@@ -355,6 +369,8 @@ async function main() {
     assert.equal(note.data.markdown, "remember to ship Friday");
     const contrib = calls.puts.find((p) => String(p.Item.SK).startsWith("CONTRIB#"));
     assert.ok(contrib, "note persisted as CONTRIB");
+    // Who may take it down besides the host: its writer.
+    assert.equal(contrib.Item.authorIdentity, "alice@example.com");
     console.log("ok: POST /caption human note → UTT + SSE note + CONTRIB persist");
   }
 
@@ -630,6 +646,10 @@ async function main() {
     assert.equal(stored.origin, "local");
     assert.equal(stored.runtime, "opencode");
     assert.equal(stored.agentLabel, "alice's opencode");
+    // `author` stays "assistant"; the developer it posts for is what lets them
+    // remove it without being the host — from the verified token, not the frame.
+    assert.equal(stored.author, "assistant");
+    assert.equal(stored.authorIdentity, "alice@example.com");
     console.log("ok: a preparing agent posts to the board before the kelabo starts");
   }
 
@@ -781,6 +801,36 @@ async function main() {
     assert.equal(board.kelaboId, KELABO);
     assert.ok(Array.isArray(board.contributions));
     console.log("ok: board_request → board, no participant cookie needed");
+  }
+
+  {
+    // Removal (docs/components/02 `DELETE /kelabos/:id/board/:cid`): rest-api stamps the row, then tells us.
+    // Here: the internal route is internal-JWT only, validates its body, and
+    // fans `contribution_removed` to every open board; and the agent's board
+    // backfill no longer contains the post.
+    const plain = sse.events.find((e) => e.event === "contribution" && e.data.markdown === "Plain post");
+    const target = plain.data.id;
+    const path = `/internal/kelabos/${KELABO}/contribution-removed`;
+    const payload = { id: target, removedAt: Date.now(), removedBy: "alice@example.com" };
+    assert.equal((await req(port, { method: "POST", path, body: payload })).status, 401);
+    const bad = await req(port, { method: "POST", path, headers: { authorization: `Bearer ${internalJwt}` }, body: { id: target } });
+    assert.equal(bad.status, 400);
+    assert.ok(!sse.events.some((e) => e.event === "contribution_removed"), "nothing fanned for a refused call");
+
+    contribRemovals.set(target, { removedAt: payload.removedAt, removedBy: payload.removedBy });
+    const ok = await req(port, { method: "POST", path, headers: { authorization: `Bearer ${internalJwt}` }, body: payload });
+    assert.equal(ok.status, 200);
+    assert.ok(JSON.parse(ok.body).subscribers >= 1);
+    const evt = await waitFor(() => sse.events.find((e) => e.event === "contribution_removed"));
+    assert.deepEqual(evt.data, payload);
+
+    const base = frames.length;
+    ws.send(JSON.stringify({ type: "board_request", requestId: "b2", kelaboId: KELABO }));
+    const board = await nextFrame((f) => f.type === "board" && f.requestId === "b2", 5000, base);
+    const ids = board.contributions.map((x) => x.id);
+    assert.ok(ids.includes(sse.events.find((e) => e.event === "contribution" && e.data.markdown === "Second lookup").data.id), "other posts stay");
+    assert.ok(!ids.includes(target), "a removed post is not handed back to the agent");
+    console.log("ok: contribution-removed → internal-JWT only, SSE contribution_removed, agent board backfill drops it");
   }
 
   {
@@ -1127,7 +1177,11 @@ async function main() {
       startedAt: NOW - 60_000,
       endedAt: Date.now(),
       transcript: [{ kelaboId: KELABO, clientId: "c1", speaker: "A", text: "hello", tStart: 0, tEnd: 1, isFinal: true }],
-      board: [],
+      // The bridge's own board knows nothing of a removal made in the room;
+      // the archive must still leave the removed card out.
+      board: [...contribRemovals.keys(), "kept-card"].map((id, i) => ({
+        id, kelaboId: KELABO, tag: "LLM_CON", kind: "answer", title: id, to: "all", markdown: id, author: "assistant", at: NOW + i,
+      })),
     };
     const base = frames.length;
     const pending = req(port, {
@@ -1141,7 +1195,9 @@ async function main() {
     // End returns immediately (summary/minutes generated asynchronously).
     const res = await pending;
     assert.equal(res.status, 200);
-    assert.ok(calls.s3Puts.find((p) => p.Key === `archives/alice@example.com/${KELABO}.json`), "archive JSON to S3");
+    const s3Archive = calls.s3Puts.find((p) => p.Key === `archives/alice@example.com/${KELABO}.json` && p.Body);
+    assert.ok(s3Archive, "archive JSON to S3");
+    assert.deepEqual(JSON.parse(s3Archive.Body).board.map((b) => b.id), ["kept-card"], "removed posts are not in the record");
     assert.ok(calls.puts.find((p) => p.TableName === "t-history" && p.Item.archiveId === KELABO), "history row");
     assert.ok(calls.puts.find((p) => String(p.Item.archiveId).startsWith("PARTICIPANT#alice@example.com")), "participant-index companion");
     const endedEvt = await waitFor(() => sse.events.find((e) => e.event === "ended"));

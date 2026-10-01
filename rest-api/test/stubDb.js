@@ -254,6 +254,19 @@ export function createDb() {
       }
       return items.slice(-limit);
     },
+    async findContributionRows(kelaboId, id) {
+      return [...kelabos.values()].filter(
+        (i) => i.PK === `KELABO#${kelaboId}` && i.SK.startsWith("CONTRIB#") && i.id === id
+      );
+    },
+    async markContributionsRemoved(kelaboId, sks, { removedAt, removedBy }) {
+      for (const SK of sks) {
+        const row = kelabos.get(mkey(`KELABO#${kelaboId}`, SK));
+        if (!row || row.removedAt != null) continue;
+        row.removedAt = removedAt;
+        row.removedBy = removedBy;
+      }
+    },
     async _putContribution(kelaboId, c) {
       kelabos.set(mkey(`KELABO#${kelaboId}`, `CONTRIB#${pad(c.at)}`), {
         PK: `KELABO#${kelaboId}`,

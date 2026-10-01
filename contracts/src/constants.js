@@ -182,6 +182,11 @@ export const JOURNEY_MESSAGE_KINDS = ["message", "assistant"];
 // the server agent on the next caption.
 export const SSE_EVENT_AGENT = "agent";
 export const SSE_EVENT_CONTRIBUTION = "contribution";
+// A board post was taken down by the host or by the person whose agent posted
+// it. Its own event rather than a `contribution` clear marker: a clear marker
+// is the agent withdrawing an unfinished card, and is never persisted — this
+// is a person removing a stored one, and late joiners must agree with it.
+export const SSE_EVENT_CONTRIBUTION_REMOVED = "contribution_removed";
 export const SSE_EVENT_DEBUG = "debug";
 export const SSE_EVENT_ENDED = "ended";
 export const SSE_EVENT_PING = "ping";

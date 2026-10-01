@@ -2086,6 +2086,18 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .con-sub span { display: inline-flex; align-items: center; gap: 3px; }
 .con-to { color: var(--accent-text); font-weight: 500; }
+/* Remove (host or author only). Pushed to the end of the second row and quiet
+   until the card is hovered or focused, so it never competes with the answer. */
+.con-remove {
+  margin-left: auto;
+  display: inline-flex; align-items: center;
+  padding: 2px; border: 0; border-radius: 4px;
+  background: none; color: var(--text-3); cursor: pointer;
+  opacity: 0; transition: opacity .15s, color .15s;
+}
+.con:hover .con-remove, .con:focus-within .con-remove, .con-remove:focus-visible { opacity: 1; }
+.con-remove:hover { color: var(--danger, #d33); }
+@media (hover: none) { .con-remove { opacity: 1; } }
 .con-body {
   max-height: 0; overflow: hidden; opacity: 0;
   transition: max-height .3s ease, opacity .25s ease, margin .25s ease;

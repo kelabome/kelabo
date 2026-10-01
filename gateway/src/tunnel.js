@@ -21,6 +21,7 @@ import {
   getMeta,
   queryInvites,
   queryContrib,
+  isRemovedContrib,
   queryKelaboItems,
   isAgentTokenRevoked,
 } from "./db.js";
@@ -475,6 +476,10 @@ export function createTunnel(c) {
       markdown: frame.markdown,
       ...(frame.sources?.length ? { sources: frame.sources } : {}),
       author: "assistant",
+      // The developer this agent posts for. `author` stays "assistant" (that
+      // is what renders); this is what lets them take their own post down
+      // without being the host. From the verified agent token, never the frame.
+      authorIdentity: conn.identity,
       origin: "local",
       runtime: conn.agent.runtime,
       agentLabel: conn.agent.label,
@@ -646,7 +651,9 @@ export function createTunnel(c) {
       type: "board",
       requestId,
       kelaboId,
-      contributions: items.reverse().map((i) => ({
+      // A post the host or its author removed is gone for the agent too —
+      // otherwise it would quote back something the room took down.
+      contributions: items.filter((i) => !isRemovedContrib(i)).reverse().map((i) => ({
         id: i.id,
         title: i.title || "",
         to: i.to || "all",

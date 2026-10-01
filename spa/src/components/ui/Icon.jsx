@@ -22,6 +22,7 @@ const PATHS = {
   'chevron-down': 'M6 9l6 6 6-6',
   'chevron-up': 'M18 15l-6-6-6 6',
   x: 'M18 6L6 18M6 6l12 12',
+  trash: 'M3 6h18 M8 6V4h8v2 M6 6l1 14h10l1-14 M10 11v6 M14 11v6',
   plus: 'M12 5v14M5 12h14',
   check: 'M20 6L9 17l-5-5',
   maximize: 'M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M21 16v3a2 2 0 01-2 2h-3M3 16v3a2 2 0 002 2h3',

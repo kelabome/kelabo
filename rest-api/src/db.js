@@ -1292,6 +1292,61 @@ export function createDb({ config, client } = {}) {
     return items;
   }
 
+  /**
+   * Every CONTRIB# row of one kelabo carrying this contribution id.
+   *
+   * There is no index by id — the sort key is `CONTRIB#<at>#<rand>`, and the
+   * board's own `at` is not a safe handle on it: the SSE copy and the stored
+   * row can disagree by the write's latency, and one card id can own more than
+   * one row (an agent that finishes the same card twice persists it twice). So
+   * this reads the kelabo's CONTRIB# range, filtered by id, following
+   * `LastEvaluatedKey` — the filter runs after each page is read, so a
+   * single-page read could miss a match that is sitting on page two. One
+   * kelabo's board is small, and removal is a rare, human-paced action.
+   */
+  async function findContributionRows(kelaboId, id) {
+    const out = [];
+    let ExclusiveStartKey;
+    do {
+      const res = await doc.send(
+        new QueryCommand({
+          TableName: T.kelabos,
+          KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+          FilterExpression: "id = :id",
+          ExpressionAttributeValues: { ":pk": `KELABO#${kelaboId}`, ":sk": "CONTRIB#", ":id": id },
+          ...(ExclusiveStartKey ? { ExclusiveStartKey } : {}),
+        })
+      );
+      out.push(...(res.Items || []));
+      ExclusiveStartKey = res.LastEvaluatedKey;
+    } while (ExclusiveStartKey);
+    return out;
+  }
+
+  /**
+   * Soft-delete board rows: stamp `removedAt`/`removedBy`, keep everything
+   * else. `attribute_not_exists(removedAt)` makes a concurrent second removal
+   * a no-op instead of overwriting who did it first; `attribute_exists(SK)`
+   * stops an update from conjuring a row that was swept in the meantime.
+   */
+  async function markContributionsRemoved(kelaboId, sks, { removedAt, removedBy }) {
+    for (const SK of sks) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: T.kelabos,
+            Key: { PK: `KELABO#${kelaboId}`, SK },
+            UpdateExpression: "SET removedAt = :at, removedBy = :by",
+            ConditionExpression: "attribute_exists(SK) AND attribute_not_exists(removedAt)",
+            ExpressionAttributeValues: { ":at": removedAt, ":by": removedBy },
+          })
+        );
+      } catch (e) {
+        if (e?.name !== "ConditionalCheckFailedException") throw e;
+      }
+    }
+  }
+
   async function getOtp(email) {
     const res = await doc.send(new GetCommand({ TableName: T.otp, Key: { PK: `OTP#${email}` } }));
     return res.Item || null;
@@ -1950,6 +2005,8 @@ export function createDb({ config, client } = {}) {
     updateKelaboMeta,
     appendParticipant,
     queryContributions,
+    findContributionRows,
+    markContributionsRemoved,
     getOtp,
     putOtp,
     deleteOtp,

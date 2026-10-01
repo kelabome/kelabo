@@ -131,6 +131,12 @@ const internal = {
     return { ok: true, archived: true };
   },
   requestMinutes: async (kelaboId, identity) => internalCalls.push({ op: "minutes", kelaboId, identity }),
+  // Set to make the fake gateway refuse the fan-out, like a rolling task.
+  removedUnreachable: false,
+  contributionRemoved: async (kelaboId, identity, payload) => {
+    internalCalls.push({ op: "contributionRemoved", kelaboId, identity, ...payload });
+    if (internal.removedUnreachable) throw new TypeError("fetch failed");
+  },
   cancelKelabo: async (kelaboId, identity) => internalCalls.push({ op: "cancel", kelaboId, identity }),
   rescheduleKelabo: async (kelaboId, identity) => internalCalls.push({ op: "reschedule", kelaboId, identity }),
   ring: async (kelaboId, identity, { targets }) => {
@@ -2662,6 +2668,125 @@ await test("credentials: the projected cache and the full cache are separate", a
   assert.deepEqual(await both.get("stt"), { soniox: "SECRET" });
   assert.equal(status, 2);
   assert.equal(full, 2);
+});
+
+// --- removing a board post (kelabos.removeContribution) ---------------------
+
+await test("DELETE /kelabos/:id/board/:cid — host or author only, soft, idempotent, fanned out", async () => {
+  const host = await signIn("boardhost@example.com");
+  const dev = await signIn("boarddev@example.com");
+  const other = await signIn("boardother@example.com");
+  const created = await call("POST", "/kelabos", { cookies: host.cookies, body: { title: "Board removal" } });
+  const id = created.json.kelaboId;
+  const joinAs = async (cookies, displayName) => {
+    const res = await call("POST", `/kelabos/${id}/join`, { cookies, body: { displayName, mode: "board-only" } });
+    assert.equal(res.statusCode, 200);
+    return { kelabo_participant: cookieValue(res, "kelabo_participant") };
+  };
+  const hostP = await joinAs(host.cookies, "Host");
+  const devP = await joinAs(dev.cookies, "Dev");
+  const otherP = await joinAs(other.cookies, "Other");
+  const guestP = await joinAs({}, "Guest");
+
+  const base = Date.now() - 60_000;
+  const put = (cid, i, extra = {}) =>
+    db._putContribution(id, {
+      id: cid, kelaboId: id, tag: "LLM_CON", kind: "answer", title: cid, to: "all",
+      markdown: cid, author: "assistant", at: base + i * 1000, ...extra,
+    });
+  await put("srv", 1); // server agent: no authorIdentity — host only
+  await put("mine", 2, { authorIdentity: "boarddev@example.com", origin: "local" });
+  await put("dup", 3, { authorIdentity: "boarddev@example.com" }); // one card id, two rows
+  await put("dup", 4, { authorIdentity: "boarddev@example.com" });
+  await put("keep", 5);
+  // Typed notes: one with the field, one written before it existed.
+  const guestId = (await db.getKelaboMeta(id)).participants.find((p) => p.displayName === "Guest").identity;
+  await put("gnote", 7, { tag: "note", kind: "note", author: guestId, authorIdentity: guestId });
+  await put("onote", 8, { tag: "note", kind: "note", author: "boardother@example.com" });
+  const ids = async (cookies = hostP) =>
+    (await call("GET", `/kelabos/${id}/board?limit=50`, { cookies })).json.contributions.map((c) => c.id);
+  assert.deepEqual(await ids(), ["srv", "mine", "dup", "dup", "keep", "gnote", "onote"]);
+
+  const del = (cid, cookies) => call("DELETE", `/kelabos/${id}/board/${cid}`, { cookies });
+
+  // Unauthenticated, then wrong people.
+  assert.equal((await del("srv")).statusCode, 401);
+  const byGuest = await del("mine", guestP);
+  assert.equal(byGuest.statusCode, 403);
+  assert.equal(byGuest.json.error, "not_host_or_author");
+  const byOther = await del("mine", otherP);
+  assert.equal(byOther.statusCode, 403);
+  assert.equal(byOther.json.error, "not_host_or_author");
+  // The author of one post is not the author of the server agent's.
+  assert.equal((await del("srv", devP)).statusCode, 403);
+  // A guest may not remove somebody else's note; its writer may (legacy row,
+  // `author` only), and the guest may remove their own.
+  assert.equal((await del("onote", guestP)).statusCode, 403);
+  assert.equal((await del("onote", otherP)).statusCode, 200);
+  const ownNote = await del("gnote", guestP);
+  assert.equal(ownNote.statusCode, 200);
+  assert.equal(ownNote.json.removedBy, guestId);
+  const missing = await del("nope", hostP);
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json.error, "contribution_not_found");
+
+  // The author removes their own; the host removes the server agent's.
+  internalCalls.length = 0;
+  const byAuthor = await del("mine", devP);
+  assert.equal(byAuthor.statusCode, 200);
+  assert.equal(byAuthor.json.id, "mine");
+  assert.equal(byAuthor.json.removedBy, "boarddev@example.com");
+  assert.equal(typeof byAuthor.json.removedAt, "number");
+  assert.deepEqual(internalCalls, [{
+    op: "contributionRemoved", kelaboId: id, identity: "boarddev@example.com",
+    id: "mine", removedAt: byAuthor.json.removedAt, removedBy: "boarddev@example.com",
+  }]);
+  const byHost = await del("srv", hostP);
+  assert.equal(byHost.statusCode, 200);
+  assert.equal(byHost.json.removedBy, "boardhost@example.com");
+  // The host may remove someone else's post too, and every row of the card goes.
+  assert.equal((await del("dup", hostP)).statusCode, 200);
+
+  // Soft: the rows are still there, stamped.
+  const rows = await db.findContributionRows(id, "dup");
+  assert.equal(rows.length, 2);
+  for (const r of rows) assert.equal(r.removedBy, "boardhost@example.com");
+
+  // Gone from the board read, for everyone, without leaking the stamps.
+  assert.deepEqual(await ids(), ["keep"]);
+  assert.deepEqual(await ids(guestP), ["keep"]);
+  const page = (await call("GET", `/kelabos/${id}/board?limit=50`, { cookies: hostP })).json;
+  assert.equal(page.contributions[0].removedAt, undefined);
+  // The cursor still comes from the page as read: a `since` page whose rows
+  // were all removed must move past them, not stall.
+  const tail = (await call("GET", `/kelabos/${id}/board?since=${base + 1000}&limit=2`, { cookies: hostP })).json;
+  assert.deepEqual(tail.contributions, []);
+  assert.equal(tail.nextSince, base + 3000);
+
+  // Idempotent: a second removal reports the first and does not fan out again.
+  internalCalls.length = 0;
+  const again = await del("mine", hostP);
+  assert.equal(again.statusCode, 200);
+  assert.equal(again.json.removedBy, "boarddev@example.com", "the first remover is kept");
+  assert.equal(again.json.alreadyRemoved, true);
+  assert.deepEqual(internalCalls, []);
+
+  // A Gateway that cannot be reached costs the live fan-out, not the removal.
+  internal.removedUnreachable = true;
+  try {
+    const despite = await del("keep", hostP);
+    assert.equal(despite.statusCode, 200);
+    assert.deepEqual(await ids(), []);
+  } finally {
+    internal.removedUnreachable = false;
+  }
+
+  // Live kelabos only.
+  await put("late", 6);
+  await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+  const ended = await del("late", hostP);
+  assert.equal(ended.statusCode, 410);
+  assert.equal(ended.json.error, "kelabo_ended");
 });
 
 console.log(`\n${passed} tests passed${process.exitCode ? " (with failures)" : ""}`);
