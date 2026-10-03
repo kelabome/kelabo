@@ -151,3 +151,91 @@ export const PUBLIC_EMAIL_DOMAINS = Object.freeze(
     "discard.email", "mailcatch.com", "inboxbear.com", "linshiyouxiang.net",
   ])
 );
+
+/**
+ * A public mailbox, relay or disposable domain: one person's address, never a
+ * company's. The one predicate every "is this an organisation?" question asks.
+ */
+export function isPublicEmailDomain(domain) {
+  const d = normaliseDomain(domain);
+  return PUBLIC_EMAIL_DOMAINS.has(d) || PUBLIC_EMAIL_SUFFIXES.some((s) => d.endsWith(s));
+}
+
+// --- one organisation, several domains ----------------------------------------
+//
+// A deployment restricted to its own organisation names a *primary* domain
+// (`allowedEmailDomain`) and, optionally, *aliases* (`emailDomainAliases`) —
+// acme.com plus acme.com.au, acme.io, a pre-rename domain. Everyone at any of
+// them is one tenant, and the tenant is the primary: `tenantOf` maps an alias
+// to it, so `tenantId` stays one string and every boundary keyed on it (the
+// tenant GSIs, presence, contacts, search, journeys, ringing) holds unchanged.
+//
+// The primary is what every row is stamped with, so it is the one value that
+// must not move. Aliases may be added and removed freely: removing one stops
+// new sign-ins from it and sends those people back to their own domain's
+// tenant on their next session.
+
+/**
+ * The deployment's organisation, normalised: `{ primary, aliases }`. Empty
+ * `primary` means open registration — no organisation, every domain its own
+ * tenant — and aliases are then meaningless and ignored.
+ *
+ * An alias that is a public mailbox domain is dropped, never honoured: aliasing
+ * gmail.com would make every Gmail user on the internet a colleague. So is an
+ * alias equal to the primary, or not a domain at all.
+ *
+ * @param {{ allowedEmailDomain?: string, emailDomainAliases?: string[] | string }} [cfg]
+ */
+export function orgDomains(cfg) {
+  const primary = normaliseDomain(cfg?.allowedEmailDomain ?? "");
+  if (!primary) return { primary: "", aliases: [] };
+  const raw = Array.isArray(cfg?.emailDomainAliases)
+    ? cfg.emailDomainAliases
+    : String(cfg?.emailDomainAliases ?? "").split(",");
+  const aliases = [
+    ...new Set(
+      raw
+        .map(normaliseDomain)
+        .filter((d) => d && d !== primary && d.includes(".") && !d.includes("@") && !isPublicEmailDomain(d))
+    ),
+  ];
+  return { primary, aliases };
+}
+
+/** Every domain that may sign in, or `null` for open registration. */
+export function allowedDomains(org) {
+  return org?.primary ? [org.primary, ...(org.aliases ?? [])] : null;
+}
+
+/** May this address hold an account here? Open registration admits any domain. */
+export function domainAllowed(email, org) {
+  const d = domainOf(email);
+  if (!d) return false;
+  const allowed = allowedDomains(org);
+  return !allowed || allowed.includes(d);
+}
+
+/**
+ * The tenant an address belongs to: its own domain, or the primary when that
+ * domain is one of the organisation's aliases. The one derivation every site
+ * that turns an identity into a `tenantId` must use.
+ */
+export function tenantOf(email, org) {
+  const d = domainOf(email);
+  if (!d) return "";
+  return org?.primary && (org.aliases ?? []).includes(d) ? org.primary : d;
+}
+
+/**
+ * Does a tenant have colleagues? Every colleague feature — people search,
+ * presence, ringing, the tenant's live and scheduled kelabos, organisation-wide
+ * journeys — treats "same tenant" as "same organisation". Under open
+ * registration that is false for a public mailbox domain: everyone at
+ * gmail.com shares the tenant `gmail.com` and are strangers to each other.
+ * Such a tenant has no colleagues; its people reach each other only through
+ * what names them specifically (an invite, an accepted contact, a link).
+ */
+export function hasColleagues(tenantId) {
+  const t = normaliseDomain(tenantId);
+  return !!t && !isPublicEmailDomain(t);
+}

@@ -1,4 +1,5 @@
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
 /**
  * Huddle / ring (docs 18 §6) — "call" an online contact.
@@ -18,8 +19,7 @@ import { err } from "./errors.js";
  * not re-derive it. Delivery to whichever targets are online — and the report of
  * who was offline — is the Gateway's (over the presence streams).
  */
-export function createHuddle({ config, db, internal, kelabos }) {
-  const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
+export function createHuddle({ config, db, internal, kelabos, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
 
   // The ringer's name and chosen avatar for the "X is calling you" modal. The
   // session cookie carries neither, so read the users directory; fall back to
@@ -35,17 +35,18 @@ export function createHuddle({ config, db, internal, kelabos }) {
   /** Filter `emails` to those the caller may ring; throw if none qualify. The
    *  returned list is normalized (lowercased, de-duped, self removed). */
   async function authorizeTargets(identity, emails) {
-    const tenant = tenantOf(identity);
     const wanted = [...new Set((emails || []).map((e) => e.trim().toLowerCase()).filter(Boolean))].filter(
       (e) => e !== identity
     );
     if (wanted.length === 0) throw err(400, "no_targets");
-    // Same-tenant colleagues are always allowed. External requires an accepted
-    // contact row (empty until external contacts ship).
-    const external = wanted.filter((e) => tenantOf(e) !== tenant);
+    // Same-organisation colleagues are always allowed — an alias domain counts
+    // as the organisation, and nobody is a colleague under a public mailbox
+    // tenant (tenancy.sameOrg). Anyone else requires an accepted contact row.
+    const colleague = new Set();
+    for (const e of wanted) if (await tenancy.sameOrg(identity, e)) colleague.add(e);
     let acceptedSet = new Set();
-    if (external.length) acceptedSet = new Set(await db.listAcceptedContacts(identity));
-    const allowed = wanted.filter((e) => tenantOf(e) === tenant || acceptedSet.has(e));
+    if (colleague.size < wanted.length) acceptedSet = new Set(await db.listAcceptedContacts(identity));
+    const allowed = wanted.filter((e) => colleague.has(e) || acceptedSet.has(e));
     if (allowed.length === 0) throw err(403, "no_contact");
     return allowed;
   }

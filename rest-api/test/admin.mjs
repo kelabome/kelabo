@@ -555,6 +555,10 @@ await test("every field the console publishes is one a consumer actually reads",
     ["otp.js", /config\.otp\b/, "otp limits"],
     ["otp.js", /config\.allowedEmailDomain\b/, "the sign-in domain"],
     ["oidc.js", /config\.allowedEmailDomain\b/, "the sign-in domain, on the social path"],
+    // The organisation's domains (issue #14): every tenant derivation and the
+    // sign-in gate on both paths go through tenancy.js, so it is the one
+    // module that must resolve them rather than read the bootstrap.
+    ["tenancy.js", /config\.(allowedEmailDomain|emailDomainAliases)\b/, "the organisation's domains"],
     ["joinCode.js", /config\.joinCode\.\w/, "join-code limits"],
     ["sessions.js", /config\.auth\.\w/, "session lifetimes"],
     ["agent.js", /config\.auth\.\w/, "the agent token lifetime"],

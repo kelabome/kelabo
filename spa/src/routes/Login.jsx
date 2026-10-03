@@ -15,6 +15,9 @@ import { normaliseDomain, resolveEmail } from '../emailDomain.js'
 // The deployment's locked domain, or '' for open registration. Read once: it
 // is baked into the bundle at build time, so it cannot change under us.
 const lockedDomain = normaliseDomain(config.allowedEmailDomain)
+// The organisation's other domains, which may sign in too (issue #14).
+const aliasDomains = lockedDomain ? config.emailDomainAliases.map(normaliseDomain) : []
+const domainList = [lockedDomain, ...aliasDomains].map(d => `@${d}`).join(' or ')
 
 function otpErrorMessage(err) {
   switch (err?.code) {
@@ -25,7 +28,7 @@ function otpErrorMessage(err) {
       // Reachable despite the check in sendCode: the server is the authority,
       // and a stale bundle can disagree with it after the domain is changed.
       return lockedDomain
-        ? `Only @${lockedDomain} addresses can sign in.`
+        ? `Only ${domainList} addresses can sign in.`
         : "This deployment only allows your organization's email domain."
     case 'rate_limited':
       return 'Too many attempts — wait a moment and try again.'
@@ -103,9 +106,9 @@ export default function Login() {
   const sendCode = async () => {
     // On a locked deployment a bare local part is enough — the domain is
     // filled in here. A wrong domain is refused without a round-trip.
-    const resolved = resolveEmail(email, lockedDomain)
+    const resolved = resolveEmail(email, lockedDomain, aliasDomains)
     if (!resolved.ok) {
-      if (resolved.reason === 'wrong_domain') setError(`Only @${lockedDomain} addresses can sign in.`)
+      if (resolved.reason === 'wrong_domain') setError(`Only ${domainList} addresses can sign in.`)
       else toast(lockedDomain ? `Enter your name, or your full @${lockedDomain} address` : 'Enter your work email')
       emailRef.current?.focus()
       return

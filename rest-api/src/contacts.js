@@ -1,4 +1,5 @@
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
 /**
  * Contacts (docs 18 §4).
@@ -15,11 +16,12 @@ import { err } from "./errors.js";
  *      storage (`PEER#` rows) and full state machine are designed in docs 18 but
  *      not implemented in this phase.
  *
- * A favourite is only valid for a same-tenant identity. Favouriting an outside
- * address is `not_a_colleague` — that is what external contacts are for.
+ * A favourite is only valid for a same-organisation identity (tenancy.sameOrg:
+ * an alias domain counts as the organisation; a public mailbox tenant has no
+ * colleagues at all). Favouriting an outside address is `not_a_colleague` —
+ * that is what external contacts are for.
  */
-export function createContacts({ config, db, opConfig, people }) {
-  const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
+export function createContacts({ config, db, opConfig, people, tenancy = createTenancy({ config, opConfig }) }) {
   // Published operational config (contracts/src/opconfig.js). Async now, so
   // turning external contacts on or off takes effect on the next request
   // rather than the next deploy.
@@ -35,8 +37,10 @@ export function createContacts({ config, db, opConfig, people }) {
     const favRows = await db.listFavourites(identity);
     // Resolve names from the users directory. One tenant query covers everyone;
     // favourites are same-tenant by construction, so a single lookup suffices.
-    const tenantId = tenantOf(identity);
-    const dir = await db.listUsersByTenant(tenantId, "", 1000);
+    const tenantId = await tenancy.tenantOf(identity);
+    // A public mailbox tenant has no colleagues, so there is nobody to name
+    // from it — and reading it would mean reading strangers.
+    const dir = tenancy.hasColleagues(tenantId) ? await db.listUsersByTenant(tenantId, "", 1000) : [];
     const nameByEmail = new Map(dir.map((u) => [u.email, u.displayName]));
     // The identicon re-roll lives in user settings, which the tenant index does
     // not project — one bounded parallel read per favourite. Best-effort: a
@@ -50,7 +54,7 @@ export function createContacts({ config, db, opConfig, people }) {
           // local part sign-in writes by default — and it names a favourited
           // colleague who has not signed in yet at all.
           displayName:
-            (await people?.lookup(tenantId, r.peer).catch(() => null))?.displayName ||
+            (tenancy.hasColleagues(tenantId) && (await people?.lookup(tenantId, r.peer).catch(() => null))?.displayName) ||
             nameByEmail.get(r.peer) ||
             r.peer,
           avatarVariant: Number((await db.getUserSettings(r.peer).catch(() => null))?.settings?.avatar) || 0,
@@ -74,8 +78,8 @@ export function createContacts({ config, db, opConfig, people }) {
     const peer = String(email || "").trim().toLowerCase();
     if (!peer) throw err(400, "bad_request");
     if (peer === identity) throw err(400, "bad_request");
-    if (tenantOf(peer) !== tenantOf(identity)) throw err(409, "not_a_colleague");
-    await db.putFavourite({ owner: identity, peer, tenantId: tenantOf(identity) });
+    if (!(await tenancy.sameOrg(identity, peer))) throw err(409, "not_a_colleague");
+    await db.putFavourite({ owner: identity, peer, tenantId: await tenancy.tenantOf(identity) });
     return { email: peer, favourited: true };
   }
 

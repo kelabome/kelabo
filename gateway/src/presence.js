@@ -1,5 +1,6 @@
 import { queryAcceptedContacts } from "./db.js";
 import { effectiveConfig } from "./opconfig.js";
+import { hasColleagues } from "./tenancy.js";
 
 /**
  * Contact presence (docs 18 §5) — the first non-kelabo-scoped browser stream on
@@ -80,7 +81,9 @@ export function createPresence(c) {
   /** Everyone `viewer` (identity in `tenantId`) is allowed to see the presence
    *  of: same-tenant colleagues plus accepted external contacts. */
   async function audienceFor(identity, tenantId) {
-    const set = new Set(c.state.presenceByTenant.get(tenantId) || []);
+    // A public mailbox tenant is not an organisation: everyone else at
+    // gmail.com is a stranger, so it contributes nobody (hasColleagues).
+    const set = new Set(hasColleagues(tenantId) ? c.state.presenceByTenant.get(tenantId) || [] : []);
     // Published operational config (docs 23): turning external contacts on
     // must widen presence on the next event, not on the next deploy.
     if ((await effectiveConfig(c)).contacts.external) {
@@ -109,6 +112,7 @@ export function createPresence(c) {
    *  does not have to: an offline person cannot be pushed to anyway, and their
    *  badge is correct the moment they load a page. */
   function tenantOnline(tenantId) {
+    if (!hasColleagues(tenantId)) return new Set();
     return new Set(c.state.presenceByTenant.get(tenantId) || []);
   }
 

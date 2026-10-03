@@ -1,5 +1,6 @@
 import { err } from "./errors.js";
 import { sha256 } from "./jwt.js";
+import { createTenancy } from "./tenancy.js";
 
 /**
  * Close an account: delete everything the deployment holds about one person.
@@ -47,7 +48,7 @@ import { sha256 } from "./jwt.js";
  * `dryRun` walks the same lists and returns the same report without deleting
  * anything.
  */
-export function createCloseAccount({ config, db, records, secrets, log, opConfig }) {
+export function createCloseAccount({ config, db, records, secrets, log, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
   // The retention window a cancelled kelabo is stamped with, published.
   const retentionNow = async () =>
     (opConfig ? (await opConfig.effective()).retentionDays : config.retentionDays);
@@ -57,7 +58,7 @@ export function createCloseAccount({ config, db, records, secrets, log, opConfig
   async function close({ identity: rawIdentity, dryRun = false, now = Date.now() }) {
     const identity = String(rawIdentity || "").trim().toLowerCase();
     if (!identity.includes("@")) throw err(400, "bad_request", "identity must be an email address");
-    const tenantId = identity.split("@")[1];
+    const tenantId = await tenancy.tenantOf(identity);
 
     const report = {
       identity,
@@ -75,7 +76,7 @@ export function createCloseAccount({ config, db, records, secrets, log, opConfig
     };
 
     // 0a. A live kelabo they host blocks closure outright.
-    const active = await db.listKelabosByStatusForIdentity(identity, "active");
+    const active = await db.listKelabosByStatusForIdentity(identity, "active", await tenancy.scope(identity));
     const hostingActive = [...active.sameTenant, ...active.crossTenant].filter(
       (m) => m.hostIdentity === identity
     );
@@ -93,7 +94,7 @@ export function createCloseAccount({ config, db, records, secrets, log, opConfig
     }
 
     // 1. Scheduled kelabos they host: cancel, then delete the invite rows.
-    const scheduled = await db.listKelabosByStatusForIdentity(identity, "scheduled");
+    const scheduled = await db.listKelabosByStatusForIdentity(identity, "scheduled", await tenancy.scope(identity));
     const hostedScheduled = [...scheduled.sameTenant, ...scheduled.crossTenant].filter(
       (m) => m.hostIdentity === identity
     );

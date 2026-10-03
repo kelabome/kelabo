@@ -28,8 +28,10 @@ which are config-gated (§0) and inert in a single-domain deployment.
 
 **External contacts cannot function in self-host mode, by design.**
 
-`config.allowedEmailDomain` is a single string per environment, and both auth
-paths reject everything else: OTP (`rest-api/src/otp.js`) returns
+`config.allowedEmailDomain` names the organisation's primary domain, optionally
+with `emailDomainAliases` — its other domains, folded into the same tenant
+(`contracts/src/orgDomains.js` `tenantOf`, issue #14) — and both auth paths
+reject everything else: OTP (`rest-api/src/otp.js`) returns
 `403 domain_not_allowed`, OIDC (`rest-api/src/oidc.js`) the same plus an
 `email_verified` check. A person outside the configured domain therefore **cannot
 obtain an account**, so they can never *accept* a contact request and can never
@@ -53,10 +55,16 @@ The **org half — the directory and same-org presence — works today** and is 
 gated. If a deployment enables multi-domain signup, flipping the flag activates
 the rest with no schema change.
 
-> Note: a dev environment whose `allowedEmailDomain` is a shared domain (e.g.
-> `gmail.com`) makes "same org" mean *every account on that domain*, and the
-> "you cannot remove a colleague" rule applies to all of them. This is a
-> config artefact, not a bug.
+> **A public mailbox domain is never an organisation.** Under open
+> registration (`allowedEmailDomain` empty) everyone at `gmail.com` shares the
+> tenant `gmail.com` — and they are strangers. So a tenant that is a public
+> mailbox domain (`isPublicEmailDomain`, the same list that refuses a directory
+> or an alias for one) has **no colleagues**: no people search, no same-tenant
+> presence, no ringing, no favourites, nobody else's live kelabos in the list,
+> and an organisation-wide ("public") journey is visible to its owner only.
+> People there still reach each other through what names them specifically —
+> an invite, an accepted external contact, a join link (`hasColleagues`,
+> enforced in `rest-api/src/tenancy.js` and the Gateway's presence/journeys).
 
 ---
 

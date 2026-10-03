@@ -51,7 +51,15 @@ installs nothing but esbuild.
 - Target runtimes are **Node 20** (Lambda) and **Node 22** (containers) even though
   local Node may be newer.
 - Every AWS resource is tagged `app=kelabo` + `endpoint=<env>` at the CDK app root.
-- `tenantId` = verified email domain; stamped on every persisted item.
+- `tenantId` = the verified email's organisation, stamped on every persisted
+  item: its domain, or the primary when the domain is one of the organisation's
+  `emailDomainAliases`. **Never derive it inline** (`split("@")[1]`) — go
+  through `tenancy.tenantOf` (rest-api) / `tenantOfIdentity` (gateway), which
+  fold aliases (`contracts/src/orgDomains.js`).
+- **A public mailbox tenant has no colleagues** (`hasColleagues`): under open
+  registration everyone at gmail.com shares a tenant and are strangers, so every
+  colleague feature — search, presence, ringing, favourites, the tenant's
+  kelabo list, org-wide journeys — treats it as an organisation of one.
 
 ## Setup
 

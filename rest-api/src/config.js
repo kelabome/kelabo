@@ -80,6 +80,9 @@ function fromEnv() {
     env: env.KELABO_ENV || "dev",
     region: env.AWS_REGION || "us-east-1",
     allowedEmailDomain: env.KELABO_ALLOWED_EMAIL_DOMAIN,
+    // One organisation, several domains (issue #14): a comma list, folded into
+    // the primary's tenant by tenancy.js. Publishable as org.emailDomainAliases.
+    emailDomainAliases: (env.KELABO_EMAIL_DOMAIN_ALIASES || "").split(",").map((d) => d.trim()).filter(Boolean),
     cookieDomain: env.KELABO_COOKIE_DOMAIN,
     portalUrl: env.KELABO_PORTAL_URL,
     gatewayBaseUrl: env.KELABO_GATEWAY_BASE_URL,
@@ -191,6 +194,7 @@ function fromLoadConfig(c) {
     env: c.env,
     region: c.region,
     allowedEmailDomain: c.allowedEmailDomain,
+    emailDomainAliases: c.emailDomainAliases || [],
     cookieDomain: c.cookieDomain,
     portalUrl: c.portalUrl,
     gatewayBaseUrl: c.gatewayBaseUrl,

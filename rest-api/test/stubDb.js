@@ -213,10 +213,16 @@ export function createDb() {
     // Mirrors src/db.js's composition of the same two GSIs: same-tenant by
     // status-index, plus any kelabo elsewhere where identity holds an
     // INVITE# row, via invitee-index.
-    async listKelabosByStatusForIdentity(identity, status) {
-      const tenantId = identity.split("@")[1]?.toLowerCase();
+    // Mirrors db.js: the caller passes its tenant (tenancy.scope); a tenant
+    // without colleagues contributes only what the identity hosts or joined.
+    async listKelabosByStatusForIdentity(identity, status, { tenantId: given, colleagues = true } = {}) {
+      const tenantId = given || identity.split("@")[1]?.toLowerCase();
       const sameTenant = [...kelabos.values()].filter(
-        (i) => i.SK === "META" && i.tenantStatus === `${tenantId}#${status}` && typeof i.startedAt === "number"
+        (i) =>
+          i.SK === "META" &&
+          i.tenantStatus === `${tenantId}#${status}` &&
+          typeof i.startedAt === "number" &&
+          (colleagues || i.hostIdentity === identity || (i.participants || []).some((p) => p.identity === identity))
       );
       const known = new Set(sameTenant.map((m) => m.kelaboId));
       const myInvites = [...kelabos.values()].filter(

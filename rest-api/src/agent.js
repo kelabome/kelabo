@@ -20,6 +20,7 @@ import {
 } from "@kelabo/contracts";
 import { signJwt, verifyJwt, sha256, randomToken } from "./jwt.js";
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
 /** Uniform over the alphabet: `% alphabet.length` on a raw byte is not, and a
  *  code a human reads aloud is short enough for the bias to matter. */
@@ -44,7 +45,7 @@ export function normalizeUserCode(raw) {
   return `${clean.slice(0, 4)}-${clean.slice(4)}`;
 }
 
-export function createAgent({ config, db, secrets, opConfig }) {
+export function createAgent({ config, db, secrets, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
   // Published operational config, read when a token is minted — so a shortened
   // lifetime applies to the next pairing and never to a bridge already paired.
   const ttlDaysNow = async () =>
@@ -115,9 +116,12 @@ export function createAgent({ config, db, secrets, opConfig }) {
     if (item.expiresAt <= Date.now()) throw err(410, "device_code_expired");
     if (!item.approvedAt) throw err(428, "authorization_pending");
 
+    // Recomputed rather than taken from the approval: the tenant is a function
+    // of the identity and the organisation's current domains (tenancy.js).
+    const tenantId = await tenancy.tenantOf(item.identity);
     const token = await mintAgentToken({
       identity: item.identity,
-      tenantId: item.tenantId,
+      tenantId,
       runtime: item.runtime,
       label: item.label,
     });
@@ -127,7 +131,7 @@ export function createAgent({ config, db, secrets, opConfig }) {
     return {
       agentToken: token.jwt,
       identity: item.identity,
-      tenantId: item.tenantId,
+      tenantId,
       expiresAt: token.expiresAt,
       gatewayBaseUrl: config.gatewayBaseUrl,
     };
@@ -219,8 +223,8 @@ export function createAgent({ config, db, secrets, opConfig }) {
   async function joinableKelabos({ identity }) {
     const [{ sameTenant: activeSame, crossTenant: activeCross }, { sameTenant: schedSame, crossTenant: schedCross }] =
       await Promise.all([
-        db.listKelabosByStatusForIdentity(identity, "active"),
-        db.listKelabosByStatusForIdentity(identity, "scheduled"),
+        db.listKelabosByStatusForIdentity(identity, "active", await tenancy.scope(identity)),
+        db.listKelabosByStatusForIdentity(identity, "scheduled", await tenancy.scope(identity)),
       ]);
     const active = [...activeSame, ...activeCross];
     const scheduled = [...schedSame, ...schedCross];
@@ -263,14 +267,16 @@ export function createAgent({ config, db, secrets, opConfig }) {
    * already makes.
    */
   async function joinableJourneys({ identity }) {
-    const tenantId = identity.split("@")[1].toLowerCase();
+    const tenantId = await tenancy.tenantOf(identity);
     const [tenantActive, accessorLinks] = await Promise.all([
       db.listJourneysByTenantStatus(tenantId, "active"),
       db.listAccessorJourneys(identity),
     ]);
     const byId = new Map();
     for (const meta of tenantActive) {
-      if (meta.ownerIdentity === identity || meta.visibility === "public") byId.set(meta.journeyId, meta);
+      // Public to the organisation — and a public mailbox tenant is not one.
+      const isPublic = meta.visibility === "public" && tenancy.hasColleagues(tenantId);
+      if (meta.ownerIdentity === identity || isPublic) byId.set(meta.journeyId, meta);
     }
     const accessorMetas = await Promise.all(
       accessorLinks.map((l) => db.getJourneyMeta(String(l.PK).slice("JOURNEY#".length)))

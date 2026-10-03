@@ -2,11 +2,15 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import { api } from './api'
 import { pullSettings, syncIdentity } from './settings'
 
-const AuthContext = createContext({ identity: null, tenantId: null, loading: true, refresh: () => {} })
+const AuthContext = createContext({ identity: null, tenantId: null, org: null, loading: true, refresh: () => {} })
 
 export function AuthProvider({ children }) {
   const [identity, setIdentity] = useState(null)
   const [tenantId, setTenantId] = useState(null)
+  // `{ domains, colleagues }` from /me (issue #14): which addresses are this
+  // organisation's, and whether it has colleagues at all. Null before load and
+  // from an older server — readers treat that as "same domain", as before.
+  const [org, setOrg] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
@@ -18,6 +22,7 @@ export function AuthProvider({ children }) {
     const apply = (me) => {
       setIdentity(me?.identity || null)
       setTenantId(me.tenantId || null)
+      setOrg(me?.org || null)
       syncIdentity(me?.identity?.email)
     }
     try {
@@ -54,7 +59,7 @@ export function AuthProvider({ children }) {
   }, [identity])
 
   return (
-    <AuthContext.Provider value={{ identity, tenantId, loading, refresh: load }}>
+    <AuthContext.Provider value={{ identity, tenantId, org, loading, refresh: load }}>
       {children}
     </AuthContext.Provider>
   )

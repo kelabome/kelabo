@@ -59,7 +59,7 @@ list. Groups: `llm` (provider, model, smallModel, baseUrl), `stt` (provider,
 language, per-provider settings), `mail` (provider, fromAddress), `agent` (all
 eight gate and orchestrator knobs), `rtc` (defaultMode, meshMaxParticipants,
 iceTtlSeconds, disconnectGraceSeconds, video), `otp` (seven limits), `joinCode`
-(four), `auth` (four TTLs plus `socialProviders`), `org.allowedEmailDomain`,
+(four), `auth` (four TTLs plus `socialProviders`), `org.allowedEmailDomain` and `org.emailDomainAliases`,
 `contacts.external`, `retentionDays`.
 
 Two schema fields have no console control, deliberately, and both are still

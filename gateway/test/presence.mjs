@@ -177,6 +177,22 @@ async function main() {
   }
   carol.res.destroy();
 
+  // Two strangers at gmail.com share the tenant "gmail.com" under open
+  // registration, but a public mailbox domain is not an organisation (issue
+  // #14): neither sees the other come online.
+  {
+    const g1 = await connectPresence(port, "g1@gmail.com", "gmail.com");
+    await waitFor(() => g1.events.find((e) => e.kind === "snapshot"));
+    const g2 = await connectPresence(port, "g2@gmail.com", "gmail.com");
+    await waitFor(() => g2.events.find((e) => e.kind === "snapshot"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(g2.events.find((e) => e.kind === "snapshot").online, []);
+    assert.equal(g1.events.some((e) => e.identity === "g2@gmail.com"), false);
+    g1.res.destroy();
+    g2.res.destroy();
+    ok("a public mailbox tenant has no colleagues to see online");
+  }
+
   // Alice opens a SECOND tab. Bob must NOT get a second "online" for her, and
   // closing the second tab must NOT mark her offline — she still has the first.
   const bobOnlineBefore = bob.events.filter((e) => e.kind === "online" && e.identity === "alice@example.com").length;

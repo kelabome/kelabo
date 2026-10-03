@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { isPublicEmailDomain } from "../contracts/src/orgDomains.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -392,6 +393,27 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   // fine and falls back to generic wording.
   const organizationName = String(block.organizationName ?? "").trim();
 
+  // One organisation, several email domains (issue #14). `allowedEmailDomain`
+  // is the primary — the tenant every row is stamped with, which must never
+  // move — and these are folded into it (contracts/src/orgDomains.js), so their
+  // people sign in and are colleagues of the primary's. Publishable from
+  // /admin as `org.emailDomainAliases`; this is the bootstrap. Refused here
+  // rather than silently dropped later: a typo in a sign-in gate should fail
+  // the deploy, not lock a whole domain out.
+  const aliasInput = block.emailDomainAliases ?? [];
+  if (!Array.isArray(aliasInput) || aliasInput.some((d) => typeof d !== "string")) {
+    throw new Error(`kelabo config: env "${env}" emailDomainAliases must be an array of domains`);
+  }
+  const emailDomainAliases = [...new Set(aliasInput.map((d) => d.trim().toLowerCase()).filter(Boolean))];
+  for (const d of emailDomainAliases) {
+    if (!block.allowedEmailDomain) {
+      throw new Error(`kelabo config: env "${env}" sets emailDomainAliases but no allowedEmailDomain to fold them into`);
+    }
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) || isPublicEmailDomain(d) || d === String(block.allowedEmailDomain).toLowerCase()) {
+      throw new Error(`kelabo config: env "${env}" emailDomainAliases has "${d}", which cannot be an alias (not a domain, a public mailbox provider, or the primary itself)`);
+    }
+  }
+
   // The deployment's root administrator: the one identity that may grant
   // further admins, and the seed from which the whole roster grows
   // (`rest-api/src/admin.js`).
@@ -473,6 +495,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...block,
     env,
     organizationName,
+    emailDomainAliases,
     rootAdminEmail,
     // Resolved, not passed through: the default belongs to the one file that
     // owns env-specific values, so a deployment that omits the block and one

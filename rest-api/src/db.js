@@ -114,12 +114,25 @@ export function createDb({ config, client } = {}) {
    * cross-tenant kelabo is visible for the narrower reason that put it in
    * `crossTenant` at all: a specific invite, nothing broader.
    */
-  async function listKelabosByStatusForIdentity(identity, status) {
-    const tenantId = identity.split("@")[1]?.toLowerCase();
-    const [sameTenant, myInvites] = await Promise.all([
-      listKelabosByStatus(tenantId, status),
+  /*
+   * `tenantId` is the caller's organisation as `tenancy.js` resolves it (an
+   * alias domain folds into the primary); the raw domain is only the fallback
+   * for a caller that has none to pass. `colleagues: false` is a tenant whose
+   * members are strangers — a public mailbox domain under open registration —
+   * so its index contributes only what this identity hosts or has joined;
+   * anything else reaches them through an INVITE# row or not at all.
+   */
+  async function listKelabosByStatusForIdentity(identity, status, { tenantId, colleagues = true } = {}) {
+    const tenant = tenantId || identity.split("@")[1]?.toLowerCase();
+    const [tenantRows, myInvites] = await Promise.all([
+      listKelabosByStatus(tenant, status),
       listInvitesByIdentity(identity),
     ]);
+    const sameTenant = colleagues
+      ? tenantRows
+      : tenantRows.filter(
+          (m) => m.hostIdentity === identity || (m.participants || []).some((p) => p.identity === identity)
+        );
     const known = new Set(sameTenant.map((m) => m.kelaboId));
     const otherIds = [
       ...new Set(

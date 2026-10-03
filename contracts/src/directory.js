@@ -37,7 +37,7 @@
 // whose decimal separator is a comma — semicolons instead of commas. All three
 // are handled; the delimiter is chosen from the header line.
 
-import { domainOf, normaliseDomain, PUBLIC_EMAIL_DOMAINS, PUBLIC_EMAIL_SUFFIXES } from "./orgDomains.js";
+import { domainOf, isPublicEmailDomain, normaliseDomain } from "./orgDomains.js";
 
 /** Hard ceiling on one directory. Keeps one import inside one request. */
 export const MAX_DIRECTORY_ENTRIES = 20000;
@@ -73,12 +73,9 @@ export const directoryIndexSk = (tenantId) => `TENANT#${normaliseDomain(tenantId
  * Whether a domain may own a directory. A directory is shown to everybody
  * signed in at its tenant, so one keyed on gmail.com would publish a company's
  * staff list to every stranger with a Gmail address. Same refusal, same list,
- * as an organisation (orgDomains.js).
+ * as an organisation — the predicate itself lives in orgDomains.js.
  */
-export function isPublicEmailDomain(domain) {
-  const d = normaliseDomain(domain);
-  return PUBLIC_EMAIL_DOMAINS.has(d) || PUBLIC_EMAIL_SUFFIXES.some((s) => d.endsWith(s));
-}
+export { isPublicEmailDomain };
 
 const DOMAIN = /^(?=.{3,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 

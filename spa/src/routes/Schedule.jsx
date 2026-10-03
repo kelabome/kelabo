@@ -63,7 +63,7 @@ function scheduleError(e) {
 export default function Schedule() {
   const navigate = useNavigate()
   const toast = useToast()
-  const { identity } = useAuth()
+  const { identity, org } = useAuth()
   const [searchParams] = useSearchParams()
 
   const [title, setTitle] = useState('')
@@ -244,7 +244,7 @@ export default function Schedule() {
           <span className="label">Invite</span>
           <EmailPicker value={invitees} onChange={setInvitees} hostDomain={hostDomain} disabled={state === 'saving'} />
           <p className="form-note">
-            {hostDomain
+            {hostDomain && org?.colleagues !== false
               ? `Start typing to find people at ${hostDomain}. Any other address works too.`
               : 'Any email address works.'}
           </p>

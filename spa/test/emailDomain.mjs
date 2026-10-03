@@ -4,7 +4,7 @@
 // leaves the page has exactly one "@" and the deployment's domain — or it is
 // refused here, with a reason, instead of costing a 403 round-trip.
 import assert from 'node:assert/strict'
-import { normaliseDomain, resolveEmail } from '../src/emailDomain.js'
+import { canBeColleague, domainOfEmail, normaliseDomain, resolveEmail } from '../src/emailDomain.js'
 
 const D = 'acme.com'
 
@@ -84,5 +84,34 @@ assert.equal(resolveEmail('rico@', '').ok, false, 'nothing to complete a trailin
   assert.equal(r.completed, false)
 }
 assert.equal(resolveEmail('a@b@c.com', '').reason, 'not_an_email')
+
+// --- one organisation, several domains (issue #14) ------------------------
+{
+  const A = ['acme.io', 'acme.com.au']
+  assert.equal(resolveEmail('rico@acme.io', D, A).ok, true, 'an alias address signs in')
+  assert.equal(resolveEmail('rico@ACME.com.au', D, A).ok, true, 'aliases compare case-insensitively')
+  assert.equal(resolveEmail('rico', D, A).email, 'rico@acme.com', 'a bare name still completes to the primary')
+  assert.equal(resolveEmail('eve@gmail.com', D, A).reason, 'wrong_domain', 'anything else is still refused')
+}
+
+// --- who can be a colleague ------------------------------------------------
+assert.equal(domainOfEmail('Rico@Acme.IO'), 'acme.io')
+assert.equal(domainOfEmail('guest:123'), '')
+{
+  const org = { domains: ['acme.com', 'acme.io'], colleagues: true }
+  assert.equal(canBeColleague('bob@acme.io', 'ann@acme.com', org), true, 'an alias is the organisation')
+  assert.equal(canBeColleague('eve@evil.com', 'ann@acme.com', org), false)
+  assert.equal(canBeColleague('guest:1', 'ann@acme.com', org), false)
+}
+{
+  // Open registration: a company domain is its own organisation...
+  const open = { domains: null, colleagues: true }
+  assert.equal(canBeColleague('erin@startup.io', 'dan@startup.io', open), true)
+  assert.equal(canBeColleague('eve@other.io', 'dan@startup.io', open), false)
+  // ...and a public mailbox domain is nobody's.
+  const gmail = { domains: null, colleagues: false }
+  assert.equal(canBeColleague('mallory@gmail.com', 'alice@gmail.com', gmail), false)
+}
+assert.equal(canBeColleague('b@x.com', 'a@x.com', undefined), true, 'an older server: same domain, as before')
 
 console.log('emailDomain: ok')

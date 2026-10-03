@@ -97,7 +97,10 @@ const groups = {
     agentTokenTtlDays: cfg.auth?.agentTokenTtlDays ?? null,
     socialProviders: cfg.auth?.socialProviders ?? null,
   },
-  org: { allowedEmailDomain: cfg.allowedEmailDomain ?? "" },
+  org: {
+    allowedEmailDomain: cfg.allowedEmailDomain ?? "",
+    emailDomainAliases: cfg.emailDomainAliases?.length ? cfg.emailDomainAliases : null,
+  },
   contacts: { external: typeof cfg.contacts?.external === "boolean" ? cfg.contacts.external : null },
   retentionDays: cfg.retentionDays ?? null,
 };

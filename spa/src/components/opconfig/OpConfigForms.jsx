@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Button } from '../ui/Button'
 import { Switch } from '../ui/Switch'
 
@@ -507,19 +508,54 @@ export function RetentionGroup({ draft, set, fallbackFor }) {
   )
 }
 
+/**
+ * A list of domains, edited as one comma-separated box. The text is local
+ * while typing — splitting on every keystroke would swallow the comma before
+ * the next domain could be typed — and the parsed list is what is published.
+ * An empty box is `null` (not published: the deployment's list applies).
+ */
+export function DomainListRow({ title, sub, value, onChange, fallback }) {
+  const joined = Array.isArray(value) ? value.join(', ') : ''
+  const [text, setText] = useState(joined)
+  useEffect(() => { setText(joined) }, [joined]) // eslint-disable-line react-hooks/exhaustive-deps
+  const parse = t => {
+    const list = t.split(/[\s,]+/).map(d => d.trim().toLowerCase()).filter(Boolean)
+    return list.length ? [...new Set(list)] : null
+  }
+  return (
+    <Row title={title} sub={sub} fallback={Array.isArray(fallback) ? fallback.join(', ') || 'none' : fallback}>
+      <input
+        className="input"
+        value={text}
+        onChange={e => setText(e.target.value)}
+        onBlur={() => onChange(parse(text))}
+        placeholder="not published"
+        spellCheck={false}
+      />
+    </Row>
+  )
+}
+
 export function SignInDomainGroup({ draft, set, fallbackFor }) {
   return (
     <Group
-      title="Sign-in domain"
+      title="Sign-in domains"
       hint="The tenancy boundary: the single check that decides whether an address may hold an account here."
     >
       <TextRow
         title="Allowed email domain"
-        sub="Clearing this falls back to the deployment's configured domain — it does not open the deployment to everyone."
+        sub="The organisation's primary domain. Clearing this falls back to the deployment's configured domain — it does not open the deployment to everyone. Changing it moves the tenant everything is stamped with; add an alias below instead."
         wide
         value={draft.org?.allowedEmailDomain}
         fallback={fallbackFor('org.allowedEmailDomain')}
         onChange={v => set('org.allowedEmailDomain', v)}
+      />
+      <DomainListRow
+        title="Other domains of the organisation"
+        sub="Comma-separated, e.g. acme.io, acme.com.au. People at these sign in and are colleagues of everyone at the primary domain. Public mailbox domains (gmail.com…) are never accepted."
+        value={draft.org?.emailDomainAliases}
+        fallback={fallbackFor('org.emailDomainAliases')}
+        onChange={v => set('org.emailDomainAliases', v)}
       />
     </Group>
   )

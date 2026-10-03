@@ -1,12 +1,13 @@
 import { INTERNAL_JWT_AUD } from "@kelabo/contracts";
 import { signJwt } from "./jwt.js";
+import { createTenancy } from "./tenancy.js";
 
-export function createInternal({ config, secrets, fetchImpl = fetch }) {
+export function createInternal({ config, secrets, fetchImpl = fetch, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
   async function mintInternalJwt(identity) {
     const key = await secrets.getCookieKey(config);
     const now = Math.floor(Date.now() / 1000);
     return signJwt(
-      { sub: identity, tenant: identity.split("@")[1]?.toLowerCase(), role: "user", aud: INTERNAL_JWT_AUD, iat: now, exp: now + 60 },
+      { sub: identity, tenant: await tenancy.tenantOf(identity), role: "user", aud: INTERNAL_JWT_AUD, iat: now, exp: now + 60 },
       key
     );
   }
