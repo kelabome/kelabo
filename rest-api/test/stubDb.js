@@ -667,6 +667,30 @@ export function createDb() {
         (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("ACCESSOR#")
       );
     },
+    async putFollower(journeyId, follower) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `FOLLOWER#${follower.identity}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `FOLLOWER#${follower.identity}`,
+        ...follower,
+      });
+    },
+    async getFollower(journeyId, identity) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `FOLLOWER#${identity}`)) || null;
+    },
+    async removeFollower(journeyId, identity) {
+      journeys.delete(mkey(`JOURNEY#${journeyId}`, `FOLLOWER#${identity}`));
+    },
+    // Read-only here, as in src/db.js: legs and cursors are the Gateway's to
+    // write, and tests seed them with __putJourneyItem.
+    async listJourneyLegs(journeyId) {
+      return [...journeys.values()].filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("LEG#"));
+    },
+    async listJourneyReadCursors(journeyId, identity) {
+      const prefix = `READ#${identity}#`;
+      return [...journeys.values()]
+        .filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith(prefix))
+        .map((r) => ({ ...r, legId: String(r.SK).slice(prefix.length) }));
+    },
     // --- message board (docs 20 §7) — heads and #V# versions share the
     // BOARDMSG# prefix, told apart by whether the SK contains "#V#",
     // mirroring src/db.js exactly.
@@ -800,6 +824,16 @@ export function createDb() {
     async markJourneyReportFailed(journeyId, reportId, error) {
       const item = journeys.get(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`));
       if (item) Object.assign(item, { status: "failed", error });
+    },
+    async deleteJourneyReport(journeyId, reportId) {
+      journeys.delete(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`));
+    },
+    async deleteJourneyTimelineEntriesFor(journeyId, at, detailKey, id) {
+      for (const [k, i] of [...journeys.entries()]) {
+        if (i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith(`TL#${pad(at)}#`) && i.detail?.[detailKey] === id) {
+          journeys.delete(k);
+        }
+      }
     },
     async bumpContributor(journeyId, identity, field) {
       const k = mkey(`JOURNEY#${journeyId}`, `CONTRIBUTOR#${identity}`);

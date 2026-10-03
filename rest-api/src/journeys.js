@@ -152,13 +152,23 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
     const accessorMetas = await Promise.all(
       accessorLinks.map((l) => db.getJourneyMeta(String(l.PK).slice("JOURNEY#".length)))
     );
+    // Private only. An `ACCESSOR#` row on a public journey is the inert
+    // leftover of a private→public flip (§3.2): it grants nothing, and
+    // listing it here put the journey in this bucket *and* `public` below,
+    // so the rail summed its unread twice.
     const accessible = accessorMetas
-      .filter((m) => m && m.status === "active" && !mineIds.has(m.journeyId))
+      .filter((m) => m && m.status === "active" && m.visibility === "private" && !mineIds.has(m.journeyId))
       .map(toSummary);
 
-    const publicJourneys = (tenancy.hasColleagues(tenantId) ? tenantActive : [])
-      .filter((m) => m.visibility === "public" && !mineIds.has(m.journeyId))
-      .map(toSummary);
+    const publicMetas = (tenancy.hasColleagues(tenantId) ? tenantActive : []).filter(
+      (m) => m.visibility === "public" && !mineIds.has(m.journeyId)
+    );
+    // One point read each rather than a GSI: these are exactly the journeys
+    // the question is ever asked about, and they are already in hand.
+    const followed = await Promise.all(
+      publicMetas.map((m) => db.getFollower(m.journeyId, identity).then(Boolean, () => false))
+    );
+    const publicJourneys = publicMetas.map((m, i) => ({ ...toSummary(m), following: followed[i] }));
 
     const buckets = { mine, accessible, public: publicJourneys };
     return await withUnread(buckets, identity);
@@ -178,8 +188,13 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
 
   async function withUnread(buckets, identity) {
     const all = [...buckets.mine, ...buckets.accessible, ...buckets.public];
-    // Newest activity first, so the cap falls on journeys nobody is watching.
-    const ranked = [...all].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, UNREAD_SCAN_CAP);
+    // Journeys you are in before public ones you only browse, then newest
+    // activity first — so the cap falls on journeys nobody is watching, and a
+    // busy tenant's public list cannot push your own out of the scan.
+    const browsing = (j) => (j.visibility === "public" && j.following === false ? 1 : 0);
+    const ranked = [...all]
+      .sort((a, b) => browsing(a) - browsing(b) || (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, UNREAD_SCAN_CAP);
     const counted = new Map();
     await Promise.all(
       ranked.map(async (j) => {
@@ -189,7 +204,12 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
             db.listJourneyReadCursors(j.journeyId, identity),
           ]);
           const { unread, mentions } = journeyUnread(legs, cursorsByLeg(cursors));
-          counted.set(j.journeyId, { unread, mentions });
+          // A public journey you do not follow is one you can read, not one
+          // you are in (§3.4). Its conversation is not unread *to you* — that
+          // is what made every colleague's rail light up for journeys they
+          // had never opened. Being @mentioned in it still is.
+          const quiet = j.visibility === "public" && j.following === false;
+          counted.set(j.journeyId, { unread: quiet ? 0 : unread, mentions });
         } catch {
           // A journey whose rollup failed shows no badge. Showing a wrong one
           // is worse: an unread count is a claim about what you have not seen.
@@ -291,7 +311,40 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
   async function getJourney({ journeyId, identity }) {
     const meta = await requireJourney(journeyId);
     const role = await requireMember(meta, identity);
-    return { ...toSummary(meta), myRole: role };
+    const following =
+      meta.visibility === "public" && role !== "owner"
+        ? !!(await db.getFollower(journeyId, identity).catch(() => null))
+        : false;
+    return { ...toSummary(meta), myRole: role, following };
+  }
+
+  // --- following (public journeys only, docs 20 §3.4) -------------------------
+  //
+  // On a public journey every colleague is a member, so membership cannot be
+  // what decides who is *told* about it — that was every signed-in colleague
+  // on every message. Following is that decision, and only the person can make
+  // it: posting or being mentioned never follows anybody. It is not a write to
+  // the journey, so it touches neither META nor `updatedAt` (which orders the
+  // list by activity) and is allowed on a completed journey.
+
+  async function followJourney({ journeyId, identity }) {
+    const meta = await requireJourney(journeyId);
+    const role = await requireMember(meta, identity);
+    if (meta.visibility !== "public") throw err(409, "not_public");
+    // The lead is told about everything already; a row would be a second,
+    // meaningless way of saying so.
+    if (role === "owner") throw err(409, "journey_owner");
+    if (!(await db.getFollower(journeyId, identity))) {
+      await db.putFollower(journeyId, { identity, followedAt: Date.now() });
+    }
+    return { journeyId, following: true };
+  }
+
+  async function unfollowJourney({ journeyId, identity }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    await db.removeFollower(journeyId, identity);
+    return { journeyId, following: false };
   }
 
   async function patchJourney({ journeyId, identity, body }) {
@@ -626,25 +679,24 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
   // --- timeline (docs 20 §9) ---------------------------------------------------
 
   /**
-   * A private report's own timeline row is visible to the person who asked
-   * it and to nobody else (docs 20 §6.4) — the row, not merely its text.
-   * Redacting the summary was the first attempt and is kept as the second
-   * line of defence, but "someone asked something private, at 14:02" is
-   * itself the disclosure: on a three-person journey it names them.
+   * A private row is visible to nobody, the asker included (docs 20 §6.4).
+   * Private questions no longer write one. This hides the rows written before
+   * that, which were served back to their asker as "Question asked
+   * (private)": the timeline is the journey's shared record, and a line in it
+   * that only you can see read as though everyone could.
    *
    * The cursor is taken from the *unfiltered* page, so paging cannot loop:
    * `nextBefore` has to advance past rows this viewer cannot see, or the
    * next request returns the same window forever.
    */
-  const mayReadTimelineEntry = (entry, identity) =>
-    entry.visibility !== "private" || entry.actor === identity;
+  const mayReadTimelineEntry = (entry) => entry.visibility !== "private";
 
   async function getTimeline({ journeyId, identity, type, before, limit }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
     const items = await db.listJourneyTimeline(journeyId, { type, before, limit: limit || 50 });
     const all = items.map(({ PK, SK, ...e }) => e);
-    const entries = all.filter((e) => mayReadTimelineEntry(e, identity));
+    const entries = all.filter(mayReadTimelineEntry);
     const nextBefore = all.length ? all[all.length - 1].at : undefined;
     return { entries, ...(nextBefore !== undefined ? { nextBefore } : {}) };
   }
@@ -927,28 +979,36 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
       requestedAt: now,
       status: "pending",
       visibility: isPrivate ? "private" : "public",
+      // Whether this ask is in META's `reportCount`, so removing it later
+      // takes back exactly what was added. Rows from before private asks
+      // stopped being counted have no flag and were counted.
+      ...(isPrivate ? { counted: false } : {}),
     });
-    await db.updateJourneyMeta(journeyId, { reportCount: (meta.reportCount || 0) + 1, updatedAt: now });
-    // The timeline is a shared surface, so a private report's row is stamped
-    // private and served only back to the person who asked it (docs 20 §6.4,
-    // `mayReadTimelineEntry`). The summary is redacted as well as filtered:
-    // one control between a private question and everyone who can read the
-    // journey is not enough for a surface this easy to add a new reader to.
-    // Reads "Question asked", not "Report requested": the SPA displays this
-    // whole feature as **Questions** (docs 20 §13's rename note), and a
-    // timeline sentence using the stored word would read as a bug sitting
-    // next to a tab that says something else — the same fix `writeStatusVersion`
-    // already needed for health's own display words. `type` stays "report".
-    await db.putJourneyTimelineEntry(journeyId, {
-      type: "report",
-      summary: isPrivate ? "Question asked (private)" : `Question asked: ${question.slice(0, 80)}`,
-      actor: identity,
-      at: now,
-      detail: { reportId },
-      ...(isPrivate ? { visibility: "private" } : {}),
-    });
-    // Counts the act of asking, including a request that later fails.
-    await db.bumpContributor(journeyId, identity, "reportRequestCount").catch(() => {});
+    // A private question leaves no trace on anything another member can read
+    // (docs 20 §6.4): no timeline row, no `reportCount`, no contributor
+    // rollup. Each of those said "someone asked something private" — and
+    // the contributor row said who — which is the disclosure the private
+    // switch exists to prevent. It is also not activity on the journey, so
+    // `updatedAt` stays where it was and the journey does not float up
+    // everyone's list.
+    if (!isPrivate) {
+      await db.updateJourneyMeta(journeyId, { reportCount: (meta.reportCount || 0) + 1, updatedAt: now });
+      // Reads "Question asked", not "Report requested": the SPA displays this
+      // whole feature as **Questions** (docs 20 §13's rename note), and a
+      // timeline sentence using the stored word would read as a bug sitting
+      // next to a tab that says something else — the same fix
+      // `writeStatusVersion` already needed for health's own display words.
+      // `type` stays "report".
+      await db.putJourneyTimelineEntry(journeyId, {
+        type: "report",
+        summary: `Question asked: ${question.slice(0, 80)}`,
+        actor: identity,
+        at: now,
+        detail: { reportId },
+      });
+      // Counts the act of asking, including a request that later fails.
+      await db.bumpContributor(journeyId, identity, "reportRequestCount").catch(() => {});
+    }
     try {
       await internal.requestJourneyReport(journeyId, { reportId, question }, identity);
     } catch (e) {
@@ -995,6 +1055,39 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
     return rest;
   }
 
+  /**
+   * Remove a question you asked (docs 20 §6.6). The asker's alone — not the
+   * lead's, even for a public one: it is somebody's own question and answer,
+   * and the lead already cannot read a private one, let alone remove it.
+   *
+   * Deleted outright, with the timeline row that indexes it, rather than
+   * soft-removed like a document: a document is the journey's record and its
+   * removal is part of that record, while a question is one person's ask.
+   * Allowed on a completed journey for the same reason a read cursor is —
+   * it is not a write to the journey's content, and refusing it would leave a
+   * private question its asker could never take back.
+   *
+   * Anyone but the asker gets the same 404 as a question that does not exist,
+   * so a reportId cannot be probed for whose it is.
+   */
+  async function removeReport({ journeyId, identity, reportId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const report = await db.getJourneyReport(journeyId, reportId);
+    if (!report || report.requestedBy !== identity) throw err(404, "report_not_found");
+    await db.deleteJourneyReport(journeyId, reportId);
+    if (report.requestedAt) {
+      await db.deleteJourneyTimelineEntriesFor(journeyId, report.requestedAt, "reportId", reportId).catch(() => {});
+    }
+    // Not `updatedAt`: taking a question back is not activity on the journey,
+    // and bumping it would float the journey up everyone's list. And only if
+    // the ask was counted in the first place (private ones are not).
+    if (report.counted !== false) {
+      await db.updateJourneyMeta(journeyId, { reportCount: Math.max(0, (meta.reportCount || 0) - 1) });
+    }
+    return { journeyId, reportId, removed: true };
+  }
+
   // --- contributors (docs 20 §10) ----------------------------------------------
 
   async function listContributors({ journeyId, identity }) {
@@ -1020,6 +1113,8 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
     listAccessors,
     addAccessor,
     removeAccessor,
+    followJourney,
+    unfollowJourney,
     linkKelabo,
     unlinkKelabo,
     listLinkedKelabos,
@@ -1041,6 +1136,7 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
     requestReport,
     listReports,
     getReport,
+    removeReport,
     listContributors,
   };
 }

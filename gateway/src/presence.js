@@ -106,11 +106,12 @@ export function createPresence(c) {
     return entry.streams.size > 0;
   }
 
-  /** Everyone from this tenant holding a stream right now. The audience for a
-   *  public journey, whose membership is a tenant match computed at read time
-   *  (docs 20 §3.2) and which the Gateway therefore cannot enumerate — but it
-   *  does not have to: an offline person cannot be pushed to anyway, and their
-   *  badge is correct the moment they load a page. */
+  /** Everyone from this tenant holding a stream right now. Bounds a public
+   *  journey's audience (docs 20 §19.9): its followers and the people a message
+   *  mentions are narrowed to this set. It is never the audience by itself.
+   *  Being a colleague makes you a member of a public journey, not someone
+   *  waiting to hear about it. An offline person cannot be pushed to anyway,
+   *  and their badge is correct the moment they load a page. */
   function tenantOnline(tenantId) {
     if (!hasColleagues(tenantId)) return new Set();
     return new Set(c.state.presenceByTenant.get(tenantId) || []);
@@ -137,6 +138,20 @@ export function createPresence(c) {
       if (sendTo(identity, { kind: "journey_message", ...payload })) reached++;
     }
     return reached;
+  }
+
+  /**
+   * Tell one person's own streams that they read a leg (docs 20 §19.9).
+   *
+   * Only the reader, never the journey: what changed is their cursor, which
+   * nobody else's badge depends on. It is what lets the rail in another tab,
+   * or on another device, drop a badge the moment it was read here rather
+   * than a poll later. Like `journey_message` it carries no count — the
+   * receiver asks the server for one.
+   */
+  function notifyJourneyRead(identity, payload) {
+    // The session identity, exactly as `subscribe` keyed the stream by it.
+    return sendTo(identity, { kind: "journey_read", ...payload });
   }
 
   /**
@@ -327,5 +342,5 @@ export function createPresence(c) {
     c.log("ring_cancelled", { kelaboId, reason });
   }
 
-  return { subscribe, refreshKelaboState, isInKelabo, isOnline, onlineIdentities, tenantOnline, notifyJourney, ring, ringAnswer, ringCancel };
+  return { subscribe, refreshKelaboState, isInKelabo, isOnline, onlineIdentities, tenantOnline, notifyJourney, notifyJourneyRead, ring, ringAnswer, ringCancel };
 }

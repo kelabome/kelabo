@@ -199,6 +199,10 @@ export const api = {
   addJourneyAccessor: (id, identity) => apiRequest(`/journeys/${id}/accessors`, { method: 'POST', body: { identity } }),
   removeJourneyAccessor: (id, identity) =>
     apiRequest(`/journeys/${id}/accessors/${encodeURIComponent(identity)}`, { method: 'DELETE' }),
+  // Public journeys only, and only ever yourself (docs 20 §3.4): following is
+  // what puts a public journey's messages on your rail and pushes them to you.
+  followJourney: id => apiRequest(`/journeys/${id}/follow`, { method: 'POST' }),
+  unfollowJourney: id => apiRequest(`/journeys/${id}/follow`, { method: 'DELETE' }),
 
   listJourneyKelabos: id => apiRequest(`/journeys/${id}/kelabos`),
   linkJourneyKelabo: (id, kelaboId) => apiRequest(`/journeys/${id}/kelabos`, { method: 'POST', body: { kelaboId } }),
@@ -236,6 +240,8 @@ export const api = {
     apiRequest(`/journeys/${id}/reports`, { method: 'POST', body: { question, visibility } }),
   listJourneyReports: id => apiRequest(`/journeys/${id}/reports`),
   getJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`),
+  // Your own question only (docs 20 §6.6); deleted outright, answer and all.
+  removeJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`, { method: 'DELETE' }),
   listJourneyContributors: id => apiRequest(`/journeys/${id}/contributors`),
 }
 

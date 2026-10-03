@@ -19,6 +19,7 @@ import { apply, emptyPresence, isOnline, isInKelabo } from './presenceStore.js'
  * identity) does not.
  */
 const RING_KINDS = new Set(['ring_incoming', 'ring_answer', 'ring_cancelled'])
+const JOURNEY_KINDS = new Set(['journey_message', 'journey_read'])
 
 // A stream that has gone quiet for this long is treated as dead and reopened.
 // The server pings every 25s, so a minute is two missed pings — long enough
@@ -61,7 +62,9 @@ export function usePresence(identity, onRing, onJourneyMessage) {
         // Journey leg messages ride it too (docs 20 §19.9), for the same
         // reason: this stream is already open on every page, and a badge is
         // needed precisely for the journey you are NOT currently subscribed to.
-        if (evt.kind === 'journey_message') { onJourneyRef.current?.(evt); return }
+        // `journey_read` is the same channel's other half: you read a leg in
+        // another tab or on another device, and the badge here is now stale.
+        if (JOURNEY_KINDS.has(evt.kind)) { onJourneyRef.current?.(evt); return }
         setPresence(prev => apply(prev, evt))
       })
 

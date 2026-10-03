@@ -913,8 +913,8 @@ function AskModal({ onClose, onAsk }) {
         <div className="sr-main">
           <div className="sr-title">Only me</div>
           <div className="sr-sub">
-            Keeps the question and its answer to you — not the other members, not the journey's lead. The
-            timeline records that you asked something, never what.
+            Keeps the question and its answer to you — not the other members, not the journey's lead. It
+            leaves nothing on the timeline or in the question count, and you can remove it later.
           </div>
         </div>
         <Switch checked={isPrivate} onChange={setIsPrivate} ariaLabel="Only me" />
@@ -927,7 +927,7 @@ function AskModal({ onClose, onAsk }) {
   )
 }
 
-function ReportRow({ r }) {
+function ReportRow({ r, onRemove }) {
   const [open, setOpen] = useState(false)
   const pending = r.status === 'pending'
 
@@ -965,6 +965,19 @@ function ReportRow({ r }) {
           ? <span className="con-spinner" aria-hidden="true"></span>
           : <span className="con-mark"><Icon name={r.status === 'failed' ? 'x-circle' : 'sparkles'} size={14} /></span>}
         <span className="con-title">{r.question}</span>
+        {/* The asker's alone (docs 20 §6.6) — not the lead's. Not while it is
+            still being answered: the row on screen is a placeholder then. */}
+        {onRemove && !pending && (
+          <button
+            className="remove-btn"
+            onClick={e => { e.stopPropagation(); onRemove(r) }}
+            onKeyDown={e => e.stopPropagation()}
+            title="Remove this question"
+            aria-label="Remove this question"
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        )}
         {!pending && <span className="con-caret"><Icon name="chevron-right" size={13} /></span>}
       </div>
       <div className="con-sub">
@@ -984,6 +997,8 @@ function ReportsTab({ journeyId, isMember, isActive }) {
   const [reports, setReports] = useState(null)
   const [showAsk, setShowAsk] = useState(false)
   const toast = useToast()
+  const confirm = useConfirm()
+  const { identity } = useAuth()
 
   const load = () => api.listJourneyReports(journeyId).then(d => setReports(d.reports || [])).catch(() => setReports([]))
   useEffect(() => { load() }, [journeyId]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1003,6 +1018,24 @@ function ReportsTab({ journeyId, isMember, isActive }) {
     load()
   }
 
+  const remove = async r => {
+    const ok = await confirm({
+      title: 'Remove this question?',
+      body: r.visibility === 'private'
+        ? 'The question and its answer are deleted. Nobody else could see them, and now nobody can.'
+        : 'The question and its answer are deleted for everyone, along with their line on the timeline.',
+      confirmLabel: 'Remove',
+    })
+    if (!ok) return
+    try {
+      await api.removeJourneyReport(journeyId, r.reportId)
+      setReports(list => (list || []).filter(x => x.reportId !== r.reportId))
+      toast('Question removed')
+    } catch {
+      toast('Could not remove that question')
+    }
+  }
+
   return (
     <section className="anim-in vstack-sm journey-tab">
       {isMember && isActive && (
@@ -1012,7 +1045,9 @@ function ReportsTab({ journeyId, isMember, isActive }) {
       )}
       {reports === null && <SkeletonRows n={2} />}
       {reports && reports.length === 0 && <div className="empty">No questions yet — ask one about this journey and the answer will appear here.</div>}
-      {(reports || []).map(r => <ReportRow key={r.reportId} r={r} />)}
+      {(reports || []).map(r => (
+        <ReportRow key={r.reportId} r={r} onRemove={isMember && identity?.email && identity.email.toLowerCase() === String(r.requestedBy || '').toLowerCase() ? remove : null} />
+      ))}
       {showAsk && <AskModal onClose={() => setShowAsk(false)} onAsk={ask} />}
     </section>
   )
@@ -1331,6 +1366,25 @@ export default function JourneyDetail() {
   }
   const saveAvatar = async body => { await api.patchJourney(id, body); reload() }
 
+  // The rail's counts change with this — a followed journey's unread starts
+  // counting, an unfollowed one's stops — so it is told, not left to its poll.
+  const { reloadJourneys } = useAppData()
+  const [followBusy, setFollowBusy] = useState(false)
+  const toggleFollow = async () => {
+    const next = !journey.following
+    setFollowBusy(true)
+    try {
+      await (next ? api.followJourney(id) : api.unfollowJourney(id))
+      setJourney(j => ({ ...j, following: next }))
+      reloadJourneys()
+      toast(next ? 'Following — its messages will reach your rail' : 'Unfollowed — you can still read it here')
+    } catch {
+      toast(next ? 'Could not follow this journey' : 'Could not unfollow this journey')
+    } finally {
+      setFollowBusy(false)
+    }
+  }
+
   // The dialog, not a bare prompt: accessors are found by name the same way
   // invitees are (EmailPicker → /people/search, docs 18 §4.8), and several
   // can be added at once.
@@ -1391,6 +1445,23 @@ export default function JourneyDetail() {
             <span className={'chip' + (journey.status === 'completed' ? ' chip-ended' : ' chip-live')}>{journey.status}</span>
             <span className="chip">{journey.visibility}</span>
             <JourneyHealthChip health={journey.health} />
+            {/* Following (docs 20 §3.4): only a public journey needs it — a
+                private one's members are its roster — and never its lead,
+                who is told about everything already. */}
+            {journey.visibility === 'public' && isMember && !isOwner && (
+              <Button
+                size="sm"
+                variant={journey.following ? 'outline' : 'primary'}
+                onClick={toggleFollow}
+                disabled={followBusy}
+                title={journey.following
+                  ? 'Stop putting its messages on your rail. You can still read it.'
+                  : 'Put its messages on your rail and be told when they arrive.'}
+                style={{ marginLeft: 'auto' }}
+              >
+                {journey.following ? 'Following' : 'Follow'}
+              </Button>
+            )}
           </div>
           <p className="page-sub">
             Lead: {journey.ownerIdentity} · {journey.kelaboCount} kelabo{journey.kelaboCount === 1 ? '' : 's'}
