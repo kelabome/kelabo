@@ -3,6 +3,7 @@ import { COOKIE_OIDC } from "@kelabo/contracts";
 import { signJwt, verifyJwt } from "./jwt.js";
 import { serializeCookie, clearCookie } from "./cookies.js";
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
 const PROVIDERS = {
   google: {
@@ -24,11 +25,10 @@ const PROVIDERS = {
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const OIDC_COOKIE_TTL = 600;
 
-export function createOidc({ config, secrets, opConfig, fetchImpl = fetch }) {
-  // The allowed sign-in domain is published operational config, resolved per
-  // callback — the same source the OTP path reads, so the two cannot disagree
-  // about who may hold an account here.
-  const settings = async () => (opConfig ? await opConfig.effective() : config);
+export function createOidc({ config, secrets, opConfig, fetchImpl = fetch, tenancy = createTenancy({ config, opConfig }) }) {
+  // The allowed sign-in domains are published operational config, resolved per
+  // callback through `tenancy` — the same gate the OTP path uses, so the two
+  // cannot disagree about who may hold an account here.
   function providerConfig(provider) {
     const p = PROVIDERS[provider];
     if (!p || !config.auth.socialProviders.includes(provider)) {
@@ -117,13 +117,9 @@ export function createOidc({ config, secrets, opConfig, fetchImpl = fetch }) {
     if (claims.email_verified === false) throw err(401, "oidc_failed", "email not verified");
     const email = (claims.email || "").toLowerCase();
     if (!email) throw err(401, "oidc_failed", "no email claim");
-    const domain = email.split("@")[1];
-    // Empty allow-list = open registration (tenant = the email's own domain),
-    // matching the OTP path.
-    const allowed = (await settings()).allowedEmailDomain;
-    if (allowed && domain !== allowed.toLowerCase()) {
-      throw err(403, "domain_not_allowed");
-    }
+    // The same gate as the OTP path (tenancy.js): any of the organisation's
+    // domains, or anyone when the allow-list is empty (open registration).
+    if (!(await tenancy.allows(email))) throw err(403, "domain_not_allowed");
     return { email, clearCookie: clear };
   }
 

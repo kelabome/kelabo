@@ -3,6 +3,7 @@ import { COOKIE_SESSION, COOKIE_REFRESH, COOKIE_PARTICIPANT, sessionCookieSchema
 import { randomToken, sha256 } from "./jwt.js";
 import { mintCookie, readCookie, serializeCookie, clearCookie } from "./cookies.js";
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
 /**
  * The display name for a user row, from the one place that decides it.
@@ -25,7 +26,7 @@ export function resolveDisplayName(user, identity) {
   return chosen ?? (user?.displayName || identity.split("@")[0]);
 }
 
-export function createSessions({ config, db, secrets, opConfig }) {
+export function createSessions({ config, db, secrets, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
   /**
    * Token lifetimes, published (contracts/src/opconfig.js) and read at the
    * moment a token is minted.
@@ -88,7 +89,7 @@ export function createSessions({ config, db, secrets, opConfig }) {
   }
 
   async function establishSession(email, displayName) {
-    const tenantId = email.split("@")[1].toLowerCase();
+    const tenantId = await tenancy.tenantOf(email);
     const name = displayName || email.split("@")[0];
     await db.upsertUser({ email, displayName: name, tenantId });
     // The user row this just wrote IS the record the invitee autocomplete
@@ -123,17 +124,26 @@ export function createSessions({ config, db, secrets, opConfig }) {
       throw err(401, "refresh_invalid");
     }
     await db.setRefreshRevoked(tokenId, true);
-    const user = await db.getUser(item.identity);
+    let user = await db.getUser(item.identity);
+    // The tenant is recomputed, never carried forward from the token: a domain
+    // that became one of the organisation's aliases (or stopped being one)
+    // since this chain began must take effect on the next refresh, not after
+    // the chain's whole lifetime. The user row is what people search and the
+    // colleague list read (tenant-index), so it follows too.
+    const tenantId = await tenancy.tenantOf(item.identity);
+    if (user && user.tenantId !== tenantId) {
+      user = (await db.upsertUser({ email: item.identity, displayName: user.displayName, tenantId })) || user;
+    }
     const displayName = resolveDisplayName(user, item.identity);
-    const session = await mintSessionCookie(item.identity, item.tenantId);
-    const rotated = await mintRefreshCookie(item.identity, item.tenantId, {
+    const session = await mintSessionCookie(item.identity, tenantId);
+    const rotated = await mintRefreshCookie(item.identity, tenantId, {
       chainId: item.chainId,
       rotatedFrom: tokenId,
     });
     return {
       cookies: [session, rotated],
       identity: { email: item.identity, displayName },
-      tenantId: item.tenantId,
+      tenantId,
     };
   }
 

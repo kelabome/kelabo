@@ -4,7 +4,7 @@ import {
   MAX_DIRECTORY_BYTES,
   parseDirectoryFile,
 } from "@kelabo/contracts/directory";
-import { domainOf, normaliseDomain } from "@kelabo/contracts/org-domains";
+import { domainOf, normaliseDomain, orgDomains } from "@kelabo/contracts/org-domains";
 import { err } from "./errors.js";
 
 /**
@@ -42,8 +42,12 @@ import { err } from "./errors.js";
 export function createDirectoryAdmin({ config, db, admin, people, opConfig, log = () => {}, now = () => Date.now() }) {
   const settings = async () => (opConfig ? await opConfig.effective() : config);
 
-  function tenantFrom(value) {
-    const raw = normaliseDomain(value);
+  // An alias domain is the organisation's primary (orgDomains.js): a directory
+  // "for acme.io" is acme.com's directory, the one its people search.
+  async function tenantFrom(value) {
+    const org = orgDomains(await settings());
+    const given = normaliseDomain(value);
+    const raw = org.primary && org.aliases.includes(given) ? org.primary : given;
     if (!raw) throw err(400, "bad_tenant", "a tenant (email domain) is required");
     if (isPublicEmailDomain(raw)) {
       throw err(400, "public_domain", `${raw} is a public mailbox provider; a directory there would be visible to strangers`);
@@ -127,13 +131,13 @@ export function createDirectoryAdmin({ config, db, admin, people, opConfig, log 
 
   async function preview({ identity, body }) {
     await admin.requireAdmin(identity);
-    const tenant = tenantFrom(body?.tenantId);
+    const tenant = await tenantFrom(body?.tenantId);
     return publicPlan(await plan(tenant, fileFrom(body)));
   }
 
   async function apply({ identity, body }) {
     const by = await admin.requireAdmin(identity);
-    const tenant = tenantFrom(body?.tenantId);
+    const tenant = await tenantFrom(body?.tenantId);
     const p = await plan(tenant, fileFrom(body));
     if (!p.counts.entries) throw err(400, "no_entries", "the file has no usable addresses; to empty a directory, remove it");
     if (p.needsForce && body?.force !== true) {
@@ -188,7 +192,7 @@ export function createDirectoryAdmin({ config, db, admin, people, opConfig, log 
   /** One directory's entries, for the console to show or download back. */
   async function entries({ identity, tenantId }) {
     await admin.requireAdmin(identity);
-    const tenant = tenantFrom(tenantId);
+    const tenant = await tenantFrom(tenantId);
     const rows = await db.listDirectory(tenant);
     return {
       tenantId: tenant,
@@ -201,7 +205,7 @@ export function createDirectoryAdmin({ config, db, admin, people, opConfig, log 
   /** Remove a tenant's directory entirely. Registered users are untouched. */
   async function remove({ identity, tenantId }) {
     const by = await admin.requireAdmin(identity);
-    const tenant = tenantFrom(tenantId);
+    const tenant = await tenantFrom(tenantId);
     const rows = await db.listDirectory(tenant);
     await db.deleteDirectoryEntries(tenant, rows.map((r) => r.email));
     await db.deleteDirectoryIndex(tenant);

@@ -22,6 +22,8 @@ import { createLlmProvider } from "./agent/llm.js";
 import { llmApiKeyFrom } from "@kelabo/contracts/credentials";
 import { ASSISTANT_NAME, parseMentionHandles, resolveMentions, stripAddress } from "@kelabo/contracts";
 import { withLlmRetry } from "./agent/llmRetry.js";
+import { hasColleagues, orgOf } from "./tenancy.js";
+import { tenantOf } from "@kelabo/contracts/org-domains";
 
 const journeysTable = (c) => c.config.tableNames.journeys;
 export const journeyPk = (id) => `JOURNEY#${id}`;
@@ -204,7 +206,13 @@ export async function resolveJourneyAccess(c, meta, { identity, tenant } = {}) {
   // never "anyone signed in". A public journey deliberately does not consult
   // the ACCESSOR# roster: stale rows left by a private->public flip are inert
   // for access, and reading them here would quietly resurrect them.
-  if (meta.visibility === "public") return "member";
+  // ...and a public mailbox tenant is not an organisation, so there "public"
+  // grants nobody but the owner (hasColleagues). With no tenant on either side
+  // there is nothing to judge, and the check is skipped as above.
+  if (meta.visibility === "public") {
+    const t = meta.tenantId || tenant;
+    return !t || hasColleagues(t) ? "member" : "none";
+  }
   try {
     return (await getJourneyAccessor(c, meta.journeyId, identity)) ? "member" : "none";
   } catch (err) {
@@ -1132,13 +1140,15 @@ export async function resolveJourneyMentions(c, journeyId, legId, meta, text) {
   if (!handles.length) return [];
   const people = await journeyPeople(c, journeyId, legId, meta);
   const resolved = resolveMentions(text, people);
-  if (meta?.visibility !== "public" || !meta?.tenantId) return resolved;
+  if (meta?.visibility !== "public" || !meta?.tenantId || !hasColleagues(meta.tenantId)) return resolved;
   // On a public journey every same-tenant identity is a member by definition,
-  // so a full address is enough on its own — see `journeyPeople`.
+  // so a full address is enough on its own — see `journeyPeople`. An alias
+  // domain's address is the organisation's too (tenancy.js).
   const tenant = String(meta.tenantId).toLowerCase();
+  const org = await orgOf(c);
   const out = [...resolved];
   for (const handle of handles) {
-    if (handle.includes("@") && handle.split("@")[1] === tenant && !out.includes(handle)) out.push(handle);
+    if (handle.includes("@") && tenantOf(handle, org) === tenant && !out.includes(handle)) out.push(handle);
   }
   return out;
 }

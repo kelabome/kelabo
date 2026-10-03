@@ -3,6 +3,7 @@ import { RTC_MODES } from "@kelabo/contracts";
 import { err } from "./errors.js";
 import { mintCookie } from "./cookies.js";
 import { createPeople } from "./people.js";
+import { createTenancy } from "./tenancy.js";
 
 /**
  * Scheduled kelabos, invitations and RSVPs.
@@ -19,10 +20,19 @@ import { createPeople } from "./people.js";
  * ever gave a name. One query over the prefix lists everybody, whichever they
  * are.
  */
-export function createScheduling({ config, db, mailer, internal, opConfig, secrets, people = createPeople({ db }) }) {
+export function createScheduling({
+  config,
+  db,
+  mailer,
+  internal,
+  opConfig,
+  secrets,
+  people = createPeople({ db }),
+  tenancy = createTenancy({ config, opConfig }),
+}) {
   // Conference default and retention, published (contracts/src/opconfig.js).
   const settings = async () => (opConfig ? await opConfig.effective() : config);
-  const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
+  const tenantOf = (identity) => tenancy.tenantOf(identity);
 
   // A conditional write that lost its guard surfaces either as a bare
   // ConditionalCheckFailedException or, inside a transaction, as a
@@ -84,7 +94,7 @@ export function createScheduling({ config, db, mailer, internal, opConfig, secre
   }
 
   async function schedule({ identity, displayName, body }) {
-    const tenantId = tenantOf(identity);
+    const tenantId = await tenantOf(identity);
     const now = Date.now();
     const kelaboId = randomUUID();
     const invitees = [...new Set((body.invitees || []).map((e) => e.trim().toLowerCase()).filter(Boolean))];
@@ -197,7 +207,7 @@ export function createScheduling({ config, db, mailer, internal, opConfig, secre
     // what the rail shows, and being invited to one is what puts it in yours
     // — including an invite from a kelabo hosted at someone else's tenant
     // entirely, which sameTenant's index can never reach (docs 18 §2.8).
-    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "scheduled");
+    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "scheduled", await tenancy.scope(identity));
     const items = [...sameTenant, ...crossTenant];
     const withInvites = await Promise.all(
       items.map(async (m) => {
@@ -628,7 +638,11 @@ export function createScheduling({ config, db, mailer, internal, opConfig, secre
    * may be invited — any address can be.
    */
   async function suggestPeople({ identity, prefix }) {
-    const tenantId = tenantOf(identity);
+    const tenantId = await tenantOf(identity);
+    // Nobody to suggest under a public mailbox tenant: everyone else at
+    // gmail.com is a stranger, and searching them by name is a directory of
+    // the internet (tenancy.hasColleagues). Any address can still be typed.
+    if (!tenancy.hasColleagues(tenantId)) return { suggestions: [] };
     const q = (prefix || "").trim();
     // Surface favourite state on each result so a colleague can be pinned or
     // unpinned straight from a search result (docs 18 §4.1a) without a second

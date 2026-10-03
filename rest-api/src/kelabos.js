@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { RTC_MODES } from "@kelabo/contracts";
 import { entitlementFor } from "@kelabo/contracts/entitlement";
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
-export function createKelabos({ config, db, internal, credentials, opConfig }) {
+export function createKelabos({ config, db, internal, credentials, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
   // Conference defaults and the retention window are published operational
   // config (contracts/src/opconfig.js), read per request. What is stamped on a
   // kelabo at creation stays stamped: publishing a new default changes what the
@@ -35,7 +36,7 @@ export function createKelabos({ config, db, internal, credentials, opConfig }) {
   }
 
   async function createKelabo({ identity, body }) {
-    const tenantId = identity.split("@")[1].toLowerCase();
+    const tenantId = await tenancy.tenantOf(identity);
     const now = Date.now();
     const kelaboId = randomUUID();
     // Read once, here: whatever this kelabo is created with is stamped on it
@@ -89,7 +90,7 @@ export function createKelabos({ config, db, internal, credentials, opConfig }) {
   }
 
   async function listKelabos({ identity }) {
-    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "active");
+    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "active", await tenancy.scope(identity));
     // An unlisted kelabo (a private call) exists only for the people in it:
     // the host and anyone who has joined. Everyone else's list simply does not
     // contain it — the join link is the sole way in. This is the tenant-wide

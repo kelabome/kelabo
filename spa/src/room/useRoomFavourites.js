@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { useAuth } from '../auth'
+import { canBeColleague } from '../emailDomain.js'
 
 /**
  * The caller's favourites, for the kelabo room's per-tile star (docs 18 §4).
@@ -16,7 +18,9 @@ import { api } from '../api'
 export function useRoomFavourites(me) {
   const [favs, setFavs] = useState(() => new Set())
   const meIsGuest = !me || me.startsWith('guest:') || !me.includes('@')
-  const myDomain = meIsGuest ? '' : me.split('@')[1].toLowerCase()
+  // Which addresses are this organisation's (issue #14): an alias domain is a
+  // colleague, a public mailbox tenant has none. Same rule the server applies.
+  const { org } = useAuth()
   const busy = useRef(new Set())
 
   useEffect(() => {
@@ -31,8 +35,8 @@ export function useRoomFavourites(me) {
   const canFavourite = useCallback((id) => {
     if (meIsGuest || !id || id === me) return false
     if (id.startsWith('guest:') || !id.includes('@')) return false
-    return id.split('@')[1].toLowerCase() === myDomain
-  }, [me, meIsGuest, myDomain])
+    return canBeColleague(id, me, org)
+  }, [me, meIsGuest, org])
 
   const has = useCallback((id) => favs.has(id), [favs])
 

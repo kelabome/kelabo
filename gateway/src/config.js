@@ -16,6 +16,7 @@ function fromEnv() {
     region: e.KELABO_REGION || e.AWS_REGION || "us-east-1",
     tenantId: e.KELABO_TENANT_ID || "",
     allowedEmailDomain: e.KELABO_TENANT_ID || "",
+    emailDomainAliases: (e.KELABO_EMAIL_DOMAIN_ALIASES || "").split(",").map((d) => d.trim()).filter(Boolean),
     portalUrl: e.KELABO_PORTAL_URL || "http://localhost:5173",
     // Every host that serves the app and therefore talks to this Gateway from a
     // browser. The portal, and any alias it also answers on — an apex beside a
@@ -112,6 +113,7 @@ function fromBase(base) {
     region: base.region,
     tenantId: base.allowedEmailDomain || "",
     allowedEmailDomain: base.allowedEmailDomain || "",
+    emailDomainAliases: base.emailDomainAliases || [],
     portalUrl: base.portalUrl,
     allowedOrigins: [base.portalUrl, ...(base.portalAliases ?? []).map((d) => `https://${d}`)].filter(Boolean),
     tableNames: {

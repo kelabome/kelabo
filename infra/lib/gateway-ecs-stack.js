@@ -122,6 +122,7 @@ export class GatewayEcsStack extends Stack {
           KELABO_GATEWAY_BASE_URL: cfg.gatewayBaseUrl,
           KELABO_COOKIE_DOMAIN: cfg.cookieDomain,
           KELABO_TENANT_ID: cfg.allowedEmailDomain,
+          KELABO_EMAIL_DOMAIN_ALIASES: (cfg.emailDomainAliases || []).join(","),
           KELABO_TABLE_KELABOS: names.kelabos,
           KELABO_TABLE_HISTORY: names.history,
           KELABO_TABLE_MCP: names.mcp,

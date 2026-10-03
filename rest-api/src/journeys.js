@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { JOURNEY_VISIBILITIES, journeyUnread, cursorsByLeg } from "@kelabo/contracts";
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
 /**
  * Journey (docs 20): a persistent container linking related kelabos so
@@ -15,8 +16,8 @@ import { err } from "./errors.js";
  * grants the same rights minus managing that roster, which — like delete,
  * visibility and complete/reopen — stays owner-only (docs 20 §3.3).
  */
-export function createJourneys({ config, db, internal }) {
-  const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
+export function createJourneys({ config, db, internal, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
+  const tenantOf = (identity) => tenancy.tenantOf(identity);
 
   // A conditional write that lost its guard surfaces either as a bare
   // ConditionalCheckFailedException or, inside a transaction, as a
@@ -59,7 +60,15 @@ export function createJourneys({ config, db, internal }) {
   async function resolveAccess(meta, identity) {
     if (!identity) return { role: "none" };
     if (identity === meta.ownerIdentity) return { role: "owner" };
-    if (meta.visibility === "public" && tenantOf(identity) === meta.tenantId) return { role: "member" };
+    // "Public" means public to the organisation. A public mailbox tenant is not
+    // one (tenancy.hasColleagues), so there it grants nobody but the owner.
+    if (
+      meta.visibility === "public" &&
+      tenancy.hasColleagues(meta.tenantId) &&
+      (await tenantOf(identity)) === meta.tenantId
+    ) {
+      return { role: "member" };
+    }
     if (meta.visibility === "private") {
       const accessor = await db.getAccessor(meta.journeyId, identity);
       if (accessor) return { role: "member" };
@@ -95,7 +104,7 @@ export function createJourneys({ config, db, internal }) {
   }
 
   async function createJourney({ identity, body }) {
-    const tenantId = tenantOf(identity);
+    const tenantId = await tenantOf(identity);
     const now = Date.now();
     const journeyId = randomUUID();
     const visibility = JOURNEY_VISIBILITIES.includes(body.visibility) ? body.visibility : "private";
@@ -124,7 +133,7 @@ export function createJourneys({ config, db, internal }) {
   }
 
   async function listJourneys({ identity }) {
-    const tenantId = tenantOf(identity);
+    const tenantId = await tenantOf(identity);
     const [tenantActive, accessorLinks] = await Promise.all([
       db.listJourneysByTenantStatus(tenantId, "active"),
       db.listAccessorJourneys(identity),
@@ -147,7 +156,7 @@ export function createJourneys({ config, db, internal }) {
       .filter((m) => m && m.status === "active" && !mineIds.has(m.journeyId))
       .map(toSummary);
 
-    const publicJourneys = tenantActive
+    const publicJourneys = (tenancy.hasColleagues(tenantId) ? tenantActive : [])
       .filter((m) => m.visibility === "public" && !mineIds.has(m.journeyId))
       .map(toSummary);
 

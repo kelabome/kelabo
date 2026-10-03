@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createVersionedCache, pickVersion, versionSk, versionFromSk } from "./versioned.js";
+import { isPublicEmailDomain } from "./orgDomains.js";
 
 /**
  * Operational configuration: every setting a running deployment may need to
@@ -98,6 +99,12 @@ export const adminSk = (email) => String(email ?? "").trim().toLowerCase();
 const optionalInt = (min = 0) => z.number().int().min(min).nullable().default(null);
 const optionalBool = () => z.boolean().nullable().default(null);
 const optionalStr = (max = 200) => z.string().trim().max(max).default("");
+
+/** The deployment's own alias list: an array in kelabo.json, a comma list in an env var. */
+const aliasList = (v) =>
+  (Array.isArray(v) ? v : String(v ?? "").split(","))
+    .map((d) => String(d).trim().toLowerCase())
+    .filter(Boolean);
 
 export const opConfigSchema = z.object({
   version: z.number().int().positive(),
@@ -284,8 +291,32 @@ export const opConfigSchema = z.object({
    * reloads, sees the old name, and has no way to tell that from a broken save.
    * It becomes publishable when the SPA fetches its bootstrap at run time, and
    * that is a separate change.
+   *
+   * `emailDomainAliases` lets one organisation span several domains (acme.com
+   * plus acme.io, acme.com.au, a pre-rename domain): each alias may sign in and
+   * is folded into the primary's tenant (`tenantOf`, orgDomains.js), so its
+   * people are colleagues of everyone at the primary. `null` is unset (falls
+   * back to the deployment's list); `[]` is a published "no aliases". A public
+   * mailbox domain is never honoured as an alias, whatever is published.
    */
-  org: z.object({ allowedEmailDomain: optionalStr(200) }).default({}),
+  org: z
+    .object({
+      allowedEmailDomain: optionalStr(200),
+      emailDomainAliases: z
+        .array(
+          z
+            .string()
+            .trim()
+            .toLowerCase()
+            .max(200)
+            .refine((d) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d), { message: "not a domain" })
+            .refine((d) => !isPublicEmailDomain(d), { message: "a public mailbox domain cannot be an alias" })
+        )
+        .max(50)
+        .nullable()
+        .default(null),
+    })
+    .default({}),
 
   /** May a kelabo link a contact outside the tenant (docs 18)? */
   contacts: z.object({ external: optionalBool() }).default({}),
@@ -447,7 +478,10 @@ export function resolveOpConfig(cfg, op) {
       agentTokenTtlDays: val(o.auth.agentTokenTtlDays, cfg?.auth?.agentTokenTtlDays ?? 90),
       socialProviders: val(o.auth.socialProviders, cfg?.auth?.socialProviders ?? []),
     },
-    org: { allowedEmailDomain: str(o.org.allowedEmailDomain, cfg?.allowedEmailDomain ?? "") },
+    org: {
+      allowedEmailDomain: str(o.org.allowedEmailDomain, cfg?.allowedEmailDomain ?? ""),
+      emailDomainAliases: val(o.org.emailDomainAliases, aliasList(cfg?.emailDomainAliases)),
+    },
     contacts: { external: val(o.contacts.external, cfg?.contacts?.external ?? false) },
     retentionDays: val(o.retentionDays, cfg?.retentionDays ?? 30),
   };
@@ -491,6 +525,7 @@ export function applyOpConfig(cfg, op) {
     joinCode: { ...(cfg?.joinCode ?? {}), ...r.joinCode },
     auth: { ...(cfg?.auth ?? {}), ...r.auth },
     allowedEmailDomain: r.org.allowedEmailDomain,
+    emailDomainAliases: r.org.emailDomainAliases,
     contacts: { ...(cfg?.contacts ?? {}), external: r.contacts.external },
     retentionDays: r.retentionDays,
   };

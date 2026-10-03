@@ -373,6 +373,8 @@ await test("session cookie works for /me and kelabo creation", async () => {
   const me = await call("GET", "/me", { cookies: sessionCookies });
   assert.equal(me.statusCode, 200);
   assert.equal(me.json.identity.email, "host@example.com");
+  // The organisation's domains and whether it has colleagues (issue #14).
+  assert.deepEqual(me.json.org, { domains: ["example.com"], colleagues: true });
 
   const anon = await call("GET", "/me");
   assert.equal(anon.statusCode, 401);

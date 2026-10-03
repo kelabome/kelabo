@@ -10,6 +10,7 @@ import { useToast } from '../components/Toaster'
 import { usePresenceContext } from '../presence/PresenceContext'
 import { useTypeAnywhere } from '../useTypeAnywhere'
 import { useAuth } from '../auth'
+import { canBeColleague } from '../emailDomain.js'
 
 /**
  * Contacts (docs 18 §4).
@@ -82,8 +83,7 @@ function Row({ email, name, avatarVariant, favourited, onToggle, busy, online, i
 export default function Contacts() {
   const toast = useToast()
   const presence = usePresenceContext()
-  const { identity } = useAuth()
-  const myDomain = (identity?.email || '').split('@')[1]?.toLowerCase() || ''
+  const { identity, org } = useAuth()
   const [favourites, setFavourites] = useState(null)
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState({})
@@ -195,7 +195,7 @@ export default function Contacts() {
               online={presence.isOnline(r.email)}
               inKelabo={presence.inKelabo(r.email)}
               onCall={setCallTo}
-              canFavourite={!myDomain || r.email.split('@')[1] === myDomain}
+              canFavourite={!identity?.email || canBeColleague(r.email, identity.email, org)}
               notSignedIn={r.registered === false}
             />
           ))}

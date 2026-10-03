@@ -62,6 +62,8 @@ import { createOpConfig } from "./opconfig.js";
 import { createAdmin } from "./admin.js";
 import { createDirectoryAdmin } from "./directory.js";
 import { createPeople } from "./people.js";
+import { createTenancy } from "./tenancy.js";
+import { allowedDomains } from "@kelabo/contracts/org-domains";
 import { createAgent } from "./agent.js";
 import { parseCookies, readCookie, mintCookie, serializeCookie } from "./cookies.js";
 import { ApiError, err } from "./errors.js";
@@ -141,6 +143,9 @@ function htmlErrorPage(status, code) {
 
 export function createApp(deps) {
   const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, credentials, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin, directory } = deps;
+  // Optional, like `opConfig`: a test that builds the app without one gets the
+  // same rules over its config.
+  const tenancy = deps.tenancy ?? createTenancy({ config, opConfig });
 
   /**
    * Best-effort link into the journeys named at kelabo creation/schedule time
@@ -277,6 +282,15 @@ export function createApp(deps) {
               avatarVariant: Number(user?.settings?.avatar) || 0,
             },
             tenantId: session.tenantId,
+            // What the browser needs to decide who can be favourited without a
+            // round-trip (issue #14): every domain of the organisation, or
+            // null under open registration (then: your own domain), and
+            // whether this tenant has colleagues at all — a public mailbox
+            // domain has none. The server re-checks every such action.
+            org: {
+              domains: allowedDomains(await tenancy.org()),
+              colleagues: tenancy.hasColleagues(session.tenantId),
+            },
           },
         };
       },
@@ -1746,34 +1760,37 @@ export function composeApp(config, overrides = {}) {
       );
     },
   });
-  const otp = createOtp({ config, db, mailer, opConfig });
-  const sessions = createSessions({ config, db, secrets, opConfig });
-  const oidc = createOidc({ config, secrets, opConfig });
+  // Which organisation an identity belongs to (issue #14): one instance, so
+  // every module folds alias domains into the primary the same way.
+  const tenancy = createTenancy({ config, opConfig });
+  const otp = createOtp({ config, db, mailer, opConfig, tenancy });
+  const sessions = createSessions({ config, db, secrets, opConfig, tenancy });
+  const oidc = createOidc({ config, secrets, opConfig, tenancy });
   const auth = createAuthProvider({ otp, oidc, sessions });
   const mcpOauth = createMcpOauth({ config, db, secrets });
-  const internal = createInternal({ config, secrets });
-  const kelabos = createKelabos({ config, db, internal, credentials, opConfig });
+  const internal = createInternal({ config, secrets, opConfig, tenancy });
+  const kelabos = createKelabos({ config, db, internal, credentials, opConfig, tenancy });
   // Who can be found by name (docs 18 §4.8): registered users plus the
   // imported directory, cached per tenant. One instance, shared by the search
   // that reads it and the import that invalidates it.
   const people = createPeople({ db });
-  const scheduling = createScheduling({ config, db, mailer, internal, opConfig, secrets, people });
-  const contacts = createContacts({ config, db, opConfig, people });
-  const huddle = createHuddle({ config, db, internal, kelabos });
+  const scheduling = createScheduling({ config, db, mailer, internal, opConfig, secrets, people, tenancy });
+  const contacts = createContacts({ config, db, opConfig, people, tenancy });
+  const huddle = createHuddle({ config, db, internal, kelabos, opConfig, tenancy });
   const join = createJoin({ config, db, secrets, opConfig });
   const joinCodes = createJoinCodes({ config, db, opConfig });
   const records = createRecords({ config, db, s3: overrides.s3 });
   const sttToken = createSttToken({ config, db, credentials, opConfig });
-  const agent = createAgent({ config, db, secrets, opConfig });
+  const agent = createAgent({ config, db, secrets, opConfig, tenancy });
   // Journey (docs 20) — a persistent container linking related kelabos.
   // Only needs `internal` beyond config/db: a report's LLM call is a
   // synchronous HTTP round trip to the Gateway, the same shape every other
   // rest-api -> Gateway call already uses.
-  const journeys = createJourneys({ config, db, internal });
+  const journeys = createJourneys({ config, db, internal, opConfig, tenancy });
   // The roster that says who may publish the configuration above.
   const admin = createAdmin({ config, db, opConfig, credentials, internal, log });
   const directory = createDirectoryAdmin({ config, db, admin, people, opConfig, log });
-  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin, directory });
+  return createApp({ config, db, secrets, credentials, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys, opConfig, admin, directory, tenancy });
 }
 
 export async function handler(event, context) {

@@ -19,6 +19,9 @@ import('./loadConfig.mjs').then((m) => {
     // Empty when the env allows any domain — the sign-in page reads that as
     // open registration, exactly as the server does.
     VITE_ALLOWED_EMAIL_DOMAIN: c.allowedEmailDomain ?? '',
+    // The organisation's other domains (issue #14), so the sign-in page does
+    // not refuse an alias address before the server has a say.
+    VITE_EMAIL_DOMAIN_ALIASES: (c.emailDomainAliases ?? []).join(','),
     // Display only — the deployment's own name on the sign-in page and the
     // browser tab. Empty falls back to generic wording.
     VITE_ORG_NAME: c.organizationName ?? '',

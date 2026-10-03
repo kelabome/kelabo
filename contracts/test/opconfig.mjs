@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import {
   ADMIN_PK,
+  applyOpConfig,
   DEFAULT_OPCONFIG,
   OPCONFIG_PK,
   adminSk,
@@ -172,6 +173,28 @@ await test("clearing the sign-in domain cannot open the deployment", () => {
   assert.equal(r.org.allowedEmailDomain, "example.com");
   const widened = resolveOpConfig(BOOTSTRAP, publish({ org: { allowedEmailDomain: "other.com" } }));
   assert.equal(widened.org.allowedEmailDomain, "other.com");
+});
+
+await test("alias domains: unset falls back, [] is a real publish, applyOpConfig flattens", () => {
+  const cfg = { ...BOOTSTRAP, emailDomainAliases: ["example.io"] };
+  // Nothing published: the deployment's own list.
+  assert.deepEqual(resolveOpConfig(cfg, publish({})).org.emailDomainAliases, ["example.io"]);
+  // A published list replaces it — including an empty one, which means "none".
+  assert.deepEqual(
+    resolveOpConfig(cfg, publish({ org: { emailDomainAliases: ["example.dev"] } })).org.emailDomainAliases,
+    ["example.dev"]
+  );
+  assert.deepEqual(resolveOpConfig(cfg, publish({ org: { emailDomainAliases: [] } })).org.emailDomainAliases, []);
+  // An env var's comma list is the same thing as kelabo.json's array.
+  assert.deepEqual(
+    resolveOpConfig({ ...BOOTSTRAP, emailDomainAliases: "a.io, b.io" }, null).org.emailDomainAliases,
+    ["a.io", "b.io"]
+  );
+  assert.deepEqual(applyOpConfig(cfg, publish({})).emailDomainAliases, ["example.io"]);
+  // A publish that tries to alias a public mailbox domain is refused outright.
+  assert.throws(() => publish({ org: { emailDomainAliases: ["gmail.com"] } }));
+  assert.throws(() => publish({ org: { emailDomainAliases: ["not a domain"] } }));
+  assert.deepEqual(publish({ org: { emailDomainAliases: [" Acme.IO "] } }).org.emailDomainAliases, ["acme.io"]);
 });
 
 await test("per-provider STT settings merge rather than replace", () => {

@@ -1,8 +1,9 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { hmacSha256 } from "./jwt.js";
 import { err } from "./errors.js";
+import { createTenancy } from "./tenancy.js";
 
-export function createOtp({ config, db, mailer, opConfig }) {
+export function createOtp({ config, db, mailer, opConfig, tenancy = createTenancy({ config, opConfig }) }) {
   // The sign-in gate and its rate limits are published operational config
   // (contracts/src/opconfig.js), resolved per request. `effective()` returns
   // this service's own config shape with published values folded in, so every
@@ -12,12 +13,10 @@ export function createOtp({ config, db, mailer, opConfig }) {
   // and a deployment with no config table behaving exactly as before.
   const settings = async () => (opConfig ? await opConfig.effective() : config);
 
-  // Tenant = the verified email's own domain (ARCHITECTURE §1). With an
-  // allow-list configured (self-host) that is the one allowed domain; with the
-  // allow-list empty, registration is open and every org lands in its own
-  // tenant — the multi-domain mode the schema always reserved space for.
-  const tenantOf = (email) => email.split("@")[1]?.toLowerCase();
-
+  // Tenant = the verified email's organisation (ARCHITECTURE §1, tenancy.js).
+  // With an allow-list configured (self-host) that is the primary domain, an
+  // alias domain folding into it; with the allow-list empty, registration is
+  // open and every domain lands in its own tenant.
   /**
    * Async now, because the allowed domain is publishable.
    *
@@ -29,12 +28,7 @@ export function createOtp({ config, db, mailer, opConfig }) {
    * did it.
    */
   async function assertDomainAllowed(email) {
-    const domain = tenantOf(email);
-    if (!domain) throw err(403, "domain_not_allowed");
-    const allowed = (await settings()).allowedEmailDomain;
-    if (allowed && domain !== allowed.toLowerCase()) {
-      throw err(403, "domain_not_allowed");
-    }
+    if (!(await tenancy.allows(email))) throw err(403, "domain_not_allowed");
   }
 
   async function request({ email, ip }) {
@@ -70,7 +64,7 @@ export function createOtp({ config, db, mailer, opConfig }) {
       requestCount: (inWindow ? existing.requestCount || 0 : 0) + 1,
       windowStart: inWindow ? existing.windowStart : now,
       lastSentAt: now,
-      tenantId: tenantOf(email),
+      tenantId: await tenancy.tenantOf(email),
     });
 
     // No `from`: the mailer knows the deployment's sending address, and on a
@@ -95,7 +89,7 @@ export function createOtp({ config, db, mailer, opConfig }) {
     }
     await db.deleteOtp(email);
     const displayName = email.split("@")[0];
-    const tenantId = tenantOf(email);
+    const tenantId = await tenancy.tenantOf(email);
     const user = await db.upsertUser({ email, displayName, tenantId });
     return { email, displayName: user?.displayName || displayName, tenantId };
   }

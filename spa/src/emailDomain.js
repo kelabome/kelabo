@@ -40,11 +40,15 @@ export function normaliseDomain(domain) {
  * The local part is never case-folded — only the domain is compared
  * case-insensitively, matching `tenantOf` on the server.
  *
+ * An organisation may own several domains (issue #14): `aliases` are the
+ * others that may sign in. A bare local part still completes to the primary.
+ *
  * @param {string} input
  * @param {string} domain normalised, from normaliseDomain
+ * @param {string[]} [aliases] other domains of the same organisation
  * @returns {ResolvedEmail}
  */
-export function resolveEmail(input, domain) {
+export function resolveEmail(input, domain, aliases = []) {
   const value = String(input ?? '').trim()
   if (!value) return { ok: false, email: '', completed: false, reason: 'empty' }
 
@@ -73,8 +77,39 @@ export function resolveEmail(input, domain) {
     return { ok: true, email: `${local}@${domain}`, completed: true }
   }
 
-  if (domain && typedDomain !== domain) {
+  if (domain && typedDomain !== domain && !aliases.map(normaliseDomain).includes(typedDomain)) {
     return { ok: false, email: value, completed: false, reason: 'wrong_domain' }
   }
   return { ok: true, email: value, completed: false }
+}
+
+/** The domain half of an address, lowercased; '' when there is none. */
+export function domainOfEmail(email) {
+  const s = String(email ?? '')
+  const at = s.lastIndexOf('@')
+  return at < 0 ? '' : normaliseDomain(s.slice(at + 1))
+}
+
+/**
+ * Could `email` be a colleague of `me`? Mirrors the server's rule
+ * (rest-api/src/tenancy.js `sameOrg`) so the UI does not offer a favourite the
+ * server will refuse:
+ *
+ *  - `org.colleagues` false — a public mailbox tenant (gmail.com…) under open
+ *    registration — means nobody is;
+ *  - with the organisation's domains known, any of them is;
+ *  - under open registration (`domains` null), only your own domain is.
+ *
+ * `org` absent (an older server) keeps the previous behaviour: same domain.
+ *
+ * @param {string} email
+ * @param {string} me the signed-in address
+ * @param {{ domains: string[]|null, colleagues: boolean }|null|undefined} org
+ */
+export function canBeColleague(email, me, org) {
+  const d = domainOfEmail(email)
+  if (!d || !String(email).includes('@')) return false
+  if (org && org.colleagues === false) return false
+  if (org && Array.isArray(org.domains)) return org.domains.map(normaliseDomain).includes(d)
+  return d === domainOfEmail(me)
 }

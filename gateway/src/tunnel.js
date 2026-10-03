@@ -15,6 +15,7 @@ import { WebSocketServer } from "ws";
 import { parseUpFrame } from "@kelabo/contracts";
 import { verifyAgentJwt } from "./cookies.js";
 import { loadKelaboHistory } from "./agent/history.js";
+import { tenantOfIdentity } from "./tenancy.js";
 import {
   putPromotion,
   updateMeta,
@@ -228,7 +229,11 @@ export function createTunnel(c) {
     }
     conn.registered = true;
     conn.identity = payload.sub;
-    conn.tenant = payload.tenant;
+    // Recomputed, not taken from the token: an agent token outlives any alias
+    // list, and the tenant is a function of the identity and the
+    // organisation's current domains (tenancy.js). The token's own claim is
+    // the fallback for a token whose subject is not an address.
+    conn.tenant = (await tenantOfIdentity(c, payload.sub).catch(() => "")) || payload.tenant;
     conn.agent = {
       runtime: frame.agent.runtime,
       version: frame.agent.version,

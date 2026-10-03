@@ -1,4 +1,7 @@
 import { indexPerson, rankPeople } from "@kelabo/contracts/people-search";
+import { hasColleagues } from "@kelabo/contracts/org-domains";
+
+const NOBODY = Object.freeze({ people: [], index: new Map(), byEmail: new Map() });
 
 /**
  * Who a signed-in person can find by name (docs 18 §4.8).
@@ -12,7 +15,10 @@ import { indexPerson, rankPeople } from "@kelabo/contracts/people-search";
  *     first sign-in.
  *
  * The tenant is the partition key of both reads, so this cannot surface
- * another organisation's people however it is called.
+ * another organisation's people however it is called. A tenant that is not an
+ * organisation at all — a public mailbox domain under open registration, where
+ * everyone at gmail.com shares one partition — has nobody to find
+ * (`hasColleagues`), and is never read.
  *
  * ## Names
  *
@@ -62,6 +68,7 @@ export function createPeople({ db, now = () => Date.now(), ttlMs = 60_000 }) {
   }
 
   async function candidates(tenantId) {
+    if (!hasColleagues(tenantId)) return NOBODY;
     const hit = cache.get(tenantId);
     if (hit && now() - hit.at < ttlMs) return hit.value;
     const value = await load(tenantId);
