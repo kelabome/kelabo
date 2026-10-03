@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { api, logout } from '../api'
 import { SETTINGS_SYNCED_EVENT } from '../settings'
@@ -47,6 +47,7 @@ const AppDataContext = createContext({
   scheduled: null,
   journeys: null,
   journeyUnread: { unread: 0, mentions: 0 },
+  reloadJourneys: () => {},
   kelabosError: false,
   recordsError: false,
   pendingArchive: new Set(),
@@ -143,6 +144,14 @@ export function AppShell({ children }) {
   // within a moment. It stays because that stream has no replay — a missed
   // event would otherwise mean a badge that never appears — and because a
   // reconnect re-syncs by asking, not by being told.
+  //
+  // `reloadJourneys` is how anything else says "the counts just changed" —
+  // a leg marked read is the case that matters (it is a different fetch, so
+  // without being told the rail kept the count it had before the read). It
+  // goes through the same debounce as the push, which is about to say the
+  // same thing as `journey_read`, so the two cost one refresh rather than two.
+  const scheduleJourneysRef = useRef(() => {})
+  const reloadJourneys = useCallback(() => scheduleJourneysRef.current(), [])
   useEffect(() => {
     if (!identity) return undefined
     let cancelled = false
@@ -167,12 +176,17 @@ export function AppShell({ children }) {
     // server-side — a client that added up its own badge would drift from the
     // thing it is a badge for.
     let debounce = null
-    const off = onJourneyMessage(() => {
+    const schedule = () => {
       clearTimeout(debounce)
       debounce = setTimeout(load, PUSH_DEBOUNCE_MS)
-    })
+    }
+    scheduleJourneysRef.current = schedule
+    // Both kinds: a message changes somebody's unread, and `journey_read` is
+    // this person having read one somewhere else.
+    const off = onJourneyMessage(schedule)
     return () => {
       cancelled = true
+      scheduleJourneysRef.current = () => {}
       clearInterval(t)
       clearTimeout(debounce)
       off()
@@ -436,7 +450,7 @@ export function AppShell({ children }) {
   const recents = (records || []).slice(0, 8)
 
   return (
-    <AppDataContext.Provider value={{ kelabos, records, scheduled, journeys, journeyUnread, kelabosError, recordsError, journeysError, pendingArchive, removeRecord, endLiveKelabo, respondToInvite, cancelScheduled }}>
+    <AppDataContext.Provider value={{ kelabos, records, scheduled, journeys, journeyUnread, reloadJourneys, kelabosError, recordsError, journeysError, pendingArchive, removeRecord, endLiveKelabo, respondToInvite, cancelScheduled }}>
       <div className={'shell' + (collapsed ? ' shell-collapsed' : '')}>
         <div
           className={'sidebar-veil' + (mobileOpen ? ' open' : '')}

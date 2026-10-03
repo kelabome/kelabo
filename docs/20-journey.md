@@ -1540,6 +1540,16 @@ debounced so a burst of messages costs one round trip.
 **The author is included** rather than skipped. Their other tabs need it, and
 the tab that posted merges it by `msgId` into the copy it already applied.
 
+**Reading is pushed too, to the reader alone.** A mark-read that actually
+advanced the cursor sends `journey_read { journeyId, legId }` to the reader's
+own streams and nobody else's — nobody else's badge depends on that cursor.
+It is what clears the rail in a second tab or on another device. The tab that
+did the reading also tells the rail directly (`reloadJourneys` from
+`useAppData`): the rail's journey list is a separate fetch from the leg list,
+and it had taken its count when the message was pushed — about a second before
+the read — so without being told it kept showing the message as unread until its
+next poll. Both go through the rail's one debounce, so they cost one refresh.
+
 **Every surface still polls, slowly, as a backstop** (45–60s: the leg's own
 messages, the journey's leg list, and the rail's journey list). This stream has
 no replay by design (docs 18 §5.4), so an event missed across a reconnect

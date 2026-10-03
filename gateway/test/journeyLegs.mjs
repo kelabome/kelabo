@@ -61,6 +61,13 @@ function makeDb(seed) {
         }
         const existing = items.get(k) || { PK: input.Key.PK, SK: input.Key.SK };
         const v = input.ExpressionAttributeValues || {};
+        // The read cursor's monotonic guard: what decides whether a mark-read
+        // "advanced", and so whether the reader's other tabs are told.
+        if (/lastReadAt < :at/.test(input.ConditionExpression || "") && (existing.lastReadAt ?? -Infinity) >= v[":at"]) {
+          const e = new Error("ConditionalCheckFailedException");
+          e.name = "ConditionalCheckFailedException";
+          throw e;
+        }
         const expr = input.UpdateExpression;
         const item = { ...existing };
         // Only the shapes these handlers actually emit.
@@ -505,6 +512,24 @@ async function main() {
   const own = await waitFor(() => aliceStream.events.find(e => e.kind === "journey_message"));
   assert.equal(own.message.text, "second window");
   ok("the author's own other tabs are told as well");
+
+  // Reading a leg is news to the reader's other tabs — their rail badge was
+  // computed before the read — and to nobody else.
+  bobStream.events.length = 0;
+  const bobPage = await call(port, "GET", messages, { identity: "bob@example.com" });
+  await call(port, "POST", `${legs}/${T}/read`, { identity: "bob@example.com", body: { at: bobPage.body.lastMessageAt } });
+  const readEvt = await waitFor(() => bobStream.events.find(e => e.kind === "journey_read"));
+  assert.deepEqual([readEvt.journeyId, readEvt.legId], [JOURNEY, T]);
+  assert.equal(readEvt.message, undefined, "a read carries no message and no count");
+  assert.equal(aliceStream.events.some(e => e.kind === "journey_read"), false);
+  assert.equal(strangerStream.events.some(e => e.kind === "journey_read"), false);
+  ok("marking a leg read tells the reader's own streams, and only theirs");
+
+  bobStream.events.length = 0;
+  await call(port, "POST", `${legs}/${T}/read`, { identity: "bob@example.com", body: { at: bobPage.body.lastMessageAt } });
+  await new Promise(r => setTimeout(r, 120));
+  assert.equal(bobStream.events.some(e => e.kind === "journey_read"), false);
+  ok("a read that did not move the cursor tells nobody");
 
   for (const s of [bobStream, strangerStream, aliceStream]) s.res.destroy();
 

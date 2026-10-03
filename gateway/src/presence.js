@@ -140,6 +140,20 @@ export function createPresence(c) {
   }
 
   /**
+   * Tell one person's own streams that they read a leg (docs 20 §19.9).
+   *
+   * Only the reader, never the journey: what changed is their cursor, which
+   * nobody else's badge depends on. It is what lets the rail in another tab,
+   * or on another device, drop a badge the moment it was read here rather
+   * than a poll later. Like `journey_message` it carries no count — the
+   * receiver asks the server for one.
+   */
+  function notifyJourneyRead(identity, payload) {
+    // The session identity, exactly as `subscribe` keyed the stream by it.
+    return sendTo(identity, { kind: "journey_read", ...payload });
+  }
+
+  /**
    * Register a new presence stream for `identity`. Sends the connecting stream
    * its snapshot, and — if this is the identity's first stream — announces them
    * online to everyone who should see them.
@@ -327,5 +341,5 @@ export function createPresence(c) {
     c.log("ring_cancelled", { kelaboId, reason });
   }
 
-  return { subscribe, refreshKelaboState, isInKelabo, isOnline, onlineIdentities, tenantOnline, notifyJourney, ring, ringAnswer, ringCancel };
+  return { subscribe, refreshKelaboState, isInKelabo, isOnline, onlineIdentities, tenantOnline, notifyJourney, notifyJourneyRead, ring, ringAnswer, ringCancel };
 }

@@ -426,12 +426,16 @@ async function postRead(c, req, res, journeyId, legId) {
       getJourneyReadCursor(c, journeyId, auth.session.identity, legId).catch(() => null),
     ]);
     if (!leg) return send(res, 404, { error: "leg_not_found" });
-    await advanceJourneyReadCursor(c, journeyId, auth.session.identity, legId, {
+    const { advanced } = await advanceJourneyReadCursor(c, journeyId, auth.session.identity, legId, {
       at: parsed.data.at,
       msgId: parsed.data.msgId,
       messageCount: leg.messageCount || 0,
       mentionCount: cursor?.mentionCount || 0,
     });
+    // The reader's other tabs and devices hold a badge this just made stale.
+    // Only when the cursor actually moved: a replayed or older position
+    // changed nothing, and telling every tab to refetch for it is pure cost.
+    if (advanced) c.presence?.notifyJourneyRead?.(auth.session.identity, { journeyId, legId });
   } catch (err) {
     c.logError("journey_read_advance_failed", err, { journeyId, legId });
     return send(res, 500, { error: "internal_error" });
