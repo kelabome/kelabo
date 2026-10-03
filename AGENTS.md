@@ -192,6 +192,13 @@ the source secrets are left in place.
 
 Order matters and is non-obvious:
 
+- **The gateway stack never falls back to a fake VPC.** It looks up the
+  account's default VPC (from `infra/cdk.context.json` when cached) and fails
+  with the reason if it cannot — wrong `AWS_PROFILE`, no credentials. The
+  placeholder VPC (`vpc-00000000000000000`) is opt-in, `-c vpcMode=placeholder`,
+  for offline synth only (`make synth`, `make test`); never deploy that output.
+  It used to be a silent fallback on one failed STS call, and a production
+  deploy was sent to it.
 - The gateway ECS stack **imports** the ECR repo by name
   (`ecr.Repository.fromRepositoryName`) — CDK does not build the image. Push the
   image (`make docker`) before the first `cdk deploy` of `kelabo-<env>-gateway`.

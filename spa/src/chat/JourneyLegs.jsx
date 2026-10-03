@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { journeyLegs } from '../api'
 import { useAuth } from '../auth'
 import { usePresenceContext } from '../presence/PresenceContext'
+import { useAppData } from '../components/AppShell'
 import { useConfirm } from '../components/ConfirmDialog'
 import { usePrompt } from '../components/PromptDialog'
 import { useToast } from '../components/Toaster'
@@ -41,6 +42,7 @@ const READ_DEBOUNCE_MS = 1200
 export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs }) {
   const { identity } = useAuth()
   const { onJourneyMessage } = usePresenceContext()
+  const { reloadJourneys } = useAppData()
   const me = identity?.email
   const confirm = useConfirm()
   const prompt = usePrompt()
@@ -177,7 +179,7 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
   useEffect(() => {
     if (!isMember || !legId) return undefined
     return onJourneyMessage(evt => {
-      if (evt.journeyId !== journeyId || evt.legId !== legId || !evt.message) return
+      if (evt.kind !== 'journey_message' || evt.journeyId !== journeyId || evt.legId !== legId || !evt.message) return
       // Through the same reducer as everything else: it merges by msgId, so
       // the echo of your own message and a duplicate delivery both collapse
       // into the copy already held.
@@ -217,13 +219,19 @@ export function JourneyLegs({ journeyId, isMember, isActive, legs, reloadLegs })
     lastMarked.current = newest.at
     journeyLegs
       .markRead(journeyId, legId, { at: newest.at, msgId: newest.msgId })
-      .then(() => reloadLegs().catch(() => {}))
+      .then(() => {
+        reloadLegs().catch(() => {})
+        // The rail's badge is a different fetch from the legs above, owned by
+        // AppShell. Without this it kept the count it took when the message
+        // was pushed — a moment *before* this read — until its next poll.
+        reloadJourneys()
+      })
       .catch(() => {
         // The cursor is monotonic server-side and re-sent on the next message;
         // a lost write costs a stale badge for a moment, never correctness.
         lastMarked.current = 0
       })
-  }, [journeyId, legId, channel.messages, reloadLegs])
+  }, [journeyId, legId, channel.messages, reloadLegs, reloadJourneys])
 
   useEffect(() => {
     // Only while actually looking at it — marking a leg read in a

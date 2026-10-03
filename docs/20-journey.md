@@ -162,6 +162,41 @@ blast-radius (complete freezes every other member's access to write), or
 identity-defining (visibility, ownership) — kept owner-only even though a
 stricter reading of "full rights" could extend further.
 
+### 3.4 Following a public journey
+
+On a public journey every colleague is a member (§3.2), so membership cannot
+be what decides who is **told** about it. It used to be: every message was
+pushed to every colleague holding a presence stream, and the rail counted
+every public journey in the tenant as unread — so people were badged for
+journeys they had never opened.
+
+Following is that decision, and it is the person's alone:
+
+- `POST` / `DELETE /journeys/:id/follow`, for yourself only. A
+  `FOLLOWER#<identity>` row, `{identity, followedAt}`. Public journeys only
+  (`409 not_public`); the lead cannot follow their own (`409 journey_owner`)
+  because they are told everything already. Allowed on a completed journey,
+  and it touches neither META nor `updatedAt` — it is not a write to the
+  journey.
+- **Nothing follows on your behalf.** Posting does not, and being @mentioned
+  does not. A mention still reaches you: that one message is pushed to you,
+  and the mention counts on your rail (§19.8). The general unread count does
+  not.
+- **What following changes:**
+  - **The rail.** A public journey you follow counts unread like any other.
+    One you do not follow counts mentions only.
+  - **Realtime pushes** (§19.9). They go to the lead, the online followers,
+    and anyone mentioned in that message.
+  - **Access** is unchanged. A non-follower can still open the journey, read
+    it and post in it.
+- **After a flip to private**, `FOLLOWER#` rows are inert. Fan-out reads them
+  only for a public journey, the mirror image of a public journey ignoring
+  its leftover `ACCESSOR#` rows. They come back into effect if it is made
+  public again.
+- **No GSI.** `listJourneys` already holds the tenant's public journeys and
+  point-reads `FOLLOWER#<me>` on each. The Gateway asks "who follows this
+  journey", which is a query on the partition.
+
 ## 4. Data model
 
 ### 4.1 New table: `kelabo-<env>-journeys`
@@ -177,6 +212,7 @@ never auto-expires; every removal in this document is an explicit write.
 | `DESC#<pad(version,6)>` | Description version (immutable) | `version, markdown, editedBy, editedAt, changeNote?` |
 | `STATUS#<pad(version,6)>` | Health/progress snapshot (immutable) — §5 | `version, health, progress, note?, setBy, setAt, source, reportId?` |
 | `ACCESSOR#<identity>` | Private-journey roster entry | `identity, displayName, avatarVariant, addedBy, addedAt` |
+| `FOLLOWER#<identity>` | A colleague following a public journey — §3.4 | `identity, followedAt` |
 | `LINK#<kelaboId>` | Kelabo membership (forward) | `kelaboId, titleSnapshot, hostIdentitySnapshot, linkedBy, linkedAt, statusSnapshot` |
 | `REPORT#<reportId>` | One report, append-only — §6 | `reportId, question, requestedBy, requestedAt, status(pending\|ready\|failed), answer?, generatedAt?, error?` |
 | `BOARDMSG#<msgId>` | Board message, current head — §7 | `msgId, content, createdBy, createdAt, updatedBy?, updatedAt?, version, archived, archivedBy?, archivedAt?` |
@@ -416,25 +452,33 @@ belongs to someone.
 Three surfaces follow from it, and each is a place the rule could have
 leaked:
 
-- **The timeline** serves a private report's row only back to the person
-  who asked it (`mayReadTimelineEntry`, and the same filter on the
-  Gateway's `queryJourneyTimeline` for §12.3's
-  `kelabo_journey_timeline`). Redacting the summary to
-  `"Report requested (private)"` was the first attempt and is **kept as
-  well** — but redaction alone was wrong: "someone asked something
-  private, at 14:02" is itself the disclosure, and on a three-person
-  journey it names them. Two controls rather than one because the
-  timeline is the surface where a new reader is easiest to add later.
-  The paging cursor is taken from the **unfiltered** page: `nextBefore`
-  has to advance past rows this viewer cannot see, or a page that filters
-  down to nothing returns the same window forever.
+- **The timeline, the counts and the contributor rollup** carry no trace
+  of a private question. `requestReport` writes no `TL#` row for one, does
+  not bump `reportCount` (the row carries `counted: false`, so removing it
+  (§6.6) takes back nothing) and does not bump the asker's
+  `reportRequestCount`. It does not touch `updatedAt` either.
+  - **The history of this rule:** first the row was redacted to
+    `"Question asked (private)"`. Then it was filtered to the asker alone.
+    But "someone asked something private, at 14:02" is itself the
+    disclosure, and on a three-person journey it names them. The count and
+    the rollup told everyone the same thing, and the rollup said who. The
+    asker meanwhile saw a line on the shared timeline that nobody else could
+    see, which read as though everybody could.
+  - **Rows written before this** are hidden from everyone, the asker
+    included: `mayReadTimelineEntry`, and the same filter on the Gateway's
+    `queryJourneyTimeline` for §12.3's `kelabo_journey_timeline`.
+  - **Paging:** the cursor is taken from the **unfiltered** page.
+    `nextBefore` has to advance past rows this viewer cannot see, or a page
+    that filters down to nothing returns the same window forever.
 - **The agent pull tools** (§12.3's `kelabo_journey_reports`,
   `kelabo_journey_context`) serve public reports plus the *attached
   identity's own* private ones — `conn.identity` is already on the
   connection, so the agent obeys exactly the rule REST does rather than a
   second, looser one. A private report reaching the agent is rendered
   with an explicit "visible to you alone, do not repeat it to a kelabo"
-  note: the model must not treat it as shared journey material.
+  note: the model must not treat it as shared journey material. That
+  includes the `journey_context` bundle. Its report items used to drop
+  `visibility`, so there the asker's own private Q&A looked like anyone's.
 - **`buildContext`** (§6.2, the server-side synthesis) sees **public
   only**, never "everything" — that answer is itself readable by whoever
   asks next, so folding a private report into it would launder one
@@ -478,7 +522,36 @@ request, but `complete` returns only the text and drops the provider's own
 usage record, which is the only trustworthy token count in the system —
 the agent pipeline already reports that same normalized shape
 (`agent/llm.js`). There is no local tokenizer here and there should not
-be one.
+  be one.
+
+### 6.6 Removing a question — the asker's alone
+
+`DELETE /journeys/:id/reports/:reportId`. Until this existed nobody could
+take a question back, so a private one stayed in the table permanently
+(along with its timeline row, when it still had one, §6.4).
+
+- **Asker only, public or private.** The lead cannot remove someone's
+  question. They already cannot read a private one, and a question is one
+  member's ask, not the journey's record. Anyone else gets `404
+  report_not_found`, the same as an id that does not exist.
+- **Deleted outright**, unlike a document's soft removal (§8.2). The
+  timeline row that indexes it goes too
+  (`deleteJourneyTimelineEntriesFor`, which matches on the row's
+  millisecond and `detail.reportId`). Otherwise a public question's timeline
+  row would keep quoting its text after it was removed. With the row gone,
+  every reader is clean by construction: the REST list, the Gateway's
+  `listReadyReports` / `getJourneyReport`, `buildContext` and the agent
+  tools.
+- **A late answer cannot resurrect it.** The Gateway writes the finished
+  answer with `attribute_exists(PK)`, so removing a question still pending
+  only makes that write fail and be logged.
+- **Allowed on a completed journey**, for the reason a read cursor is
+  (§19.4). It is not a write to the journey's content, and refusing it would
+  leave a question its asker could never take back. It lowers `reportCount`
+  for a question that was counted, which a private one is not (§6.4). It does
+  not touch `updatedAt`: taking a question back is not activity on
+  the journey. The contributor's `reportRequestCount` is unchanged, because
+  it counts asks (§10).
 
 ## 7. Message board
 
@@ -1523,12 +1596,20 @@ be a third `EventSource` against the browser's six-per-origin budget, and it
 would still not solve the cross-journey badge: you are by definition not
 subscribed to the journey you are not looking at.
 
-**Audience** is owner + `ACCESSOR#` roster for a private journey, and everyone
-from the tenant holding a stream for a public one — **never** a public
-journey's accessor rows, which a private→public flip leaves behind inert
-(§3.2) and which reading here would resurrect as a notification list. An
-offline member is simply not pushed to; their badge is correct the moment they
-load a page.
+**Audience** is owner + `ACCESSOR#` roster for a private journey. For a public
+one it is owner + `FOLLOWER#` rows (§3.4) + whoever this message mentions.
+Followers and the mentioned are narrowed to colleagues online in the journey's
+tenant. It **never** includes a public journey's accessor rows, which a
+private→public flip leaves behind inert (§3.2) and which reading here would
+resurrect as a notification list. A private journey never reads follower rows.
+An offline member is simply not pushed to; their badge is correct the moment
+they load a page.
+
+> It was once everyone from the tenant holding a stream. Every colleague is a
+> *member* of a public journey, but that is the right to read it, not a request
+> to be told about it. Every open tab in the tenant was sent the text of every
+> message, refetched the journey list on each one, and lit a badge for a journey
+> its user had never opened.
 
 **The whole message travels**, not a nudge to go and look, so a client already
 reading that leg renders it immediately — the difference between a chat and
@@ -1539,6 +1620,16 @@ debounced so a burst of messages costs one round trip.
 
 **The author is included** rather than skipped. Their other tabs need it, and
 the tab that posted merges it by `msgId` into the copy it already applied.
+
+**Reading is pushed too, to the reader alone.** A mark-read that actually
+advanced the cursor sends `journey_read { journeyId, legId }` to the reader's
+own streams and nobody else's — nobody else's badge depends on that cursor.
+It is what clears the rail in a second tab or on another device. The tab that
+did the reading also tells the rail directly (`reloadJourneys` from
+`useAppData`): the rail's journey list is a separate fetch from the leg list,
+and it had taken its count when the message was pushed — about a second before
+the read — so without being told it kept showing the message as unread until its
+next poll. Both go through the rail's one debounce, so they cost one refresh.
 
 **Every surface still polls, slowly, as a backstop** (45–60s: the leg's own
 messages, the journey's leg list, and the rail's journey list). This stream has

@@ -37,6 +37,7 @@ function JourneyRow({ j, delay }) {
           ) : null}
           {j.status === 'completed' && <span className="chip chip-ended">completed</span>}
           {j.visibility === 'public' && <span className="chip">public</span>}
+          {j.following && <span className="chip chip-live" title="Its messages reach your rail and are pushed to you">following</span>}
           <JourneyHealthChip health={j.health} />
         </div>
         <div className="row-sub">
@@ -60,7 +61,9 @@ export default function Journeys() {
 
   const mine = data?.mine || []
   const accessible = data?.accessible || []
-  const publicJourneys = data?.public || []
+  // The ones you follow first (docs 20 §3.4): they are the public journeys
+  // you said you are in, rather than ones you could browse.
+  const publicJourneys = [...(data?.public || [])].sort((a, b) => (b.following ? 1 : 0) - (a.following ? 1 : 0))
   const empty = data && mine.length === 0 && accessible.length === 0 && publicJourneys.length === 0
 
   return (

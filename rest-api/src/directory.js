@@ -49,6 +49,12 @@ export function createDirectoryAdmin({ config, db, admin, people, opConfig, log 
     const given = normaliseDomain(value);
     const raw = org.primary && org.aliases.includes(given) ? org.primary : given;
     if (!raw) throw err(400, "bad_tenant", "a tenant (email domain) is required");
+    // "Not a domain" before "a public one": a predicate that fails closed on
+    // anything unparseable (and so calls `nope` public) must not turn a typo
+    // into a misleading refusal.
+    if (!raw.includes(".") || raw.startsWith(".") || raw.includes("..")) {
+      throw err(400, "bad_tenant", `${raw} is not a domain`);
+    }
     if (isPublicEmailDomain(raw)) {
       throw err(400, "public_domain", `${raw} is a public mailbox provider; a directory there would be visible to strangers`);
     }

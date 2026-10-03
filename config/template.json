@@ -59,6 +59,7 @@
         "provider": "ses",
         "fromAddress": "otp@example.com"
       },
+      "_ses.dmarc": "Opt-in, and left out on purpose: `_dmarc` is one record per domain, so a domain that already carries a policy from a corporate mail provider gets a second one and a failed deploy. Set `\"dmarc\": true` for `p=none` with sensible alignment, or an object to say more: `policy` (none|quarantine|reject, default none), `subdomainPolicy` (default: mirrors `policy`, stated rather than inherited so moving to reject does not silently take every subdomain — including the `mail.` MAIL FROM one — with it), `adkim` (default s: Easy DKIM signs with d=<identity domain>, which is the From domain exactly, so strict already passes), `aspf` (default r, and it must stay r — the envelope sender is the `mail.` subdomain and strict SPF alignment demands an exact match), and `rua` (no default; an aggregate-report address nobody reads is worse than none, and an address at ANOTHER domain collects nothing unless that domain publishes `<this-domain>._report._dmarc` TXT `v=DMARC1`).",
       "ses": {
         "hostedZone": {
           "name": "example.com",

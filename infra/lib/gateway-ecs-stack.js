@@ -13,15 +13,67 @@ import { execSync } from "node:child_process";
 import { logRetention } from "./log-retention.js";
 
 function credentialsAccount() {
+  // Retried, with a longer timeout than one slow STS round trip: a single
+  // failed call used to be enough to send a real deploy to the placeholder
+  // VPC below (see `resolveVpc`).
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return execSync("aws sts get-caller-identity --query Account --output text", {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 15000,
+      })
+        .toString()
+        .trim();
+    } catch {
+      // try again
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The placeholder VPC exists so `cdk synth` works with no AWS account at all
+ * (a contributor's laptop, `make test`). It must never reach a deploy: it
+ * once did, when one STS call failed during `make gateway env=prod` and the
+ * stack silently swapped the real VPC for `vpc-00000000000000000` —
+ * CloudFormation refused it and rolled back, which is the only reason
+ * production was not touched.
+ *
+ * So it is opt-in now, never a fallback: `-c vpcMode=placeholder` (what
+ * `make synth` and `make test` pass) or the older `-c vpcMode=new`. Without
+ * it, the default VPC is looked up — from `cdk.context.json` when cached, so
+ * a cached lookup still needs no credentials — and anything that stops that
+ * lookup is an error naming the cause, not a quiet substitution.
+ */
+export const PLACEHOLDER_VPC_ID = "vpc-00000000000000000";
+
+function resolveVpc(scope, cfg) {
+  const mode = scope.node.tryGetContext("vpcMode");
+  if (mode === "placeholder" || mode === "new") {
+    return {
+      source: "placeholder (synth only; -c vpcMode=" + mode + ")",
+      vpc: ec2.Vpc.fromVpcAttributes(scope, "Vpc", {
+        vpcId: PLACEHOLDER_VPC_ID,
+        availabilityZones: [`${cfg.region}a`, `${cfg.region}b`],
+        publicSubnetIds: ["subnet-00000000000000000", "subnet-00000000000000001"],
+      }),
+    };
+  }
+  const credAccount = credentialsAccount();
+  if (credAccount && credAccount !== cfg.account) {
+    throw new Error(
+      `[GatewayEcsStack] your AWS credentials are for account ${credAccount}, but env "${cfg.endpoint}" is account ` +
+        `${cfg.account}. Switch AWS_PROFILE, or pass -c vpcMode=placeholder for a synth that will not be deployed.`
+    );
+  }
   try {
-    return execSync("aws sts get-caller-identity --query Account --output text", {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 8000,
-    })
-      .toString()
-      .trim();
-  } catch {
-    return undefined;
+    return { source: "default-vpc-lookup", vpc: ec2.Vpc.fromLookup(scope, "Vpc", { isDefault: true }) };
+  } catch (err) {
+    throw new Error(
+      `[GatewayEcsStack] could not look up the default VPC of account ${cfg.account} in ${cfg.region}` +
+        `${credAccount ? "" : " (no AWS credentials were found)"}: ${err?.message || err}. ` +
+        "Fix the credentials, or pass -c vpcMode=placeholder for a synth that will not be deployed."
+    );
   }
 }
 
@@ -31,30 +83,7 @@ export class GatewayEcsStack extends Stack {
     const { cfg, zone, certificate, tables, archiveBucket } = props;
     const names = cfg.tableNames;
 
-    let vpc;
-    let vpcMode;
-    const forced = this.node.tryGetContext("vpcMode");
-    const credAccount = credentialsAccount();
-    if (forced === "new" || credAccount !== cfg.account) {
-      vpcMode = `fallback-synth-only-vpc (credential account ${credAccount ?? "none"} != config account ${cfg.account})`;
-      vpc = ec2.Vpc.fromVpcAttributes(this, "Vpc", {
-        vpcId: "vpc-00000000000000000",
-        availabilityZones: [`${cfg.region}a`, `${cfg.region}b`],
-        publicSubnetIds: ["subnet-00000000000000000", "subnet-00000000000000001"],
-      });
-    } else {
-      try {
-        vpcMode = "default-vpc-lookup";
-        vpc = ec2.Vpc.fromLookup(this, "Vpc", { isDefault: true });
-      } catch (err) {
-        vpcMode = "fallback-synth-only-vpc (lookup failed)";
-        vpc = ec2.Vpc.fromVpcAttributes(this, "Vpc", {
-          vpcId: "vpc-00000000000000000",
-          availabilityZones: [`${cfg.region}a`, `${cfg.region}b`],
-          publicSubnetIds: ["subnet-00000000000000000", "subnet-00000000000000001"],
-        });
-      }
-    }
+    const { vpc, source: vpcMode } = resolveVpc(this, cfg);
     console.log(`[GatewayEcsStack] VPC source: ${vpcMode}`);
 
     this.repo = ecr.Repository.fromRepositoryName(this, "GatewayRepo", cfg.ecrRepoName);

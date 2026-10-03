@@ -136,8 +136,8 @@ opconfig-show: ## print the op-config versions this env has published
 	  --expression-attribute-values '{":pk":{"S":"OPCONFIG"}}' \
 	  --query "Items[].{version:version.N,by:publishedBy.S,note:note.S}" --output table
 
-synth: ## cdk synth (offline-safe)
-	cd infra && npx cdk synth -c env=$(env)
+synth: ## cdk synth (offline-safe: placeholder VPC, never deploy this output)
+	cd infra && npx cdk synth -c env=$(env) -c vpcMode=placeholder
 
 origin-secret: ## create the CloudFront->API shared secret (generated, idempotent)
 	@aws secretsmanager describe-secret --secret-id kelabo/$(env)/api-origin --region $(REGION) >/dev/null 2>&1 \
@@ -189,7 +189,7 @@ test: ## all smoke tests + spa build + cdk synth
 	cd spa && npm test && npm run build
 	cd e2e && npm test
 	cd infra && npm test
-	cd infra && npx cdk synth -c env=$(env) >/dev/null && echo "cdk synth $(env) OK"
+	cd infra && npx cdk synth -c env=$(env) -c vpcMode=placeholder >/dev/null && echo "cdk synth $(env) OK"
 
 # The browser suite is deliberately NOT part of `make test`: it needs a
 # Chromium download (`npx playwright install chromium`, ~115 MB) that `make

@@ -459,10 +459,13 @@ export async function queryJourneyTimeline(c, journeyId, { type, before, limit =
       Limit: limit,
     })
   );
-  // A private report's row is the asker's alone (docs 20 §6.4) — the same
-  // rule rest-api's `mayReadTimelineEntry` applies, so the agent's view of
-  // the timeline is never wider than the person it is attached as.
-  return (out.Items ?? []).filter((e) => e.visibility !== "private" || (viewer && e.actor === viewer));
+  // A private row is shown to nobody (docs 20 §6.4) — the same rule
+  // rest-api's `mayReadTimelineEntry` applies, so the agent's view of the
+  // timeline is never wider than the person it is attached as. Private
+  // questions no longer write one; this hides the rows written before.
+  // `viewer` stays in the signature because callers pass it, but it no longer
+  // widens anything.
+  return (out.Items ?? []).filter((e) => e.visibility !== "private");
 }
 
 async function putJourneyTimelineRow(c, journeyId, entry) {
@@ -1053,16 +1056,36 @@ export async function putJourneyMessage(
 /**
  * Who should be told about a message in this journey (docs 20 §19.9).
  *
- * A private journey's audience is its owner plus the `ACCESSOR#` roster. A
- * public one's is everyone from the tenant holding a presence stream — and
- * **never** its accessor rows, which a private→public flip leaves behind
- * inert (§3.2) and which reading here would quietly resurrect as a
- * notification list.
+ * A private journey's audience is its owner plus the `ACCESSOR#` roster.
+ *
+ * A public one's is its owner, its followers (§3.4) and whoever this message
+ * mentions — never the whole tenant. Every colleague is a *member* of a public
+ * journey, but membership is the right to read it, not a request to be told
+ * about it; pushing to everyone online put a live badge on journeys people had
+ * never opened, and sent each message's text to all of them. Followers and the
+ * mentioned are narrowed to colleagues actually online in the journey's tenant,
+ * so a row that outlived a tenant change cannot reach outside it. And **never**
+ * its accessor rows, which a private→public flip leaves behind inert (§3.2)
+ * and which reading here would quietly resurrect as a notification list.
+ *
+ * Conversely a private journey never reads `FOLLOWER#` rows: they are inert
+ * once it is flipped private, the mirror image of the rule above.
  */
-async function journeyAudience(c, journeyId, meta) {
+async function journeyAudience(c, journeyId, meta, message) {
   const out = new Set();
   if (meta?.visibility === "public" && meta?.tenantId) {
-    for (const id of c.presence?.tenantOnline?.(meta.tenantId) || []) out.add(id);
+    const online = c.presence?.tenantOnline?.(meta.tenantId) || new Set();
+    const followers = await queryJourneyItems(c, journeyId, "FOLLOWER#").catch(() => []);
+    const wanted = [
+      ...followers.map((f) => f.identity),
+      // A mention reaches you without following: the one message that named
+      // you, and nothing else in the journey (§19.8).
+      ...(message?.mentions || []),
+    ];
+    for (const id of wanted) {
+      const key = String(id || "").toLowerCase();
+      if (key && online.has(key)) out.add(key);
+    }
   } else {
     const accessors = await queryJourneyItems(c, journeyId, "ACCESSOR#").catch(() => []);
     for (const a of accessors) if (a.identity) out.add(String(a.identity).toLowerCase());
@@ -1088,7 +1111,7 @@ async function fanOutJourneyMessage(c, journeyId, message) {
   if (!c.presence?.notifyJourney) return;
   const meta = await getJourneyMeta(c, journeyId).catch(() => null);
   if (!meta) return;
-  const audience = await journeyAudience(c, journeyId, meta);
+  const audience = await journeyAudience(c, journeyId, meta, message);
   const reached = c.presence.notifyJourney(audience, {
     journeyId,
     journeyTitle: meta.title || "",

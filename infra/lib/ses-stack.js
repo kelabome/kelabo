@@ -62,8 +62,20 @@ export class SesStack extends Stack {
       new CfnOutput(this, "SesSpf", { value: cfg.ses.spf });
     }
 
+    // `sp` is stated even when it equals `p`, because inheritance is the part
+    // people get wrong: a domain that later moves to `p=reject` silently moves
+    // every subdomain with it, and `mail.<domain>` (the custom MAIL FROM
+    // subdomain above) is one. Naming it makes the decision deliberate.
+    //
+    // `adkim=s` (strict DKIM alignment) is safe here and sharpens the reports:
+    // Easy DKIM signs with `d=<identity domain>`, which is exactly the From
+    // domain, so strict already passes. `aspf` stays relaxed by necessity —
+    // the envelope sender is the `mail.` subdomain, which strict would fail.
     if (cfg.ses.dmarc) {
       const parts = [`v=DMARC1`, `p=${cfg.ses.dmarc.policy}`];
+      if (cfg.ses.dmarc.subdomainPolicy) parts.push(`sp=${cfg.ses.dmarc.subdomainPolicy}`);
+      if (cfg.ses.dmarc.adkim) parts.push(`adkim=${cfg.ses.dmarc.adkim}`);
+      if (cfg.ses.dmarc.aspf) parts.push(`aspf=${cfg.ses.dmarc.aspf}`);
       if (cfg.ses.dmarc.rua) parts.push(`rua=${cfg.ses.dmarc.rua}`);
       new route53.TxtRecord(this, "DmarcRecord", {
         zone: sesZone,
@@ -88,8 +100,17 @@ export class SesStack extends Stack {
         topicName: `kelabo-${cfg.endpoint}-mail-events`,
         displayName: `Kelabo ${cfg.endpoint} mail events`,
       });
+      // REQUIRE, not the SES default of OPTIONAL. Every message on this path is
+      // a sign-in code or a meeting invitation, so OPTIONAL means a receiving
+      // server that declines STARTTLS gets a one-time passcode in cleartext and
+      // nothing anywhere records that it happened. REQUIRE bounces instead,
+      // which is loud, and the bounce lands on the SNS topic below. The
+      // deliverability cost is negligible — a mail server without STARTTLS is
+      // an artefact at this point — and a bounce we can see beats a passcode we
+      // cannot un-send.
       const configurationSet = new ses.ConfigurationSet(this, "ConfigurationSet", {
         configurationSetName: cfg.ses.configurationSetName,
+        tlsPolicy: ses.ConfigurationSetTlsPolicy.REQUIRE,
       });
       new ses.ConfigurationSetEventDestination(this, "MailEventsToSns", {
         configurationSet,

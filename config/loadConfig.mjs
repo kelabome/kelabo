@@ -150,8 +150,25 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   // domain only receives reports if THAT domain publishes a
   // `<sender>._report._dmarc` authorisation record — so a plausible-looking
   // mailto: silently collects nothing.
+  //
+  // The alignment defaults are chosen so that turning DMARC on never changes
+  // whether our own mail passes, only how precisely the reports describe it.
+  // `adkim: "s"` is free because Easy DKIM signs with `d=<identity domain>`,
+  // which is the From domain exactly. `aspf` must stay `"r"`: the envelope
+  // sender is the `mail.` subdomain from the custom MAIL FROM above, and strict
+  // SPF alignment demands an exact match, so `"s"` would fail every message we
+  // send. `subdomainPolicy` mirrors `policy` rather than being omitted, because
+  // an absent `sp` silently applies the parent policy to every subdomain — and
+  // one of those subdomains is our own MAIL FROM domain.
+  const dmarcBlock = block.ses?.dmarc === true ? {} : block.ses?.dmarc || {};
   const dmarc = block.ses?.dmarc
-    ? { policy: "none", ...(block.ses.dmarc === true ? {} : block.ses.dmarc) }
+    ? {
+        policy: "none",
+        adkim: "s",
+        aspf: "r",
+        ...dmarcBlock,
+        subdomainPolicy: dmarcBlock.subdomainPolicy || dmarcBlock.policy || "none",
+      }
     : null;
 
   // SPF, same opt-in reasoning: one record per domain, so a deployment whose

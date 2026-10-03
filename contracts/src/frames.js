@@ -785,8 +785,17 @@ export const frameJourneyContextSchema = z.object({
     .array(z.object({ docId: z.string(), title: z.string(), excerpt: z.string().default(""), sizeBytes: z.number().optional() }))
     .default([]),
   kelabos: z.array(journeyKelaboEntrySchema).default([]),
+  // `visibility` so a private question the attached identity asked is marked
+  // as theirs alone, as `journey_reports` already marks it (docs 20 §6.4).
   reports: z
-    .array(z.object({ reportId: z.string(), question: z.string(), answer: z.string().default("") }))
+    .array(
+      z.object({
+        reportId: z.string(),
+        question: z.string(),
+        answer: z.string().default(""),
+        visibility: z.enum(["public", "private"]).optional(),
+      })
+    )
     .default([]),
 });
 

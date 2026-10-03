@@ -300,9 +300,12 @@ test("journey_context bundles board, document excerpts, linked-kelabo minutes an
     board: [{ content: "pinned" }],
     documents: [{ docId: "d1", title: "Spec", excerpt: "intro…", sizeBytes: 900 }],
     kelabos: [{ kelaboId: "k1", title: "Kickoff", hasMinutes: true, summary: "s", decisions: ["d"], actionItems: ["a"] }],
-    reports: [{ reportId: "rp1", question: "q", answer: "a" }],
+    reports: [{ reportId: "rp1", question: "q", answer: "a" }, { reportId: "rp2", question: "mine", visibility: "private" }],
   });
   assert.equal(ok.ok, true);
+  // The asker's own private Q&A survives the frame marked as such, so the
+  // bridge can say it is not shared journey material (docs 20 §6.4).
+  assert.equal(ok.frame.reports[1].visibility, "private");
   assert.equal(ok.frame.kelaboId, "", "kelaboId defaults empty on a direct-attachment request");
   assert.equal(ok.frame.kelabos[0].hasMinutes, true);
   assert.equal(ok.frame.documents[0].excerpt, "intro…");

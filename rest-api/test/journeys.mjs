@@ -311,6 +311,83 @@ await test("accessors: owner-only to add/remove; refused entirely on a public jo
   );
 });
 
+// --- following a public journey (docs 20 §3.4) ------------------------------
+
+await test("follow: public only, never the lead, idempotent, and reported on get", async () => {
+  const pub = await journeys.createJourney({ identity: OWNER, body: { title: "Open", visibility: "public" } });
+  const priv = await journeys.createJourney({ identity: OWNER, body: { title: "Closed", visibility: "private" } });
+  await journeys.addAccessor({ journeyId: priv.journeyId, identity: OWNER, body: { identity: COLLEAGUE } });
+
+  await assert.rejects(
+    journeys.followJourney({ journeyId: priv.journeyId, identity: COLLEAGUE }),
+    (e) => e.status === 409 && e.code === "not_public",
+  );
+  await assert.rejects(
+    journeys.followJourney({ journeyId: pub.journeyId, identity: OWNER }),
+    (e) => e.status === 409 && e.code === "journey_owner",
+  );
+  await assert.rejects(
+    journeys.followJourney({ journeyId: pub.journeyId, identity: OUTSIDER }),
+    (e) => e.status === 403,
+  );
+
+  assert.equal((await journeys.getJourney({ journeyId: pub.journeyId, identity: COLLEAGUE })).following, false);
+  const before = (await db.getJourneyMeta(pub.journeyId)).updatedAt;
+  await journeys.followJourney({ journeyId: pub.journeyId, identity: COLLEAGUE });
+  await journeys.followJourney({ journeyId: pub.journeyId, identity: COLLEAGUE });
+  assert.equal((await journeys.getJourney({ journeyId: pub.journeyId, identity: COLLEAGUE })).following, true);
+  assert.equal((await db.getJourneyMeta(pub.journeyId)).updatedAt, before, "following is not activity on the journey");
+
+  await journeys.unfollowJourney({ journeyId: pub.journeyId, identity: COLLEAGUE });
+  await journeys.unfollowJourney({ journeyId: pub.journeyId, identity: COLLEAGUE });
+  assert.equal((await journeys.getJourney({ journeyId: pub.journeyId, identity: COLLEAGUE })).following, false);
+});
+
+await test("follow: the routes are wired, for the caller alone", async () => {
+  const pub = await journeys.createJourney({ identity: OWNER, body: { title: "Routed", visibility: "public" } });
+  const cookies = await sessionFor(COLLEAGUE);
+  const on = await call("POST", `/journeys/${pub.journeyId}/follow`, { cookies });
+  assert.equal(on.statusCode, 200);
+  assert.equal(on.json.following, true);
+  assert.ok(await db.getFollower(pub.journeyId, COLLEAGUE));
+  const off = await call("DELETE", `/journeys/${pub.journeyId}/follow`, { cookies });
+  assert.equal(off.statusCode, 200);
+  assert.equal(await db.getFollower(pub.journeyId, COLLEAGUE), null);
+  assert.equal((await call("POST", `/journeys/${pub.journeyId}/follow`)).statusCode, 401);
+});
+
+await test("list: an unfollowed public journey badges mentions only; following it badges unread", async () => {
+  const pub = await journeys.createJourney({ identity: OWNER, body: { title: "Busy public", visibility: "public" } });
+  // Five messages in a leg the colleague never opened, two of which named them.
+  db.__putJourneyItem(pub.journeyId, "LEG#trunk", { legId: "trunk", messageCount: 5, archived: false });
+  db.__putJourneyItem(pub.journeyId, `READ#${COLLEAGUE}#trunk`, { mentionCount: 2 });
+  const row = async () => (await journeys.listJourneys({ identity: COLLEAGUE })).public.find((j) => j.journeyId === pub.journeyId);
+
+  const browsing = await row();
+  assert.equal(browsing.following, false);
+  assert.equal(browsing.unread, 0, "a journey you only browse has nothing unread to you");
+  assert.equal(browsing.mentions, 2, "being named in it still counts");
+
+  await journeys.followJourney({ journeyId: pub.journeyId, identity: COLLEAGUE });
+  const following = await row();
+  assert.equal(following.following, true);
+  assert.equal(following.unread, 5);
+  assert.equal(following.mentions, 2);
+
+  // The lead's own journey is unaffected by any of this.
+  const lead = (await journeys.listJourneys({ identity: OWNER })).mine.find((j) => j.journeyId === pub.journeyId);
+  assert.equal(lead.unread, 5);
+});
+
+await test("list: a leftover accessor row on a public journey does not list it twice", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "Was private", visibility: "private" } });
+  await journeys.addAccessor({ journeyId: j.journeyId, identity: OWNER, body: { identity: COLLEAGUE } });
+  await journeys.patchJourney({ journeyId: j.journeyId, identity: OWNER, body: { visibility: "public" } });
+  const list = await journeys.listJourneys({ identity: COLLEAGUE });
+  assert.equal(list.accessible.some((m) => m.journeyId === j.journeyId), false);
+  assert.equal(list.public.filter((m) => m.journeyId === j.journeyId).length, 1);
+});
+
 // --- kelabo linking, the mirror, and the target-membership requirement ------
 
 await test("linkKelabo: refused unless the actor is host/participant of the target kelabo", async () => {
@@ -868,20 +945,44 @@ await test("reports: a private one is the asker's alone — not the lead's, and 
   assert.deepEqual(leadSummaries, ["Question asked: Where are we?"], "no private row for anyone but the asker");
   assert.equal(leadSummaries.some((s) => s.includes("Am I behind")), false);
 
-  // The asker keeps their own row — redacted even so, since the question
-  // itself is one filter away from a surface everyone reads.
+  // Nor does the asker's: the timeline is the journey's shared record, and a
+  // line in it only you can see read as though everybody could.
   const askerTl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
   const askerSummaries = askerTl.entries.filter((e) => e.type === "report").map((e) => e.summary);
-  assert.ok(askerSummaries.includes("Question asked (private)"), `got ${JSON.stringify(askerSummaries)}`);
-  assert.ok(askerSummaries.includes("Question asked: Where are we?"));
+  assert.deepEqual(askerSummaries, ["Question asked: Where are we?"]);
+  // Not merely filtered — never written.
+  const rows = (await db.listJourneyTimeline(j.journeyId, { limit: 50 })).filter((e) => e.detail?.reportId === mine.reportId);
+  assert.deepEqual(rows, []);
+
+  // And no count or rollup says someone asked something private.
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).reportCount, 1);
+  const { contributors } = await journeys.listContributors({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(contributors.find((c) => c.contributorIdentity === COLLEAGUE).reportRequestCount, 1);
+
+  // Removing it takes nothing back from a count it was never in.
+  await journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: mine.reportId });
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).reportCount, 1);
+});
+
+await test("timeline: a private row written before they stopped is hidden from its own asker too", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  db.__putJourneyItem(j.journeyId, `TL#${String(Date.now()).padStart(13, "0")}#legacy`, {
+    type: "report", summary: "Question asked (private)", actor: COLLEAGUE, at: Date.now(), visibility: "private",
+  });
+  const tl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
+  assert.equal(tl.entries.some((e) => e.visibility === "private"), false);
 });
 
 await test("timeline: a filtered-out private row still advances the cursor, so paging cannot loop", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
-  // Oldest first: one public ask, then a private one by someone else.
+  // Oldest first: one public ask, then a legacy private row — private asks
+  // no longer write one, but rows written before that are still in tables.
   await journeys.requestReport({ journeyId: j.journeyId, identity: OWNER, body: { question: "public one" } });
   await new Promise((r) => setTimeout(r, 5));
-  await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "secret", visibility: "private" } });
+  const later = Date.now();
+  db.__putJourneyItem(j.journeyId, `TL#${String(later).padStart(13, "0")}#legacy`, {
+    type: "report", summary: "Question asked (private)", actor: COLLEAGUE, at: later, visibility: "private",
+  });
 
   // Newest first, so the private row is the whole of page one for the lead:
   // an empty page, but the cursor must still move past it.
@@ -910,6 +1011,52 @@ await test("reports: a stranger cannot request or read one; unknown id is 404", 
     journeys.getReport({ journeyId: j.journeyId, identity: OWNER, reportId: "nope" }),
     (e) => e.status === 404 && e.code === "report_not_found",
   );
+});
+
+await test("removeReport: the asker alone may remove a question, which takes its timeline row with it", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const shared = await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "Where are we?" } });
+  const secret = await journeys.requestReport({
+    journeyId: j.journeyId,
+    identity: COLLEAGUE,
+    body: { question: "Am I behind?", visibility: "private" },
+  });
+
+  // Not the lead, even for a public question — and the same 404 as an id that
+  // does not exist, for a private one the lead cannot even see.
+  for (const reportId of [shared.reportId, secret.reportId, "nope"]) {
+    await assert.rejects(
+      journeys.removeReport({ journeyId: j.journeyId, identity: OWNER, reportId }),
+      (e) => e.status === 404 && e.code === "report_not_found",
+    );
+  }
+  await assert.rejects(
+    journeys.removeReport({ journeyId: j.journeyId, identity: OUTSIDER, reportId: shared.reportId }),
+    (e) => e.status === 403,
+  );
+
+  await journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: shared.reportId });
+  await journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: secret.reportId });
+  assert.deepEqual((await journeys.listReports({ journeyId: j.journeyId, identity: COLLEAGUE })).reports, []);
+  assert.equal(await db.getJourneyReport(j.journeyId, secret.reportId), null, "gone, not hidden");
+  const tl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
+  assert.deepEqual(tl.entries.filter((e) => e.type === "report"), [], "the timeline stops quoting it");
+  // A second removal is a 404, not a silent success over nothing.
+  await assert.rejects(
+    journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: shared.reportId }),
+    (e) => e.status === 404,
+  );
+});
+
+await test("removeReport: allowed on a completed journey, and wired over HTTP", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const asked = await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "q" } });
+  await journeys.completeJourney({ journeyId: j.journeyId, identity: OWNER });
+  const cookies = await sessionFor(COLLEAGUE);
+  const res = await call("DELETE", `/journeys/${j.journeyId}/reports/${asked.reportId}`, { cookies });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.removed, true);
+  assert.equal(await db.getJourneyReport(j.journeyId, asked.reportId), null);
 });
 
 // --- contributor stats (docs 20 §10) -------------------------------------------
