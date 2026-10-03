@@ -945,20 +945,44 @@ await test("reports: a private one is the asker's alone — not the lead's, and 
   assert.deepEqual(leadSummaries, ["Question asked: Where are we?"], "no private row for anyone but the asker");
   assert.equal(leadSummaries.some((s) => s.includes("Am I behind")), false);
 
-  // The asker keeps their own row — redacted even so, since the question
-  // itself is one filter away from a surface everyone reads.
+  // Nor does the asker's: the timeline is the journey's shared record, and a
+  // line in it only you can see read as though everybody could.
   const askerTl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
   const askerSummaries = askerTl.entries.filter((e) => e.type === "report").map((e) => e.summary);
-  assert.ok(askerSummaries.includes("Question asked (private)"), `got ${JSON.stringify(askerSummaries)}`);
-  assert.ok(askerSummaries.includes("Question asked: Where are we?"));
+  assert.deepEqual(askerSummaries, ["Question asked: Where are we?"]);
+  // Not merely filtered — never written.
+  const rows = (await db.listJourneyTimeline(j.journeyId, { limit: 50 })).filter((e) => e.detail?.reportId === mine.reportId);
+  assert.deepEqual(rows, []);
+
+  // And no count or rollup says someone asked something private.
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).reportCount, 1);
+  const { contributors } = await journeys.listContributors({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(contributors.find((c) => c.contributorIdentity === COLLEAGUE).reportRequestCount, 1);
+
+  // Removing it takes nothing back from a count it was never in.
+  await journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: mine.reportId });
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).reportCount, 1);
+});
+
+await test("timeline: a private row written before they stopped is hidden from its own asker too", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  db.__putJourneyItem(j.journeyId, `TL#${String(Date.now()).padStart(13, "0")}#legacy`, {
+    type: "report", summary: "Question asked (private)", actor: COLLEAGUE, at: Date.now(), visibility: "private",
+  });
+  const tl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
+  assert.equal(tl.entries.some((e) => e.visibility === "private"), false);
 });
 
 await test("timeline: a filtered-out private row still advances the cursor, so paging cannot loop", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
-  // Oldest first: one public ask, then a private one by someone else.
+  // Oldest first: one public ask, then a legacy private row — private asks
+  // no longer write one, but rows written before that are still in tables.
   await journeys.requestReport({ journeyId: j.journeyId, identity: OWNER, body: { question: "public one" } });
   await new Promise((r) => setTimeout(r, 5));
-  await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "secret", visibility: "private" } });
+  const later = Date.now();
+  db.__putJourneyItem(j.journeyId, `TL#${String(later).padStart(13, "0")}#legacy`, {
+    type: "report", summary: "Question asked (private)", actor: COLLEAGUE, at: later, visibility: "private",
+  });
 
   // Newest first, so the private row is the whole of page one for the lead:
   // an empty page, but the cursor must still move past it.

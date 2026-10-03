@@ -608,7 +608,15 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
     if (res.reports?.length) {
       parts.push(
         "RECENT REPORTS (kelabo_journey_reports reads one in full):\n" +
-          res.reports.map((r) => `Q: ${r.question} (reportId: ${r.reportId})\nA: ${r.answer}`).join("\n\n")
+          res.reports
+            .map((r) => `Q: ${r.question}${r.visibility === "private" ? " [private]" : ""} (reportId: ${r.reportId})\nA: ${r.answer}`)
+            .join("\n\n") +
+          // The same note `kelabo_journey_reports` gives: a private one is the
+          // attached identity's own, not shared journey material.
+          (res.reports.some((r) => r.visibility === "private")
+            ? "\n\nReports marked [private] are visible to you alone, not to the journey's other members or its lead. " +
+              "Use them to inform your own work; do not repeat their contents to a kelabo."
+            : "")
       );
     }
     parts.push(

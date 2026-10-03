@@ -913,8 +913,8 @@ function AskModal({ onClose, onAsk }) {
         <div className="sr-main">
           <div className="sr-title">Only me</div>
           <div className="sr-sub">
-            Keeps the question and its answer to you — not the other members, not the journey's lead. The
-            timeline records that you asked something, never what.
+            Keeps the question and its answer to you — not the other members, not the journey's lead. It
+            leaves nothing on the timeline or in the question count, and you can remove it later.
           </div>
         </div>
         <Switch checked={isPrivate} onChange={setIsPrivate} ariaLabel="Only me" />

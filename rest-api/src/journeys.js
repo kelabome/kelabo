@@ -679,25 +679,24 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
   // --- timeline (docs 20 §9) ---------------------------------------------------
 
   /**
-   * A private report's own timeline row is visible to the person who asked
-   * it and to nobody else (docs 20 §6.4) — the row, not merely its text.
-   * Redacting the summary was the first attempt and is kept as the second
-   * line of defence, but "someone asked something private, at 14:02" is
-   * itself the disclosure: on a three-person journey it names them.
+   * A private row is visible to nobody, the asker included (docs 20 §6.4).
+   * Private questions no longer write one. This hides the rows written before
+   * that, which were served back to their asker as "Question asked
+   * (private)": the timeline is the journey's shared record, and a line in it
+   * that only you can see read as though everyone could.
    *
    * The cursor is taken from the *unfiltered* page, so paging cannot loop:
    * `nextBefore` has to advance past rows this viewer cannot see, or the
    * next request returns the same window forever.
    */
-  const mayReadTimelineEntry = (entry, identity) =>
-    entry.visibility !== "private" || entry.actor === identity;
+  const mayReadTimelineEntry = (entry) => entry.visibility !== "private";
 
   async function getTimeline({ journeyId, identity, type, before, limit }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
     const items = await db.listJourneyTimeline(journeyId, { type, before, limit: limit || 50 });
     const all = items.map(({ PK, SK, ...e }) => e);
-    const entries = all.filter((e) => mayReadTimelineEntry(e, identity));
+    const entries = all.filter(mayReadTimelineEntry);
     const nextBefore = all.length ? all[all.length - 1].at : undefined;
     return { entries, ...(nextBefore !== undefined ? { nextBefore } : {}) };
   }
@@ -980,28 +979,36 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
       requestedAt: now,
       status: "pending",
       visibility: isPrivate ? "private" : "public",
+      // Whether this ask is in META's `reportCount`, so removing it later
+      // takes back exactly what was added. Rows from before private asks
+      // stopped being counted have no flag and were counted.
+      ...(isPrivate ? { counted: false } : {}),
     });
-    await db.updateJourneyMeta(journeyId, { reportCount: (meta.reportCount || 0) + 1, updatedAt: now });
-    // The timeline is a shared surface, so a private report's row is stamped
-    // private and served only back to the person who asked it (docs 20 §6.4,
-    // `mayReadTimelineEntry`). The summary is redacted as well as filtered:
-    // one control between a private question and everyone who can read the
-    // journey is not enough for a surface this easy to add a new reader to.
-    // Reads "Question asked", not "Report requested": the SPA displays this
-    // whole feature as **Questions** (docs 20 §13's rename note), and a
-    // timeline sentence using the stored word would read as a bug sitting
-    // next to a tab that says something else — the same fix `writeStatusVersion`
-    // already needed for health's own display words. `type` stays "report".
-    await db.putJourneyTimelineEntry(journeyId, {
-      type: "report",
-      summary: isPrivate ? "Question asked (private)" : `Question asked: ${question.slice(0, 80)}`,
-      actor: identity,
-      at: now,
-      detail: { reportId },
-      ...(isPrivate ? { visibility: "private" } : {}),
-    });
-    // Counts the act of asking, including a request that later fails.
-    await db.bumpContributor(journeyId, identity, "reportRequestCount").catch(() => {});
+    // A private question leaves no trace on anything another member can read
+    // (docs 20 §6.4): no timeline row, no `reportCount`, no contributor
+    // rollup. Each of those said "someone asked something private" — and
+    // the contributor row said who — which is the disclosure the private
+    // switch exists to prevent. It is also not activity on the journey, so
+    // `updatedAt` stays where it was and the journey does not float up
+    // everyone's list.
+    if (!isPrivate) {
+      await db.updateJourneyMeta(journeyId, { reportCount: (meta.reportCount || 0) + 1, updatedAt: now });
+      // Reads "Question asked", not "Report requested": the SPA displays this
+      // whole feature as **Questions** (docs 20 §13's rename note), and a
+      // timeline sentence using the stored word would read as a bug sitting
+      // next to a tab that says something else — the same fix
+      // `writeStatusVersion` already needed for health's own display words.
+      // `type` stays "report".
+      await db.putJourneyTimelineEntry(journeyId, {
+        type: "report",
+        summary: `Question asked: ${question.slice(0, 80)}`,
+        actor: identity,
+        at: now,
+        detail: { reportId },
+      });
+      // Counts the act of asking, including a request that later fails.
+      await db.bumpContributor(journeyId, identity, "reportRequestCount").catch(() => {});
+    }
     try {
       await internal.requestJourneyReport(journeyId, { reportId, question }, identity);
     } catch (e) {
@@ -1073,8 +1080,11 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
       await db.deleteJourneyTimelineEntriesFor(journeyId, report.requestedAt, "reportId", reportId).catch(() => {});
     }
     // Not `updatedAt`: taking a question back is not activity on the journey,
-    // and bumping it would float the journey up everyone's list.
-    await db.updateJourneyMeta(journeyId, { reportCount: Math.max(0, (meta.reportCount || 0) - 1) });
+    // and bumping it would float the journey up everyone's list. And only if
+    // the ask was counted in the first place (private ones are not).
+    if (report.counted !== false) {
+      await db.updateJourneyMeta(journeyId, { reportCount: Math.max(0, (meta.reportCount || 0) - 1) });
+    }
     return { journeyId, reportId, removed: true };
   }
 

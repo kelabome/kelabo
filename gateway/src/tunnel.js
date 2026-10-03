@@ -1308,6 +1308,9 @@ export function createTunnel(c) {
         reportId: r.reportId,
         question: clip(r.question, CONTEXT_REPORT_QUESTION_CLIP),
         answer: clip(r.answer, CONTEXT_REPORT_ANSWER_CLIP),
+        // Dropping this let the asker's own private Q&A reach the agent
+        // looking exactly like shared journey material.
+        ...(r.visibility === "private" ? { visibility: "private" } : {}),
       })),
     });
   }

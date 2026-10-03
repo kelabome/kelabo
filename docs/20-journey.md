@@ -452,25 +452,33 @@ belongs to someone.
 Three surfaces follow from it, and each is a place the rule could have
 leaked:
 
-- **The timeline** serves a private report's row only back to the person
-  who asked it (`mayReadTimelineEntry`, and the same filter on the
-  Gateway's `queryJourneyTimeline` for §12.3's
-  `kelabo_journey_timeline`). Redacting the summary to
-  `"Report requested (private)"` was the first attempt and is **kept as
-  well** — but redaction alone was wrong: "someone asked something
-  private, at 14:02" is itself the disclosure, and on a three-person
-  journey it names them. Two controls rather than one because the
-  timeline is the surface where a new reader is easiest to add later.
-  The paging cursor is taken from the **unfiltered** page: `nextBefore`
-  has to advance past rows this viewer cannot see, or a page that filters
-  down to nothing returns the same window forever.
+- **The timeline, the counts and the contributor rollup** carry no trace
+  of a private question. `requestReport` writes no `TL#` row for one, does
+  not bump `reportCount` (the row carries `counted: false`, so removing it
+  (§6.6) takes back nothing) and does not bump the asker's
+  `reportRequestCount`. It does not touch `updatedAt` either.
+  - **The history of this rule:** first the row was redacted to
+    `"Question asked (private)"`. Then it was filtered to the asker alone.
+    But "someone asked something private, at 14:02" is itself the
+    disclosure, and on a three-person journey it names them. The count and
+    the rollup told everyone the same thing, and the rollup said who. The
+    asker meanwhile saw a line on the shared timeline that nobody else could
+    see, which read as though everybody could.
+  - **Rows written before this** are hidden from everyone, the asker
+    included: `mayReadTimelineEntry`, and the same filter on the Gateway's
+    `queryJourneyTimeline` for §12.3's `kelabo_journey_timeline`.
+  - **Paging:** the cursor is taken from the **unfiltered** page.
+    `nextBefore` has to advance past rows this viewer cannot see, or a page
+    that filters down to nothing returns the same window forever.
 - **The agent pull tools** (§12.3's `kelabo_journey_reports`,
   `kelabo_journey_context`) serve public reports plus the *attached
   identity's own* private ones — `conn.identity` is already on the
   connection, so the agent obeys exactly the rule REST does rather than a
   second, looser one. A private report reaching the agent is rendered
   with an explicit "visible to you alone, do not repeat it to a kelabo"
-  note: the model must not treat it as shared journey material.
+  note: the model must not treat it as shared journey material. That
+  includes the `journey_context` bundle. Its report items used to drop
+  `visibility`, so there the asker's own private Q&A looked like anyone's.
 - **`buildContext`** (§6.2, the server-side synthesis) sees **public
   only**, never "everything" — that answer is itself readable by whoever
   asks next, so folding a private report into it would launder one
@@ -540,7 +548,8 @@ take a question back, so a private one stayed in the table permanently
 - **Allowed on a completed journey**, for the reason a read cursor is
   (§19.4). It is not a write to the journey's content, and refusing it would
   leave a question its asker could never take back. It lowers `reportCount`
-  but does not touch `updatedAt`: taking a question back is not activity on
+  for a question that was counted, which a private one is not (§6.4). It does
+  not touch `updatedAt`: taking a question back is not activity on
   the journey. The contributor's `reportRequestCount` is unchanged, because
   it counts asks (§10).
 

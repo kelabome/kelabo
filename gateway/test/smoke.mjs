@@ -155,6 +155,9 @@ const db = {
           Items: [
             { PK: pk, SK: "TL#0000000000002", type: "report", summary: "Question asked: Where are we?", actor: "alice@example.com", at: 2 },
             { PK: pk, SK: "TL#0000000000003", type: "report", summary: "Question asked (private)", actor: "bob@example.com", at: 3, visibility: "private" },
+            // Alice's own, written before private asks stopped leaving a row:
+            // hidden from her too now.
+            { PK: pk, SK: "TL#0000000000004", type: "report", summary: "Question asked (private)", actor: "alice@example.com", at: 4, visibility: "private" },
           ],
         };
       }
@@ -1078,7 +1081,8 @@ async function main() {
     assert.equal(tl.resolved, "ok");
     assert.deepEqual(tl.entries.map((e) => e.summary), ["Question asked: Where are we?"]);
     assert.equal(tl.entries.some((e) => e.actor === "bob@example.com"), false, "another member's private row is not served");
-    console.log("ok: journey_timeline_request → another member's private report row is filtered out");
+    assert.equal(tl.entries.some((e) => e.visibility === "private"), false, "nor the attached identity's own");
+    console.log("ok: journey_timeline_request → no private report row is served, the asker's own included");
   }
 
   {

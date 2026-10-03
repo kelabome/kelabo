@@ -459,10 +459,13 @@ export async function queryJourneyTimeline(c, journeyId, { type, before, limit =
       Limit: limit,
     })
   );
-  // A private report's row is the asker's alone (docs 20 §6.4) — the same
-  // rule rest-api's `mayReadTimelineEntry` applies, so the agent's view of
-  // the timeline is never wider than the person it is attached as.
-  return (out.Items ?? []).filter((e) => e.visibility !== "private" || (viewer && e.actor === viewer));
+  // A private row is shown to nobody (docs 20 §6.4) — the same rule
+  // rest-api's `mayReadTimelineEntry` applies, so the agent's view of the
+  // timeline is never wider than the person it is attached as. Private
+  // questions no longer write one; this hides the rows written before.
+  // `viewer` stays in the signature because callers pass it, but it no longer
+  // widens anything.
+  return (out.Items ?? []).filter((e) => e.visibility !== "private");
 }
 
 async function putJourneyTimelineRow(c, journeyId, entry) {
