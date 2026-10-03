@@ -106,11 +106,12 @@ export function createPresence(c) {
     return entry.streams.size > 0;
   }
 
-  /** Everyone from this tenant holding a stream right now. The audience for a
-   *  public journey, whose membership is a tenant match computed at read time
-   *  (docs 20 §3.2) and which the Gateway therefore cannot enumerate — but it
-   *  does not have to: an offline person cannot be pushed to anyway, and their
-   *  badge is correct the moment they load a page. */
+  /** Everyone from this tenant holding a stream right now. Bounds a public
+   *  journey's audience (docs 20 §19.9): its followers and the people a message
+   *  mentions are narrowed to this set. It is never the audience by itself.
+   *  Being a colleague makes you a member of a public journey, not someone
+   *  waiting to hear about it. An offline person cannot be pushed to anyway,
+   *  and their badge is correct the moment they load a page. */
   function tenantOnline(tenantId) {
     if (!hasColleagues(tenantId)) return new Set();
     return new Set(c.state.presenceByTenant.get(tenantId) || []);

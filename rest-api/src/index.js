@@ -1226,6 +1226,30 @@ export function createApp(deps) {
       },
     },
     {
+      // Following a public journey (docs 20 §3.4). Yourself only — there is no
+      // identity in the path, so nobody can follow on somebody else's behalf.
+      method: "POST",
+      pattern: "/journeys/:id/follow",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.followJourney({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id/follow",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.unfollowJourney({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
       method: "POST",
       pattern: "/journeys/:id/kelabos",
       handle: async (req) => {

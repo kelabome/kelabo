@@ -1331,6 +1331,25 @@ export default function JourneyDetail() {
   }
   const saveAvatar = async body => { await api.patchJourney(id, body); reload() }
 
+  // The rail's counts change with this — a followed journey's unread starts
+  // counting, an unfollowed one's stops — so it is told, not left to its poll.
+  const { reloadJourneys } = useAppData()
+  const [followBusy, setFollowBusy] = useState(false)
+  const toggleFollow = async () => {
+    const next = !journey.following
+    setFollowBusy(true)
+    try {
+      await (next ? api.followJourney(id) : api.unfollowJourney(id))
+      setJourney(j => ({ ...j, following: next }))
+      reloadJourneys()
+      toast(next ? 'Following — its messages will reach your rail' : 'Unfollowed — you can still read it here')
+    } catch {
+      toast(next ? 'Could not follow this journey' : 'Could not unfollow this journey')
+    } finally {
+      setFollowBusy(false)
+    }
+  }
+
   // The dialog, not a bare prompt: accessors are found by name the same way
   // invitees are (EmailPicker → /people/search, docs 18 §4.8), and several
   // can be added at once.
@@ -1391,6 +1410,23 @@ export default function JourneyDetail() {
             <span className={'chip' + (journey.status === 'completed' ? ' chip-ended' : ' chip-live')}>{journey.status}</span>
             <span className="chip">{journey.visibility}</span>
             <JourneyHealthChip health={journey.health} />
+            {/* Following (docs 20 §3.4): only a public journey needs it — a
+                private one's members are its roster — and never its lead,
+                who is told about everything already. */}
+            {journey.visibility === 'public' && isMember && !isOwner && (
+              <Button
+                size="sm"
+                variant={journey.following ? 'outline' : 'primary'}
+                onClick={toggleFollow}
+                disabled={followBusy}
+                title={journey.following
+                  ? 'Stop putting its messages on your rail. You can still read it.'
+                  : 'Put its messages on your rail and be told when they arrive.'}
+                style={{ marginLeft: 'auto' }}
+              >
+                {journey.following ? 'Following' : 'Follow'}
+              </Button>
+            )}
           </div>
           <p className="page-sub">
             Lead: {journey.ownerIdentity} · {journey.kelaboCount} kelabo{journey.kelaboCount === 1 ? '' : 's'}

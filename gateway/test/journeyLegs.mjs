@@ -20,6 +20,8 @@ const NOW = Date.now();
 const JOURNEY = "j-http";
 const PK = `JOURNEY#${JOURNEY}`;
 const T = "trunk";
+const PUB = "j-public";
+const PUB_PK = `JOURNEY#${PUB}`;
 
 /** A journeys table just wide enough for the handlers: point reads, a
  *  prefix/range query, puts, and the two conditional updates. */
@@ -225,6 +227,21 @@ async function main() {
     },
     { PK: PK, SK: "ACCESSOR#bob@example.com", identity: "bob@example.com" },
     { PK: PK, SK: `LEG#${T}`, legId: T, title: "Trunk", createdAt: 1, messageCount: 0, lastMessageAt: 0, archived: false },
+    // A public journey: Dave follows it, Erin holds an accessor row left over
+    // from when it was private, Frank is merely a colleague.
+    {
+      PK: PUB_PK,
+      SK: "META",
+      journeyId: PUB,
+      title: "Open Roadmap",
+      tenantId: "example.com",
+      ownerIdentity: "alice@example.com",
+      visibility: "public",
+      status: "active",
+    },
+    { PK: PUB_PK, SK: "FOLLOWER#dave@example.com", identity: "dave@example.com", followedAt: 1 },
+    { PK: PUB_PK, SK: "ACCESSOR#erin@example.com", identity: "erin@example.com" },
+    { PK: PUB_PK, SK: `LEG#${T}`, legId: T, title: "Trunk", createdAt: 1, messageCount: 0, lastMessageAt: 0, archived: false },
   ]);
   const c = await createContainer({
     config,
@@ -532,6 +549,57 @@ async function main() {
   ok("a read that did not move the cursor tells nobody");
 
   for (const s of [bobStream, strangerStream, aliceStream]) s.res.destroy();
+
+  {
+    // --- a public journey tells its followers, not the tenant (§3.4) --------
+
+    const pubMessages = `/journeys/${PUB}/legs/${T}/messages`;
+    const streams = {
+      alice: await connectPresence(port, "alice@example.com"),
+      dave: await connectPresence(port, "dave@example.com"),
+      erin: await connectPresence(port, "erin@example.com"),
+      frank: await connectPresence(port, "frank@example.com"),
+      mallory: await connectPresence(port, "mallory@other.com", "other.com"),
+    };
+    await new Promise(r => setTimeout(r, 60));
+    const got = (who, text) =>
+      streams[who].events.some(e => e.kind === "journey_message" && e.journeyId === PUB && e.message?.text === text);
+
+    // Frank is a member — he can read and post — but has not followed it.
+    assert.equal((await call(port, "GET", pubMessages, { identity: "frank@example.com" })).status, 200);
+    const plain = await call(port, "POST", pubMessages, { identity: "alice@example.com", body: { text: "roadmap update" } });
+    assert.equal(plain.status, 201);
+    await waitFor(() => got("dave", "roadmap update"));
+    await waitFor(() => got("alice", "roadmap update"));
+    await new Promise(r => setTimeout(r, 120));
+    assert.equal(got("frank", "roadmap update"), false, "a colleague who does not follow is not told");
+    assert.equal(got("erin", "roadmap update"), false, "a leftover accessor row is not a follow");
+    assert.equal(got("mallory", "roadmap update"), false, "another tenant is never told");
+    ok("a public journey's message reaches its lead and followers, not every colleague online");
+
+    // Named by full address, Frank hears about that one message — and only it.
+    await call(port, "POST", pubMessages, {
+      identity: "alice@example.com",
+      body: { text: "@frank@example.com can you look?" },
+    });
+    await waitFor(() => got("frank", "@frank@example.com can you look?"));
+    await call(port, "POST", pubMessages, { identity: "alice@example.com", body: { text: "carry on" } });
+    await waitFor(() => got("dave", "carry on"));
+    await new Promise(r => setTimeout(r, 120));
+    assert.equal(got("frank", "carry on"), false, "a mention does not follow anybody");
+    ok("a mention reaches a non-follower for that message alone");
+
+    // Flipped private, the follower row is inert, as the accessor row was.
+    db.items.get(`${PUB_PK}|META`).visibility = "private";
+    await call(port, "POST", pubMessages, { identity: "alice@example.com", body: { text: "now private" } });
+    await waitFor(() => got("erin", "now private"));
+    await new Promise(r => setTimeout(r, 120));
+    assert.equal(got("dave", "now private"), false, "a follower of a now-private journey is not told");
+    db.items.get(`${PUB_PK}|META`).visibility = "public";
+    ok("follower rows are inert on a private journey");
+
+    for (const s of Object.values(streams)) s.res.destroy();
+  }
 
   {
     // --- the sender never badges themselves --------------------------------

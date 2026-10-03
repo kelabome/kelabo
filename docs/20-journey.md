@@ -162,6 +162,41 @@ blast-radius (complete freezes every other member's access to write), or
 identity-defining (visibility, ownership) — kept owner-only even though a
 stricter reading of "full rights" could extend further.
 
+### 3.4 Following a public journey
+
+On a public journey every colleague is a member (§3.2), so membership cannot
+be what decides who is **told** about it. It used to be: every message was
+pushed to every colleague holding a presence stream, and the rail counted
+every public journey in the tenant as unread — so people were badged for
+journeys they had never opened.
+
+Following is that decision, and it is the person's alone:
+
+- `POST` / `DELETE /journeys/:id/follow`, for yourself only. A
+  `FOLLOWER#<identity>` row, `{identity, followedAt}`. Public journeys only
+  (`409 not_public`); the lead cannot follow their own (`409 journey_owner`)
+  because they are told everything already. Allowed on a completed journey,
+  and it touches neither META nor `updatedAt` — it is not a write to the
+  journey.
+- **Nothing follows on your behalf.** Posting does not, and being @mentioned
+  does not. A mention still reaches you: that one message is pushed to you,
+  and the mention counts on your rail (§19.8). The general unread count does
+  not.
+- **What following changes:**
+  - **The rail.** A public journey you follow counts unread like any other.
+    One you do not follow counts mentions only.
+  - **Realtime pushes** (§19.9). They go to the lead, the online followers,
+    and anyone mentioned in that message.
+  - **Access** is unchanged. A non-follower can still open the journey, read
+    it and post in it.
+- **After a flip to private**, `FOLLOWER#` rows are inert. Fan-out reads them
+  only for a public journey, the mirror image of a public journey ignoring
+  its leftover `ACCESSOR#` rows. They come back into effect if it is made
+  public again.
+- **No GSI.** `listJourneys` already holds the tenant's public journeys and
+  point-reads `FOLLOWER#<me>` on each. The Gateway asks "who follows this
+  journey", which is a query on the partition.
+
 ## 4. Data model
 
 ### 4.1 New table: `kelabo-<env>-journeys`
@@ -177,6 +212,7 @@ never auto-expires; every removal in this document is an explicit write.
 | `DESC#<pad(version,6)>` | Description version (immutable) | `version, markdown, editedBy, editedAt, changeNote?` |
 | `STATUS#<pad(version,6)>` | Health/progress snapshot (immutable) — §5 | `version, health, progress, note?, setBy, setAt, source, reportId?` |
 | `ACCESSOR#<identity>` | Private-journey roster entry | `identity, displayName, avatarVariant, addedBy, addedAt` |
+| `FOLLOWER#<identity>` | A colleague following a public journey — §3.4 | `identity, followedAt` |
 | `LINK#<kelaboId>` | Kelabo membership (forward) | `kelaboId, titleSnapshot, hostIdentitySnapshot, linkedBy, linkedAt, statusSnapshot` |
 | `REPORT#<reportId>` | One report, append-only — §6 | `reportId, question, requestedBy, requestedAt, status(pending\|ready\|failed), answer?, generatedAt?, error?` |
 | `BOARDMSG#<msgId>` | Board message, current head — §7 | `msgId, content, createdBy, createdAt, updatedBy?, updatedAt?, version, archived, archivedBy?, archivedAt?` |
@@ -1523,12 +1559,20 @@ be a third `EventSource` against the browser's six-per-origin budget, and it
 would still not solve the cross-journey badge: you are by definition not
 subscribed to the journey you are not looking at.
 
-**Audience** is owner + `ACCESSOR#` roster for a private journey, and everyone
-from the tenant holding a stream for a public one — **never** a public
-journey's accessor rows, which a private→public flip leaves behind inert
-(§3.2) and which reading here would resurrect as a notification list. An
-offline member is simply not pushed to; their badge is correct the moment they
-load a page.
+**Audience** is owner + `ACCESSOR#` roster for a private journey. For a public
+one it is owner + `FOLLOWER#` rows (§3.4) + whoever this message mentions.
+Followers and the mentioned are narrowed to colleagues online in the journey's
+tenant. It **never** includes a public journey's accessor rows, which a
+private→public flip leaves behind inert (§3.2) and which reading here would
+resurrect as a notification list. A private journey never reads follower rows.
+An offline member is simply not pushed to; their badge is correct the moment
+they load a page.
+
+> It was once everyone from the tenant holding a stream. Every colleague is a
+> *member* of a public journey, but that is the right to read it, not a request
+> to be told about it. Every open tab in the tenant was sent the text of every
+> message, refetched the journey list on each one, and lit a badge for a journey
+> its user had never opened.
 
 **The whole message travels**, not a nudge to go and look, so a client already
 reading that leg renders it immediately — the difference between a chat and

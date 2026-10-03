@@ -350,6 +350,7 @@ public-tenant-match (`identity.tenantId === journey.tenantId`) → private
 | GET / PATCH / DELETE | `/journeys/:id` | Detail (counts, description head, `myRole`) / title-visibility (owner) / cascading delete (owner, docs 20 §14.1) |
 | POST | `/journeys/:id/complete` \| `/reopen` | Status flip (owner); `completed` freezes every write |
 | GET/POST/DELETE | `/journeys/:id/accessors[/:identity]` | Private roster — member reads, owner writes |
+| POST / DELETE | `/journeys/:id/follow` | Follow / unfollow a **public** journey, yourself only (docs 20 §3.4) |
 | POST/GET/DELETE | `/journeys/:id/kelabos[/:kelaboId]` | Link (`{kelaboId}`, caller must be host/participant of *that* kelabo) / linked list / unlink |
 | POST + GET | `/journeys/:id/description[/history]` | New immutable version / version list |
 | POST + GET | `/journeys/:id/status[/history]` | Health/progress snapshot (docs 20 §5) / version list |

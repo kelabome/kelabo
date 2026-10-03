@@ -823,6 +823,35 @@ export function createDb({ config, client } = {}) {
     return res.Items || [];
   }
 
+  // --- journey followers (public journeys, docs 20 §3.4) ---------------------
+  //
+  // Deliberately no GSI. "Which journeys do I follow" is only ever asked of
+  // the public journeys `listJourneys` already holds, one point read each;
+  // "who follows this journey" is the Gateway's fan-out question, and that is
+  // a query on this partition.
+
+  async function putFollower(journeyId, follower) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `FOLLOWER#${follower.identity}`, ...follower },
+      })
+    );
+  }
+
+  async function getFollower(journeyId, identity) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `FOLLOWER#${identity}` } })
+    );
+    return res.Item || null;
+  }
+
+  async function removeFollower(journeyId, identity) {
+    await doc.send(
+      new DeleteCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `FOLLOWER#${identity}` } })
+    );
+  }
+
   // --- message board (docs 20 §7) --------------------------------------------
   //
   // Two item kinds, both prefixed `BOARDMSG#`, told apart by whether the SK
@@ -2103,6 +2132,9 @@ export function createDb({ config, client } = {}) {
     getAccessor,
     removeAccessor,
     listAccessors,
+    putFollower,
+    getFollower,
+    removeFollower,
     createBoardMessageHead,
     putBoardMessageHead,
     getBoardMessageHead,
