@@ -1271,24 +1271,33 @@ export function createDb({ config, client } = {}) {
     return res.Items || [];
   }
 
+  // The `since` read is a bounded range, never `SK > :sk`. The kelabo partition
+  // holds more than contributions — META, INVITE#, JOURNEY#, MINUTES,
+  // PROMOTION, UTT# — and every one of those sorts after `CONTRIB#…`, so an
+  // open-ended range handed the kelabo record and the invitee list to any
+  // participant polling the board (issue #10). The upper bound keeps the read
+  // inside CONTRIB#; the lower bound starts at the *next* millisecond, because
+  // the Gateway writes `CONTRIB#<at>#<rand>` and `> CONTRIB#<at>` also matched
+  // the cursor row itself, returning the newest post again on every poll.
   async function queryContributions(kelaboId, { since, limit }) {
-    const keyCond = since
-      ? "PK = :pk AND SK > :sk"
+    const cursor = Number.isFinite(since) && since > 0 ? Math.floor(since) : null;
+    const keyCond = cursor !== null
+      ? "PK = :pk AND SK BETWEEN :lo AND :hi"
       : "PK = :pk AND begins_with(SK, :sk)";
-    const values = since
-      ? { ":pk": `KELABO#${kelaboId}`, ":sk": `CONTRIB#${pad(since)}` }
+    const values = cursor !== null
+      ? { ":pk": `KELABO#${kelaboId}`, ":lo": `CONTRIB#${pad(cursor + 1)}`, ":hi": "CONTRIB#\uffff" }
       : { ":pk": `KELABO#${kelaboId}`, ":sk": "CONTRIB#" };
     const res = await doc.send(
       new QueryCommand({
         TableName: T.kelabos,
         KeyConditionExpression: keyCond,
         ExpressionAttributeValues: values,
-        ScanIndexForward: !!since,
+        ScanIndexForward: cursor !== null,
         Limit: limit,
       })
     );
     let items = res.Items || [];
-    if (!since) items = items.reverse();
+    if (cursor === null) items = items.reverse();
     return items;
   }
 

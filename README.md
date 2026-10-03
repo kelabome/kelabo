@@ -95,6 +95,13 @@ lands on a filterable timeline. Full design: [docs/20-journey.md](docs/20-journe
 - **A live room** with conference audio, camera and screen share. Two
   transports: `sfu` (Cloudflare's edge, scales) or `mesh` — a "secure kelabo"
   where media stays peer-to-peer and **no server can decrypt it**.
+  Peer-to-peer means the *media* path, not "serverless": browsers cannot find
+  each other on their own, so a mesh call still needs the Gateway to relay
+  signalling (SDP offers/answers and ICE candidates) and a STUN server for each
+  browser to learn its public address. Where no direct route exists (symmetric
+  NAT, strict firewalls) the media is relayed through TURN — still encrypted
+  end to end, so the relay cannot decrypt it either.
+  [docs/components/15-conference-rtc.md](docs/components/15-conference-rtc.md).
 - **Live transcription** as people speak, streamed browser → STT provider
   directly: the server receives transcripts, never audio.
 - **Messages beside the transcript** — the room's chat, with history that
@@ -117,7 +124,8 @@ lands on a filterable timeline. Full design: [docs/20-journey.md](docs/20-journe
   session to a kelabo — it hears the transcript and answers onto the board.
 - **Everything optional degrades, nothing jams.** No STT key? The room is
   typed messages and calls. No LLM? No assistant surface at all — not a broken
-  one. No Cloudflare creds? Peer-to-peer calling still works. The capability
+  one. No Cloudflare creds? Peer-to-peer calling still works, over public STUN
+  only — so peers on networks that need a TURN relay cannot connect. The capability
   ladder is a design rule, not an accident:
   [docs/19-optional-capabilities.md](docs/19-optional-capabilities.md).
 - **An admin console, so day two is not a deploy.** `/admin` publishes the

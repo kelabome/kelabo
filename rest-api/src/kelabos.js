@@ -336,11 +336,15 @@ export function createKelabos({ config, db, internal, credentials, opConfig }) {
       throw err(403, "forbidden");
     }
     const items = await db.queryContributions(kelaboId, { since, limit });
+    // Belt and braces for issue #10: the query is bounded to CONTRIB# rows, but
+    // this is the line that decides what a participant (a link guest included)
+    // is shown, so it does not trust the key condition to be the only guard.
+    const rows = items.filter((i) => String(i.SK || "").startsWith("CONTRIB#"));
     // The cursor comes from the page as read, before removed rows are dropped:
     // a page whose newest rows were all removed must still move the cursor
     // past them, or the next `since` read returns the same page forever.
-    const nextSince = items.length ? items[items.length - 1].at : undefined;
-    const contributions = items
+    const nextSince = rows.length ? rows[rows.length - 1].at : undefined;
+    const contributions = rows
       .filter((i) => i.removedAt == null)
       .map(({ PK, SK, tenantStatus, removedAt, removedBy, ...c }) => c);
     return { contributions, ...(nextSince !== undefined ? { nextSince } : {}) };

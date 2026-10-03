@@ -719,6 +719,38 @@ await test("GET /kelabos/:id/board backfill (limit + since)", async () => {
 
   const caughtUp = await call("GET", `/kelabos/${kelaboId}/board?since=${base + 5000}`, { cookies: participantCookies });
   assert.deepEqual(caughtUp.json.contributions, []);
+  assert.equal(caughtUp.json.nextSince, undefined);
+});
+
+// Issue #10: the kelabo partition is not only contributions. Every row that
+// sorts after `CONTRIB#…` — META, INVITE#, JOURNEY#, MINUTES, PROMOTION, UTT# —
+// used to come back from a caught-up `since` poll, so a participant (a link
+// guest included) received the kelabo record and every invitee's address.
+await test("GET /kelabos/:id/board?since never returns non-contribution rows (#10)", async () => {
+  await db.putInvite(kelaboId, { inviteKey: "invitee@example.com", email: "invitee@example.com", response: "pending" });
+  db.__putKelaboItem(kelaboId, "JOURNEY#j-1", { journeyId: "j-1" });
+  db.__putKelaboItem(kelaboId, "MINUTES", { markdown: "secret minutes" });
+  db.__putKelaboItem(kelaboId, "PROMOTION", { by: "host@example.com" });
+  db.__putKelaboItem(kelaboId, "UTT#000000000001#abc", { text: "hello" });
+
+  const tail = await call("GET", `/kelabos/${kelaboId}/board`, { cookies: participantCookies });
+  const newest = tail.json.nextSince;
+  assert.ok(newest > 0);
+
+  const caughtUp = await call("GET", `/kelabos/${kelaboId}/board?since=${newest}`, { cookies: participantCookies });
+  assert.equal(caughtUp.statusCode, 200);
+  assert.deepEqual(caughtUp.json.contributions, [], "nothing after the newest post — not META, not INVITE#");
+
+  // A cursor before the last post returns exactly the posts after it, each once.
+  const one = await call("GET", `/kelabos/${kelaboId}/board?since=${newest - 1}`, { cookies: participantCookies });
+  assert.equal(one.json.contributions.length, 1);
+  assert.equal(one.json.contributions[0].at, newest);
+  assert.equal(one.json.nextSince, newest);
+
+  // A junk cursor is the tail read, not an open range.
+  const junk = await call("GET", `/kelabos/${kelaboId}/board?since=abc`, { cookies: participantCookies });
+  assert.equal(junk.statusCode, 200);
+  assert.ok(junk.json.contributions.every((c) => typeof c.id === "string" && c.at > 0));
 });
 
 await test("POST /kelabos/:id/end (host only) signals gateway", async () => {

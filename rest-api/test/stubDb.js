@@ -244,15 +244,20 @@ export function createDb() {
       if (!item) return;
       item.participants = [...(item.participants || []), participant];
     },
+    // Mirrors the real key conditions (db.js): `begins_with(CONTRIB#)` for the
+    // tail, `BETWEEN CONTRIB#<since+1> AND CONTRIB#\uffff` for a cursor. The
+    // real query is also exercised directly, against a fake DynamoDB, in
+    // test/board.mjs — this stub only has to agree with it.
     async queryContributions(kelaboId, { since, limit }) {
-      let items = [...kelabos.values()]
-        .filter((i) => i.PK === `KELABO#${kelaboId}` && i.SK.startsWith("CONTRIB#"))
+      const all = [...kelabos.values()]
+        .filter((i) => i.PK === `KELABO#${kelaboId}`)
         .sort((a, b) => (a.SK < b.SK ? -1 : 1));
-      if (since) {
-        items = items.filter((i) => i.SK > `CONTRIB#${pad(since)}`);
-        return items.slice(0, limit);
+      if (Number.isFinite(since) && since > 0) {
+        const lo = `CONTRIB#${pad(Math.floor(since) + 1)}`;
+        const hi = "CONTRIB#\uffff";
+        return all.filter((i) => i.SK >= lo && i.SK <= hi).slice(0, limit);
       }
-      return items.slice(-limit);
+      return all.filter((i) => i.SK.startsWith("CONTRIB#")).slice(-limit);
     },
     async findContributionRows(kelaboId, id) {
       return [...kelabos.values()].filter(
@@ -267,10 +272,13 @@ export function createDb() {
         row.removedBy = removedBy;
       }
     },
+    // Same key shape the Gateway writes: `CONTRIB#<at>#<rand>`. Storing the bare
+    // `CONTRIB#<at>` here is what hid the cursor row being returned again.
     async _putContribution(kelaboId, c) {
-      kelabos.set(mkey(`KELABO#${kelaboId}`, `CONTRIB#${pad(c.at)}`), {
+      const sk = `CONTRIB#${pad(c.at)}#${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
+      kelabos.set(mkey(`KELABO#${kelaboId}`, sk), {
         PK: `KELABO#${kelaboId}`,
-        SK: `CONTRIB#${pad(c.at)}`,
+        SK: sk,
         ...c,
       });
     },
