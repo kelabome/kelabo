@@ -1546,6 +1546,22 @@ export function createApp(deps) {
         };
       },
     },
+    {
+      // The asker's alone (docs 20 §6.6); anyone else gets report_not_found.
+      method: "DELETE",
+      pattern: "/journeys/:id/reports/:reportId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.removeReport({
+            journeyId: req.params.id,
+            identity: session.identity,
+            reportId: req.params.reportId,
+          }),
+        };
+      },
+    },
     // Contributors (docs 20 §10) — a rollup, not a live query; recoverable
     // from the source rows (kelabo links + report requests) if it ever
     // needed rebuilding, never itself authoritative.

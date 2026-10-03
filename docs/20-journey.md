@@ -514,7 +514,35 @@ request, but `complete` returns only the text and drops the provider's own
 usage record, which is the only trustworthy token count in the system —
 the agent pipeline already reports that same normalized shape
 (`agent/llm.js`). There is no local tokenizer here and there should not
-be one.
+  be one.
+
+### 6.6 Removing a question — the asker's alone
+
+`DELETE /journeys/:id/reports/:reportId`. Until this existed nobody could
+take a question back, so a private one stayed in the table permanently
+(along with its timeline row, when it still had one, §6.4).
+
+- **Asker only, public or private.** The lead cannot remove someone's
+  question. They already cannot read a private one, and a question is one
+  member's ask, not the journey's record. Anyone else gets `404
+  report_not_found`, the same as an id that does not exist.
+- **Deleted outright**, unlike a document's soft removal (§8.2). The
+  timeline row that indexes it goes too
+  (`deleteJourneyTimelineEntriesFor`, which matches on the row's
+  millisecond and `detail.reportId`). Otherwise a public question's timeline
+  row would keep quoting its text after it was removed. With the row gone,
+  every reader is clean by construction: the REST list, the Gateway's
+  `listReadyReports` / `getJourneyReport`, `buildContext` and the agent
+  tools.
+- **A late answer cannot resurrect it.** The Gateway writes the finished
+  answer with `attribute_exists(PK)`, so removing a question still pending
+  only makes that write fail and be logged.
+- **Allowed on a completed journey**, for the reason a read cursor is
+  (§19.4). It is not a write to the journey's content, and refusing it would
+  leave a question its asker could never take back. It lowers `reportCount`
+  but does not touch `updatedAt`: taking a question back is not activity on
+  the journey. The contributor's `reportRequestCount` is unchanged, because
+  it counts asks (§10).
 
 ## 7. Message board
 

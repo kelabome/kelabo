@@ -825,6 +825,16 @@ export function createDb() {
       const item = journeys.get(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`));
       if (item) Object.assign(item, { status: "failed", error });
     },
+    async deleteJourneyReport(journeyId, reportId) {
+      journeys.delete(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`));
+    },
+    async deleteJourneyTimelineEntriesFor(journeyId, at, detailKey, id) {
+      for (const [k, i] of [...journeys.entries()]) {
+        if (i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith(`TL#${pad(at)}#`) && i.detail?.[detailKey] === id) {
+          journeys.delete(k);
+        }
+      }
+    },
     async bumpContributor(journeyId, identity, field) {
       const k = mkey(`JOURNEY#${journeyId}`, `CONTRIBUTOR#${identity}`);
       const now = Date.now();

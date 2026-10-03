@@ -1048,6 +1048,36 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
     return rest;
   }
 
+  /**
+   * Remove a question you asked (docs 20 §6.6). The asker's alone — not the
+   * lead's, even for a public one: it is somebody's own question and answer,
+   * and the lead already cannot read a private one, let alone remove it.
+   *
+   * Deleted outright, with the timeline row that indexes it, rather than
+   * soft-removed like a document: a document is the journey's record and its
+   * removal is part of that record, while a question is one person's ask.
+   * Allowed on a completed journey for the same reason a read cursor is —
+   * it is not a write to the journey's content, and refusing it would leave a
+   * private question its asker could never take back.
+   *
+   * Anyone but the asker gets the same 404 as a question that does not exist,
+   * so a reportId cannot be probed for whose it is.
+   */
+  async function removeReport({ journeyId, identity, reportId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const report = await db.getJourneyReport(journeyId, reportId);
+    if (!report || report.requestedBy !== identity) throw err(404, "report_not_found");
+    await db.deleteJourneyReport(journeyId, reportId);
+    if (report.requestedAt) {
+      await db.deleteJourneyTimelineEntriesFor(journeyId, report.requestedAt, "reportId", reportId).catch(() => {});
+    }
+    // Not `updatedAt`: taking a question back is not activity on the journey,
+    // and bumping it would float the journey up everyone's list.
+    await db.updateJourneyMeta(journeyId, { reportCount: Math.max(0, (meta.reportCount || 0) - 1) });
+    return { journeyId, reportId, removed: true };
+  }
+
   // --- contributors (docs 20 §10) ----------------------------------------------
 
   async function listContributors({ journeyId, identity }) {
@@ -1096,6 +1126,7 @@ export function createJourneys({ config, db, internal, opConfig, tenancy = creat
     requestReport,
     listReports,
     getReport,
+    removeReport,
     listContributors,
   };
 }

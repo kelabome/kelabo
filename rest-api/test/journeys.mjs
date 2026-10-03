@@ -989,6 +989,52 @@ await test("reports: a stranger cannot request or read one; unknown id is 404", 
   );
 });
 
+await test("removeReport: the asker alone may remove a question, which takes its timeline row with it", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const shared = await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "Where are we?" } });
+  const secret = await journeys.requestReport({
+    journeyId: j.journeyId,
+    identity: COLLEAGUE,
+    body: { question: "Am I behind?", visibility: "private" },
+  });
+
+  // Not the lead, even for a public question — and the same 404 as an id that
+  // does not exist, for a private one the lead cannot even see.
+  for (const reportId of [shared.reportId, secret.reportId, "nope"]) {
+    await assert.rejects(
+      journeys.removeReport({ journeyId: j.journeyId, identity: OWNER, reportId }),
+      (e) => e.status === 404 && e.code === "report_not_found",
+    );
+  }
+  await assert.rejects(
+    journeys.removeReport({ journeyId: j.journeyId, identity: OUTSIDER, reportId: shared.reportId }),
+    (e) => e.status === 403,
+  );
+
+  await journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: shared.reportId });
+  await journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: secret.reportId });
+  assert.deepEqual((await journeys.listReports({ journeyId: j.journeyId, identity: COLLEAGUE })).reports, []);
+  assert.equal(await db.getJourneyReport(j.journeyId, secret.reportId), null, "gone, not hidden");
+  const tl = await journeys.getTimeline({ journeyId: j.journeyId, identity: COLLEAGUE });
+  assert.deepEqual(tl.entries.filter((e) => e.type === "report"), [], "the timeline stops quoting it");
+  // A second removal is a 404, not a silent success over nothing.
+  await assert.rejects(
+    journeys.removeReport({ journeyId: j.journeyId, identity: COLLEAGUE, reportId: shared.reportId }),
+    (e) => e.status === 404,
+  );
+});
+
+await test("removeReport: allowed on a completed journey, and wired over HTTP", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const asked = await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "q" } });
+  await journeys.completeJourney({ journeyId: j.journeyId, identity: OWNER });
+  const cookies = await sessionFor(COLLEAGUE);
+  const res = await call("DELETE", `/journeys/${j.journeyId}/reports/${asked.reportId}`, { cookies });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.removed, true);
+  assert.equal(await db.getJourneyReport(j.journeyId, asked.reportId), null);
+});
+
 // --- contributor stats (docs 20 §10) -------------------------------------------
 
 await test("contributors: reportRequestCount bumps on every ask, including ones the Gateway will fail", async () => {

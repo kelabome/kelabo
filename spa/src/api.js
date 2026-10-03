@@ -240,6 +240,8 @@ export const api = {
     apiRequest(`/journeys/${id}/reports`, { method: 'POST', body: { question, visibility } }),
   listJourneyReports: id => apiRequest(`/journeys/${id}/reports`),
   getJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`),
+  // Your own question only (docs 20 §6.6); deleted outright, answer and all.
+  removeJourneyReport: (id, reportId) => apiRequest(`/journeys/${id}/reports/${reportId}`, { method: 'DELETE' }),
   listJourneyContributors: id => apiRequest(`/journeys/${id}/contributors`),
 }
 

@@ -1216,6 +1216,16 @@ export function createDb({ config, client } = {}) {
     return res.Items || [];
   }
 
+  /** Gone outright, not soft-removed (docs 20 §6.6): it is the asker's own
+   *  question, and a removed private one that stayed in the table would be a
+   *  promise the product did not keep. The Gateway's late write of an answer
+   *  is conditioned on `attribute_exists(PK)`, so it cannot resurrect it. */
+  async function deleteJourneyReport(journeyId, reportId) {
+    await doc.send(
+      new DeleteCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `REPORT#${reportId}` } })
+    );
+  }
+
   /** Only ever called when the Gateway could not be reached at all — the
    *  Gateway itself marks a report failed for every other reason, straight
    *  from `generateJourneyReport`. */
@@ -1280,6 +1290,27 @@ export function createDb({ config, client } = {}) {
         Item: { PK: `JOURNEY#${journeyId}`, SK: `TL#${pad(at)}#${randSuffix()}`, ...entry, at },
       })
     );
+  }
+
+  /**
+   * Delete the timeline rows that index one item, found by the millisecond
+   * they were written at (the key's own prefix) and the id in their
+   * `detail`. The timeline is an index of the items it describes (§9.1), so
+   * an item that is deleted outright takes its row with it — otherwise the
+   * timeline would go on quoting a question its asker removed.
+   */
+  async function deleteJourneyTimelineEntriesFor(journeyId, at, detailKey, id) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": `TL#${pad(at)}#` },
+      })
+    );
+    for (const row of res.Items || []) {
+      if (row.detail?.[detailKey] !== id) continue;
+      await doc.send(new DeleteCommand({ TableName: T.journeys, Key: { PK: row.PK, SK: row.SK } }));
+    }
   }
 
   /**
@@ -2127,6 +2158,7 @@ export function createDb({ config, client } = {}) {
     putJourneyStatusVersion,
     listJourneyStatusVersions,
     putJourneyTimelineEntry,
+    deleteJourneyTimelineEntriesFor,
     listJourneyTimeline,
     putAccessor,
     getAccessor,
@@ -2157,6 +2189,7 @@ export function createDb({ config, client } = {}) {
     getJourneyReport,
     listJourneyReports,
     markJourneyReportFailed,
+    deleteJourneyReport,
     bumpContributor,
     listContributors,
   };

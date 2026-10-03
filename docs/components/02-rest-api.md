@@ -356,7 +356,7 @@ public-tenant-match (`identity.tenantId === journey.tenantId`) → private
 | POST + GET | `/journeys/:id/status[/history]` | Health/progress snapshot (docs 20 §5) / version list |
 | GET/POST/PATCH | `/journeys/:id/board[/:msgId]` (+ `/archive`, `/unarchive`, `/history`) | Pinned messages; archive is soft and reversible (docs 20 §7) |
 | GET/POST/DELETE | `/journeys/:id/documents[/:docId]` | Pasted-text documents; removal is soft, one-way (docs 20 §8) |
-| POST + GET | `/journeys/:id/reports[/:reportId]` | Ask a free-text question / list / read one (docs 20 §6) |
+| POST + GET + DELETE | `/journeys/:id/reports[/:reportId]` | Ask a free-text question / list / read one / remove your own (docs 20 §6, §6.6) |
 | GET | `/journeys/:id/timeline?type=&before=&limit=` | Backward-cursor timeline (docs 20 §9.2) |
 | GET | `/journeys/:id/contributors` | Per-person rollups (docs 20 §10) |
 
