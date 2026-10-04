@@ -207,6 +207,13 @@ would otherwise fire a per-peer "left" fan-out into a room with no subscribers.
   attachment (one click to add). `RSVP=FALSE`: replies are still collected on
   the invitation page — accepting in Outlook mails the host, it does not update
   the kelabo's RSVP list.
+- **The host's own calendar (#17):** the invitee loops skip the host, so the
+  host gets a separate `sendHostCopy` mail (`hostCopyMessage`) at schedule,
+  time-moving reschedule and cancel. The host is the `ORGANIZER`, and Outlook
+  will not put a `REQUEST` addressed to its own organizer on the calendar, so
+  the copy is `METHOD:PUBLISH` with **no ATTENDEE** (cancel: `METHOD:CANCEL`)
+  on the same UID. It has no RSVP buttons. If it fails, the schedule still
+  succeeds; the response carries `hostCopy: { sent, reason? }`.
 - **Agent wire:** `frameKelaboSchema.event` gains `"cancelled"`.
 - **SSE:** the existing `ended` event carries `{ reason: "cancelled" }`. For a
   scheduled kelabo there are usually no browser subscribers, so email is the real

@@ -14,6 +14,11 @@
  *     or equal SEQUENCE is silently ignored by Outlook — the reschedule that
  *     "did not move" anything).
  *   - Times are UTC (`...Z`), as everything here is stored, so no VTIMEZONE.
+ *   - The host's own copy is `PUBLISH` with no ATTENDEE. The host is the
+ *     ORGANIZER, and a `REQUEST` delivered to its own organizer is treated by
+ *     Outlook as "you organised this", so no event is created. `PUBLISH` is
+ *     simply "put this on my calendar". The host's cancel is a `CANCEL` on the
+ *     same UID, also with no ATTENDEE (#17).
  *
  * Pure — no clock, no config — so `test/mail.mjs` can assert the bytes.
  */
@@ -62,7 +67,7 @@ export const icsUid = (kelaboId) => `kelabo-${kelaboId}@kelabo`;
 
 /**
  * @param {object} e
- * @param {"REQUEST"|"CANCEL"} e.method
+ * @param {"REQUEST"|"CANCEL"|"PUBLISH"} e.method
  * @param {string} e.kelaboId
  * @param {number} e.sequence     only ever increases for one kelabo
  * @param {number} e.stamp        epoch ms the message was made (DTSTAMP)
@@ -72,7 +77,7 @@ export const icsUid = (kelaboId) => `kelabo-${kelaboId}@kelabo`;
  * @param {string} [e.description]
  * @param {string} [e.url]
  * @param {{ email: string, name?: string }} e.organizer
- * @param {{ email: string, name?: string }} e.attendee
+ * @param {{ email: string, name?: string }} [e.attendee]  absent on the host's own copy
  */
 export function buildIcs(e) {
   const cancel = e.method === "CANCEL";
@@ -101,7 +106,9 @@ export function buildIcs(e) {
     // RSVP=FALSE: replies are collected on the invitation page (guests have no
     // account and no calendar we can hear from). Outlook still offers
     // Accept/Decline, which adds it to the calendar and mails the organizer.
-    `ATTENDEE${att.name ? `;CN=${param(att.name)}` : ""};ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:${att.email}`,
+    att
+      ? `ATTENDEE${att.name ? `;CN=${param(att.name)}` : ""};ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:${att.email}`
+      : null,
     `STATUS:${cancel ? "CANCELLED" : "CONFIRMED"}`,
     "TRANSP:OPAQUE",
     "END:VEVENT",
