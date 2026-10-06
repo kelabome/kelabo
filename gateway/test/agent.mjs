@@ -7,7 +7,7 @@ import { loadEffectiveMcp } from "../src/agent/mcp.js";
 import { subAgentSystemPrompt, mainAgentSystemPrompt, summarySystemPrompt } from "../src/agent/persona.js";
 import { TriggerGate, isBackchannel } from "../src/agent/gate.js";
 import { languageName } from "../src/agent/language.js";
-import { normalizeUsage, addUsage, createLlmProvider } from "../src/agent/llm.js";
+import { normalizeUsage, addUsage, createLlmProvider, promptCacheKey } from "../src/agent/llm.js";
 import { parseMinutesJson } from "../src/agent/serverAgentRunner.js";
 import { hasCapacity } from "../src/agent/schedule.js";
 
@@ -999,6 +999,64 @@ await test("the OpenAI adapter logs a malformed tool-call arguments string inste
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+await test("promptCacheKey: one stable key per conversation, and it names no kelabo", () => {
+  const a = promptCacheKey("main", "k_abc123");
+  assert.equal(a, promptCacheKey("main", "k_abc123"), "stable across calls — that is the whole point");
+  assert.match(a, /^main:[0-9a-f]{24}$/);
+  assert.ok(!a.includes("k_abc123"), "hashed: the provider is not handed the kelabo id");
+  assert.notEqual(a, promptCacheKey("main", "k_other"), "another kelabo is another cache");
+  assert.notEqual(promptCacheKey("gate", "k_abc123"), a, "the gate and the orchestrator do not share a cache");
+  assert.notEqual(promptCacheKey("sub", "k", "turn1", "t1"), promptCacheKey("sub", "k", "turn2", "t1"), "a task id reused in a later turn is a new thread");
+  assert.equal(promptCacheKey("main"), undefined, "no scope, no key — never one shared bucket for everything");
+  assert.equal(promptCacheKey("main", undefined, ""), undefined);
+});
+
+await test("prompt_cache_key goes only to endpoints known to accept it", async () => {
+  // An OpenAI-compatible server may 400 an unknown field, and here that would
+  // be every call of every kelabo — so it is an allowlist.
+  const realFetch = globalThis.fetch;
+  let body = null;
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body);
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const sent = async (modelConfig, openaiBaseUrl) => {
+    const llm = createLlmProvider(modelConfig, { apiKey: "k", openaiBaseUrl });
+    await llm.completeRaw({ model: "m", messages: [{ role: "user", content: "hi" }], cacheKey: "main:abc" });
+    return body.prompt_cache_key;
+  };
+  try {
+    assert.equal(await sent({ provider: "deepinfra", model: "m" }, "https://api.deepinfra.com/v1/openai"), "main:abc");
+    assert.equal(await sent({ provider: "openai", model: "m" }, "https://api.deepinfra.com/v1/openai"), "main:abc", "recognised by host too");
+    assert.equal(await sent({ provider: "openai", model: "m" }, "https://api.openai.com/v1"), "main:abc");
+    assert.equal(await sent({ provider: "deepseek", model: "m" }, "https://api.deepseek.com/v1"), undefined, "DeepSeek caches on its own");
+    assert.equal(await sent({ provider: "openai", model: "m" }, "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"), undefined, "\"openai\" pointed elsewhere is not OpenAI");
+    // No key from the caller, nothing on the wire.
+    const llm = createLlmProvider({ provider: "deepinfra", model: "m" }, { apiKey: "k", openaiBaseUrl: "https://api.deepinfra.com/v1/openai" });
+    await llm.completeRaw({ model: "m", messages: [{ role: "user", content: "hi" }] });
+    assert.equal("prompt_cache_key" in body, false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await test("the gate asks for its own prompt cache, per kelabo", async () => {
+  let gateKey;
+  const gate = new TriggerGate({
+    llm: {
+      async completeRaw(req) {
+        gateKey = req.cacheKey;
+        return { text: JSON.stringify({ verdict: "NONE", confidence: 1, reason: "x" }), toolCalls: [], raw: { content: [] } };
+      },
+    },
+    smallModel: "flash",
+    knobs: { cooldownSeconds: 0, maxContributionsPerMinute: 9 },
+    log: () => {},
+  });
+  await gate.decide("k1", { speaker: "alex", text: "so how does the cache work", at: Date.now() }, transcript);
+  assert.equal(gateKey, promptCacheKey("gate", "k1"));
 });
 
 await test("two captions in flight at once fire the gate only once", async () => {

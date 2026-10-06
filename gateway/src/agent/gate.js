@@ -1,6 +1,7 @@
 import { tagTranscript, NAME_MANGLINGS } from "@kelabo/contracts";
 import { ASSISTANT_NAME } from "./persona.js";
 import { withLlmRetry } from "./llmRetry.js";
+import { promptCacheKey } from "./llm.js";
 
 const SENSITIVITY_THRESHOLD = { low: 0.8, medium: 0.5, high: 0.2 };
 
@@ -142,6 +143,7 @@ export class TriggerGate {
             // Beyond parse reliability, this reins in reasoning-model
             // narration, which is where the gate's seconds actually go.
             responseFormat: "json",
+            cacheKey: promptCacheKey("gate", kelaboId),
           }),
         { log: this.log, event: "gate_llm_retry", fields: { kelaboId } }
       );

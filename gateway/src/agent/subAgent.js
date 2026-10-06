@@ -1,5 +1,5 @@
 import { subAgentSystemPrompt } from "./persona.js";
-import { addUsage, LLM_TIMEOUT_MS } from "./llm.js";
+import { addUsage, LLM_TIMEOUT_MS, promptCacheKey } from "./llm.js";
 import { withLlmRetry } from "./llmRetry.js";
 
 const MAX_TOOL_ITERATIONS = 16;
@@ -206,6 +206,12 @@ export class SubAgent {
     return this.deadlineAt === Infinity ? LLM_TIMEOUT_MS : Math.max(this.deadlineAt - Date.now(), floor);
   }
 
+  /** One research thread = one prompt cache. A task id alone repeats across
+   *  turns ("t1"), so the turn is part of what makes it this thread. */
+  cacheKey(kelaboId, brief) {
+    return promptCacheKey("sub", kelaboId, this.turnId, brief?.task_id);
+  }
+
   /** @param {object} brief - the dispatch_subagent brief */
   async run(brief, kelaboId) {
     const system = subAgentSystemPrompt({ capabilities: this.capabilities, mcpServers: this.mcpServers, language: this.language });
@@ -252,6 +258,7 @@ export class SubAgent {
               maxTokens: 2048,
               timeoutMs: Math.min(LLM_TIMEOUT_MS, this.remainingMs()),
               onDelta: (t) => this.streamDelta(t),
+              cacheKey: this.cacheKey(kelaboId, brief),
             }),
           { log: this.log, event: "subagent_llm_retry", fields: { kelaboId, taskId: brief.task_id, iteration: i + 1 } }
         );
@@ -336,6 +343,8 @@ export class SubAgent {
         // parse — which is what used to turn one extra call into a lost turn.
         responseFormat: "json",
         onDelta: (t) => this.streamDelta(t),
+        // The same key as the loop: this call re-sends that whole thread.
+        cacheKey: this.cacheKey(kelaboId, brief),
       });
       text = res.text;
       concludeUsage = res.usage;

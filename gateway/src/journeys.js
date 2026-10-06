@@ -18,7 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { getMinutes, queryKelaboItems, pad, randSeq } from "./db.js";
-import { createLlmProvider } from "./agent/llm.js";
+import { createLlmProvider, promptCacheKey } from "./agent/llm.js";
 import { llmApiKeyFrom } from "@kelabo/contracts/credentials";
 import { ASSISTANT_NAME, parseMentionHandles, resolveMentions, stripAddress } from "@kelabo/contracts";
 import { withLlmRetry } from "./agent/llmRetry.js";
@@ -352,6 +352,9 @@ export async function generateJourneyReport(c, journeyId, { reportId, question, 
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: `${context}\n\nQUESTION: ${clip(question, 2000)}` }],
       maxTokens: 2048,
+      // The journey's context leads every question, so questions about the
+      // same journey share its cached prefix.
+      cacheKey: promptCacheKey("journey-report", journeyId),
     });
     answer = out.text;
     usage = out.usage ?? null;
@@ -1634,6 +1637,7 @@ export async function answerJourneyMention(c, journeyId, legId, meta, { text, id
           system: ANSWER_SYSTEM_PROMPT,
           messages: [{ role: "user", content: `${context}\n\nQUESTION: ${clip(question, 2000)}` }],
           maxTokens: ANSWER_MAX_TOKENS,
+          cacheKey: promptCacheKey("journey-answer", journeyId, legId),
         }),
       { log: c.log, event: "journey_answer_llm_retry", fields: { journeyId, legId } }
     );

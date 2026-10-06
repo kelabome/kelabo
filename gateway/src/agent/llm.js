@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { LLM_CONFIG } from "@kelabo/contracts/credentials";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -351,10 +352,60 @@ function pickAnswer(content, reasoning, req) {
   return reasoning ?? "";
 }
 
+/**
+ * A prompt-cache key: which conversation a call belongs to.
+ *
+ * Providers that serve a model from many replicas keep the prefix cache in one
+ * replica's memory, so two calls with an identical prefix can still miss if
+ * they land on different machines. `prompt_cache_key` tells the provider which
+ * calls share a cache. Kelabo's calls are long, growing threads — the main
+ * agent re-sends the whole transcript each turn — so landing on the same cache
+ * is the difference between paying the cache-read rate for the transcript and
+ * paying the fresh rate for all of it again.
+ *
+ * One key per *conversation*, never per kelabo: the gate, the orchestrator, a
+ * sub-agent and the minutes each start from a different system prompt, and
+ * sharing a key across them only makes them evict each other.
+ *
+ * Hashed, so nothing the provider is given identifies a kelabo or a journey
+ * beyond what the request already contains; the role stays readable for
+ * anyone looking at the wire log.
+ *
+ * @param {string} role   which conversation: "gate", "main", "minutes", …
+ * @param {...string} scope  what makes it unique: a kelaboId, a task id, …
+ */
+export function promptCacheKey(role, ...scope) {
+  const parts = scope.filter((s) => s !== undefined && s !== null && s !== "");
+  if (!parts.length) return undefined;
+  return `${role}:${createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 24)}`;
+}
+
+/**
+ * Whether this endpoint is known to accept `prompt_cache_key`.
+ *
+ * An allowlist, not "send it everywhere", because an OpenAI-compatible server
+ * is free to answer an unknown field with a 400, and here that would be every
+ * call of every kelabo. DeepSeek's own API is deliberately absent: its cache
+ * is automatic and disk-backed, so a key buys nothing there. OpenAI counts
+ * only at OpenAI's own host — `provider: "openai"` is also how a deployment
+ * points at any other compatible server.
+ */
+function acceptsPromptCacheKey(provider, base) {
+  let host = "";
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    // An unparseable base URL fails at fetch anyway; send nothing extra.
+  }
+  if (provider === "deepinfra" || host === "api.deepinfra.com") return true;
+  return provider === "openai" && host === "api.openai.com";
+}
+
 function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
   const base = (baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
   const url = `${base}/chat/completions`;
   const wire = makeWireLogger("openai-compatible", log);
+  const sendCacheKey = acceptsPromptCacheKey(modelConfig.provider, base);
 
   function buildBody(req) {
     const messages = [];
@@ -375,6 +426,9 @@ function openAiCompatibleProvider(modelConfig, apiKey, baseUrl, log) {
       // latency lives. Callers opt in; the prompt must already say "JSON"
       // (providers reject json_object mode otherwise).
       ...(req.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
+      // Keeps a growing thread on one prefix cache (see `promptCacheKey`).
+      // Only where the endpoint is known to accept the field.
+      ...(sendCacheKey && req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
     };
   }
 

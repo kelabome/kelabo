@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tagTranscript } from "@kelabo/contracts";
 import { mainAgentSystemPrompt, summarySystemPrompt } from "./persona.js";
 import { SubAgent } from "./subAgent.js";
-import { addUsage } from "./llm.js";
+import { addUsage, promptCacheKey } from "./llm.js";
 import { withLlmRetry } from "./llmRetry.js";
 import { parseMinutesJson } from "./serverAgentRunner.js";
 
@@ -318,6 +318,7 @@ export class MainAgent {
           messages: this.thread,
           tools: [DISPATCH_TOOL],
           maxTokens: 1024,
+          cacheKey: promptCacheKey("main", kelaboId),
         }),
       { log: this.log, event: "main_llm_retry", fields: { kelaboId, turnId } }
     );
@@ -696,6 +697,7 @@ export class MainAgent {
           maxTokens: MINUTES_MAX_TOKENS,
           timeoutMs: MINUTES_TIMEOUT_MS,
           responseFormat: "json",
+          cacheKey: promptCacheKey("minutes", kelaboId),
         }),
       { log: this.log, event: "minutes_llm_retry", fields: { kelaboId } }
     );
