@@ -28,7 +28,7 @@ transcription; assistant prompts go to your own LLM account).
 
 | | |
 |---|---|
-| **Requirements** | An AWS account with admin access, a domain (or subdomain) whose DNS is a Route 53 hosted zone, an API key from a speech-to-text provider (**Soniox or Deepgram** — pick one, you can add or switch later), an LLM API key (DeepSeek), and optionally Cloudflare Realtime credentials for conference audio/video. Locally: Node 20+, Docker, the AWS CLI. |
+| **Requirements** | An AWS account with admin access, a domain (or subdomain) whose DNS is a Route 53 hosted zone, an API key from a speech-to-text provider (**Soniox or Deepgram** — pick one, you can add or switch later), an API key from an LLM provider of your choice (Anthropic, OpenAI, or any OpenAI-compatible host — see §C3), and optionally Cloudflare Realtime credentials for conference audio/video. Locally: Node 20+, Docker, the AWS CLI. |
 | **Effort** | An afternoon for the first deployment, most of it waiting on account signups and certificate validation. Ongoing effort is close to zero: the stack is serverless except one small container, and `make deploy` is the whole upgrade procedure. |
 | **Risk** | You are the operator. If SES stays in sandbox mode, sign-in emails only reach verified addresses until you request production access (see §C1). If a supplier key expires, that feature degrades (calls without Cloudflare credentials fall back to transcript + board). Nothing in the stack holds unrecoverable state outside your account. |
 | **Benefit** | Totally self-contained, and you pay for what you actually use: every datastore and function is pay-per-request. The only always-on cost is one Fargate task (0.5 vCPU / 1 GB — roughly US$15–20/month) plus its load balancer; an idle deployment costs little more than that, and a busy one scales with actual kelabos, not seats. |
@@ -52,11 +52,14 @@ Kelabo deliberately buys rather than builds four things:
   stream wall-clock but bundles speaker diarization for free, and Kelabo's
   client opens streams only while someone is actually speaking. You choose
   with one config value (`stt.provider`, §D2) and can switch later.
-- **DeepSeek** — the LLM behind the in-kelabo assistant, the generated
-  minutes and journey reports. Chosen as the default for cost: minutes
-  generation reads whole transcripts, and DeepSeek makes that a rounding
-  error. The key goes in your account; the provider is configurable (any
-  OpenAI-compatible API, or Anthropic).
+- **An LLM provider — your choice** — the model behind the in-kelabo
+  assistant, the generated minutes and journey reports. Kelabo is model- and
+  supplier-independent: it speaks the Anthropic Messages API and the
+  OpenAI-compatible Chat Completions API, so Anthropic, OpenAI, any
+  OpenAI-compatible host, or a model you serve yourself all work, and you can
+  switch from `/admin` at any time. Choose the supplier for **privacy** as
+  much as for price: it receives every transcript the assistant reads. See
+  §C3.
 - **Cloudflare Realtime** *(optional)* — the SFU and TURN service that carries
   conference audio and video between participants. Running your own media
   servers is the single hardest part of a product like this; Cloudflare sells
@@ -116,9 +119,38 @@ endpoint. Speaker diarization comes bundled at no extra cost.
 That is all — the key goes into the `stt` credential slot in step D4 and is
 never stored anywhere else.
 
-### C3. DeepSeek
+### C3. An LLM provider
 
-Create an API key at platform.deepseek.com. Same handling: the `llm`
+Kelabo does not prefer a model or a supplier. Pick them in two steps.
+
+**The model.** Minutes read whole transcripts and the trigger gate runs on
+every closed turn, so a fast, inexpensive model is the right default for
+`smallModel` (gate and orchestrator); `model` (research sub-agents) can be the
+same one or something stronger. Open-weight models such as DeepSeek V4.1
+Flash, GLM, Kimi or Qwen are good value here; Claude and GPT models work
+equally well. Anything that supports tool calling will do.
+
+**The supplier.** This is the privacy decision. Whoever serves the model sees
+everything the assistant is given — transcripts, journey documents, minutes.
+Check, for the supplier you choose: where it processes data (jurisdiction),
+whether it retains prompts and for how long, whether it trains on them, and
+whether your organisation already has an agreement with it. The same
+open-weight model is usually offered by several hosts with very different
+answers, and running it yourself is also an option.
+
+| `provider` | `baseUrl` | Notes |
+|---|---|---|
+| `anthropic` | *(not used)* | Anthropic Messages API |
+| `openai` | `https://api.openai.com/v1` | also the id for **any** OpenAI-compatible server |
+| `deepinfra` | `https://api.deepinfra.com/v1/openai` | the template's example; open-weight models, zero-data-retention listed per model |
+| `openai` | your own URL | vLLM, Ollama, LM Studio, an internal LLM gateway — must be reachable from the gateway task |
+
+The template ships the `deepinfra` row with `deepseek-ai/DeepSeek-V4.1-Flash`
+as a working example, not a recommendation; replace it with what your
+organisation trusts. Every value is publishable from `/admin` → Assistant
+afterwards, so this is only the first-boot choice.
+
+Create an API key with the supplier you picked. Same handling: the `llm`
 credential slot, nowhere else.
 
 ### C4. Cloudflare Realtime (optional, for conference audio/video)
@@ -212,7 +244,8 @@ day-to-day from the console afterwards.
 | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation. Two halves with different lifetimes: the **enforcement** is publishable (`/admin` → Access), while the sign-in page's prefill reaches the browser as a build-time `VITE_*` value. So publishing a new domain admits it immediately, but the page keeps naming the old one until `make frontend` |
    | `environments.<env>.emailDomainAliases` | optional, e.g. `["mycompany.io", "mycompany.com.au"]` — **the organisation's other domains**. People at any of them can sign in and are colleagues of everyone at `allowedEmailDomain`: one tenant, one people search, one presence list, one set of organisation-wide journeys. `allowedEmailDomain` stays the *primary* — the tenant every record is stamped with — so to add a domain, add it here (or publish it from `/admin` → Access) rather than changing the primary. Public mailbox domains (gmail.com, outlook.com…) are refused. If people at a domain already had accounts before it became an alias, run `node rest-api/scripts/restamp-tenant.mjs <domain>` (dry run; `--apply` to write) once, so what they created before follows them |
    | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time, so changing it needs `make frontend` — and it is deliberately **not** publishable for exactly that reason: nothing server-side reads it, so a console field for it would look like it worked and would not (doc 23 §7.2) |
-   | `environments.<env>.stt.provider` | `deepgram` (the default) or `soniox` — which speech-to-text provider this environment uses (§C2). The key for it must be in the `stt` credential slot (step D4). Bootstrap only: publish it from `/admin` → Services instead, and the next room picks it up. Changing it here needs `make backend` and only matters until something is published |
+       | `environments.<env>.llm` | `provider`, `model`, `smallModel`, `baseUrl` — the LLM supplier and models you chose in §C3. The template's DeepInfra + DeepSeek V4.1 Flash block is a working example only; replace it with your own choice. Bootstrap only: publish changes from `/admin` → Assistant, and a running agent picks them up in seconds |
+    | `environments.<env>.stt.provider` | `deepgram` (the default) or `soniox` — which speech-to-text provider this environment uses (§C2). The key for it must be in the `stt` credential slot (step D4). Bootstrap only: publish it from `/admin` → Services instead, and the next room picks it up. Changing it here needs `make backend` and only matters until something is published |
    | `environments.<env>.stt.providers.<id>` | per-provider tuning (model, token TTL, Soniox endpointing) — the template's values are sensible; leave them unless you know why. Bootstrap only; publishable as `stt.settings.<id>`, and a published block for one engine **merges** over the other's rather than replacing it |
    | `environments.<env>.allowIps` | empty (the default) means anyone can reach the deployment; sign-in is still the access control. A list of CIDRs closes it to those sources only — your corporate egress range while a pilot runs, say. It covers the portal, the API and the Gateway; add IPv6 ranges too if your network has them, or a browser preferring IPv6 is locked out. Manage it with `make allow-ip` / `allow-list` / `allow-rm` rather than by hand |
    | `environments.<env>.api.originSecret` | `off` (default), `send` or `require`. API Gateway also answers on its own `execute-api` URL, which reaches the same Lambda without passing CloudFront or the WAF — so with `allowIps` set and this left `off`, your portal is closed and your entire API is not. `require` makes CloudFront prove itself with a secret header. Roll it out in that order: `make origin-secret`, then `send` + deploy, then `require` + deploy. Going straight to `require` takes the API down for the length of a deploy, because the Lambda stack deploys before CloudFront |

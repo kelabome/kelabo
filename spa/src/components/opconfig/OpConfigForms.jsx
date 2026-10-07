@@ -177,7 +177,7 @@ export function ModelGroup({ draft, set, fallbackFor }) {
     <Group title="Model" hint="Provider, model and endpoint. Changing these re-initialises the running agent worker.">
       <TextRow
         title="Provider"
-        sub="anthropic, openai, deepseek, or any OpenAI-compatible id."
+        sub="anthropic, or openai / deepinfra / any id for an OpenAI-compatible endpoint. The supplier sees every transcript the assistant reads."
         value={draft.llm?.provider}
         fallback={fallbackFor('llm.provider')}
         onChange={v => set('llm.provider', v)}

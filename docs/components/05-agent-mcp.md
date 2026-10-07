@@ -236,7 +236,7 @@ effectiveMcp(kelabo) = kelabo.mcpEnabled === false ? ∅ : hostMcp(kelabo.hostId
 ```js
 /**
  * @typedef {Object} ModelConfig
- * @property {"anthropic"|"openai"|"deepseek"|"local"|string} provider
+ * @property {"anthropic"|"openai"|"deepinfra"|string} provider  // anything but "anthropic" is OpenAI-compatible
  * @property {string} model         // strong model for synthesis
  * @property {string} smallModel    // cheap model for the gate
  */
@@ -250,10 +250,18 @@ effectiveMcp(kelabo) = kelabo.mcpEnabled === false ? ∅ : hostMcp(kelabo.hostId
 - Provider and model come from the deployment's environment (`LLM_CONFIG` in
   `contracts/src/credentials.js`); the key is the `llm` credential slot
   (`make credential-set env=<env> slot=llm`). Each deployment supplies its own.
-- **Current setting:** `deepseek` / `deepseek-v4-flash` for **both** `model` and
-  `smallModel` — flash is cheap enough to run the gate on every closed turn and
-  the orchestrator on every trigger. The main/sub split is by role, not by which
-  model is configured, so raising `model` to a stronger one is config-only
+- **Model- and supplier-independent.** Two wire protocols are implemented —
+  Anthropic Messages (`provider: "anthropic"`) and OpenAI-compatible Chat
+  Completions (every other id, pointed at `baseUrl`) — so the deployment picks
+  both the model and who serves it. The supplier receives every transcript the
+  assistant reads, so it is a privacy choice as much as a cost one
+  ([self-hosting §C3](../self-hosting.md)).
+- **Template example:** `deepinfra` / `deepseek-ai/DeepSeek-V4.1-Flash` for
+  **both** `model` and `smallModel` — an inexpensive, fast open-weight model is
+  cheap enough to run the gate on every closed turn and the orchestrator on
+  every trigger. It is an example, not a default the code assumes. The
+  main/sub split is by role, not by which model is configured, so raising
+  `model` to a stronger one is config-only
   (see [14-agent-orchestration.md](./14-agent-orchestration.md) §8).
 - Dev mode: the developer chooses the provider/model in their opencode session
   (handed off via `PUT /auth/:id`); the server abstraction is not involved.

@@ -28,7 +28,7 @@ is the guide to choosing.
 |  | **Self-hosting** | **[kelabo.me](https://kelabo.me)** |
 |---|---|---|
 | What it is | The full product deployed into *your* AWS account | The same product, operated as a hosted service |
-| You need | An AWS account and real comfort deploying AWS services, a domain on Route 53, your own supplier accounts (Soniox *or* Deepgram, DeepSeek, optionally Cloudflare), and an approved SES production-access request | An email address |
+| You need | An AWS account and real comfort deploying AWS services, a domain on Route 53, your own supplier accounts (Soniox *or* Deepgram, an LLM provider of your choice, optionally Cloudflare), and an approved SES production-access request | An email address |
 | Time to first kelabo | An afternoon, mostly waiting on signups and certificates | Minutes |
 | Functionality | Identical | Identical |
 | Cost | Your own AWS + supplier bills (an idle deployment ≈ US$15–20/month) | Run **at cost**: prepaid top-up, per-call metered pricing with published rates, a weekly free allowance — no seats, no plans, no subscription |
@@ -47,9 +47,11 @@ account to `kelabo.mycompany.com`, but be honest about what it takes:
   zone** — if your domain is managed elsewhere and cannot be delegated, stop
   here;
 - your own accounts and API keys with the suppliers: **Soniox or Deepgram**
-  (speech-to-text), **DeepSeek** (the assistant and minutes; other
-  OpenAI-compatible providers work), and optionally **Cloudflare Realtime**
-  (conference audio/video at scale);
+  (speech-to-text), **an LLM provider you trust with your meeting text**
+  (the assistant and minutes — Anthropic, OpenAI, or any OpenAI-compatible
+  endpoint, including one you host yourself; see
+  [choosing a model](#choosing-a-model-and-a-supplier)), and optionally
+  **Cloudflare Realtime** (conference audio/video at scale);
 - an application to AWS for **SES production access** so sign-in emails reach
   your team — approval usually takes a day, refusals happen (there is a
   MailerSend fallback, but it is one more account and one more DNS setup).
@@ -165,6 +167,33 @@ for every future kelabo there — and anyone can ask the journey a question
 later, building an append-only report history of what was asked and answered
 across the whole sequence of meetings.
 
+### Choosing a model and a supplier
+
+Kelabo is **model- and supplier-independent**. The assistant, the trigger gate
+and the minutes speak two wire protocols — Anthropic's Messages API and the
+OpenAI-compatible Chat Completions API — so any supplier that offers either
+works, and so does a model you serve yourself (vLLM, Ollama, LM Studio, an
+internal gateway). Provider, model, small model and endpoint are published
+from `/admin` → Assistant and take effect in seconds; switching supplier is a
+config change, never a code change or a deploy.
+
+The model and the supplier are two separate choices, and the second one is
+where your privacy lives: every transcript the assistant reads and every set
+of minutes it writes is sent to whoever serves the model. Before picking one,
+check where it processes data, whether it retains prompts or trains on them,
+and whether that is acceptable for what your team says in meetings. The same
+open-weight model is usually available from several hosts with very different
+answers to those questions.
+
+What works well: a fast, inexpensive model for the gate and orchestrator
+(`smallModel`) and, optionally, a stronger one for research sub-agents
+(`model`). Open-weight models such as **DeepSeek V4.1 Flash**, GLM, Kimi or
+Qwen are good value for this; Claude and GPT models work equally well. The
+template ships with DeepSeek V4.1 Flash served by
+[DeepInfra](https://deepinfra.com) (OpenAI-compatible, with zero-data-retention
+listed per model) as a working example — not a recommendation over any other host. Replace it with
+whatever your organisation already trusts.
+
 ## Connecting your own coding agent
 
 `npm i -g @kelabome/agents` attaches your own opencode or Claude Code session
@@ -201,7 +230,8 @@ make help             # everything is a make target
 ## Deploying for real
 
 You need an AWS account, a Route 53 domain, and API keys for an STT provider
-(Soniox or Deepgram) and an LLM provider (assistant + minutes). Put your own
+(Soniox or Deepgram) and an LLM provider of your choice (assistant + minutes;
+see [choosing a model](#choosing-a-model-and-a-supplier)). Put your own
 address in `rootAdminEmail` — it is the one identity that can administer the
 deployment, it is deploy-time on purpose, and leaving it empty fails closed, so
 you get a console that refuses everyone. The

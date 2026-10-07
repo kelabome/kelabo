@@ -1031,7 +1031,7 @@ await test("prompt_cache_key goes only to endpoints known to accept it", async (
     assert.equal(await sent({ provider: "deepinfra", model: "m" }, "https://api.deepinfra.com/v1/openai"), "main:abc");
     assert.equal(await sent({ provider: "openai", model: "m" }, "https://api.deepinfra.com/v1/openai"), "main:abc", "recognised by host too");
     assert.equal(await sent({ provider: "openai", model: "m" }, "https://api.openai.com/v1"), "main:abc");
-    assert.equal(await sent({ provider: "deepseek", model: "m" }, "https://api.deepseek.com/v1"), undefined, "DeepSeek caches on its own");
+    assert.equal(await sent({ provider: "selfhosted", model: "m" }, "https://llm.internal.example/v1"), undefined, "an unlisted OpenAI-compatible server gets nothing extra");
     assert.equal(await sent({ provider: "openai", model: "m" }, "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"), undefined, "\"openai\" pointed elsewhere is not OpenAI");
     // No key from the caller, nothing on the wire.
     const llm = createLlmProvider({ provider: "deepinfra", model: "m" }, { apiKey: "k", openaiBaseUrl: "https://api.deepinfra.com/v1/openai" });

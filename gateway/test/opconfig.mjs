@@ -127,7 +127,7 @@ await test("a published version wins, and untouched fields still fall back", asy
             SK: "V#000002",
             version: 2,
             effectiveFrom: 0,
-            llm: { provider: "deepseek", model: "deepseek-v4", baseUrl: "https://api.deepseek.com/v1" },
+            llm: { provider: "deepinfra", model: "deepseek-ai/DeepSeek-V4.1-Flash", baseUrl: "https://api.deepinfra.com/v1/openai" },
             agent: { sensitivity: "high" },
           },
         ],
@@ -136,8 +136,8 @@ await test("a published version wins, and untouched fields still fall back", asy
     config: { ...CONFIG, tableNames: { config: "kelabo-test-config" } },
   });
   const r = await c.opConfig.resolved();
-  assert.equal(r.llm.provider, "deepseek");
-  assert.equal(r.llm.baseUrl, "https://api.deepseek.com/v1");
+  assert.equal(r.llm.provider, "deepinfra");
+  assert.equal(r.llm.baseUrl, "https://api.deepinfra.com/v1/openai");
   assert.equal(r.agent.sensitivity, "high");
   // Not published, so still the deployment's.
   assert.equal(r.llm.smallModel, "claude-s");

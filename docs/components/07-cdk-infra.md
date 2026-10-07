@@ -62,9 +62,10 @@ publishes them. `infra/test/config.mjs` keeps it that way.
       },
       /* bootstrap: publishable, but with no working fallback, so a first
          deploy needs them here (docs 23 §1.2) */
-      "llm": { "provider": "deepseek", "model": "deepseek-v4-flash",
-               "smallModel": "deepseek-v4-flash",
-               "baseUrl": "https://api.deepseek.com/v1" },
+      /* any supplier and model; this one is an example (self-hosting §C3) */
+      "llm": { "provider": "deepinfra", "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+               "smallModel": "deepseek-ai/DeepSeek-V4.1-Flash",
+               "baseUrl": "https://api.deepinfra.com/v1/openai" },
       "stt": { "provider": "deepgram", "language": "en",
                "providers": { "deepgram": { "…": "…" }, "soniox": { "…": "…" } } },
       "auth": { "socialProviders": [] }, /* no console control — file only */

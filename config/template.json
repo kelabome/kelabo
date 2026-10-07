@@ -31,10 +31,10 @@
         "mcpPrefix": "kelabo/dev/mcp/"
       },
       "llm": {
-        "provider": "deepseek",
-        "model": "deepseek-v4-flash",
-        "smallModel": "deepseek-v4-flash",
-        "baseUrl": "https://api.deepseek.com/v1"
+        "provider": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "smallModel": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "baseUrl": "https://api.deepinfra.com/v1/openai"
       },
       "stt": {
         "provider": "deepgram",
@@ -103,10 +103,10 @@
         "mcpPrefix": "kelabo/staging/mcp/"
       },
       "llm": {
-        "provider": "deepseek",
-        "model": "deepseek-v4-flash",
-        "smallModel": "deepseek-v4-flash",
-        "baseUrl": "https://api.deepseek.com/v1"
+        "provider": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "smallModel": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "baseUrl": "https://api.deepinfra.com/v1/openai"
       },
       "stt": {
         "provider": "deepgram",
@@ -167,10 +167,10 @@
         "mcpPrefix": "kelabo/prod/mcp/"
       },
       "llm": {
-        "provider": "deepseek",
-        "model": "deepseek-v4-flash",
-        "smallModel": "deepseek-v4-flash",
-        "baseUrl": "https://api.deepseek.com/v1"
+        "provider": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "smallModel": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "baseUrl": "https://api.deepinfra.com/v1/openai"
       },
       "stt": {
         "provider": "deepgram",

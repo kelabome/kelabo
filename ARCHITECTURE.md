@@ -374,7 +374,7 @@ What genuinely stays deploy-time is what CloudFormation reads at synth, plus
     "dev":     { "endpoint": "dev",     "domain": "kelabo-dev.example.com",
                  "allowedEmailDomain": "example.com",
                  "stt":      { "provider": "deepgram" },
-                 "llm":      { "provider": "deepseek" },
+                 "llm":      { "provider": "deepinfra" },   // any supplier; see docs/self-hosting.md §C3
                  "ses":      { "fromAddress": "otp@kelabo-dev.example.com" },
                  "retentionDays": 30, "tenantId": "self" },
     "staging": { "endpoint": "staging", "domain": "kelabo-staging.example.com", "...": "..." },

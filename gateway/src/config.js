@@ -140,9 +140,10 @@ function fromBase(base) {
       model: base.llm.model,
       smallModel: base.llm.smallModel,
     },
-    // Honor the provider base URL from config (e.g. deepseek's endpoint); env
-    // override still wins for local experiments. deepseek/other providers route
-    // through the OpenAI-compatible client, so this is the endpoint it hits.
+    // Honor the provider base URL from config (whichever supplier the
+    // deployment chose); env override still wins for local experiments. Every
+    // provider except anthropic routes through the OpenAI-compatible client,
+    // so this is the endpoint it hits.
     openaiBaseUrl: process.env.KELABO_OPENAI_BASE_URL || base.llm.baseUrl || LLM_CONFIG.baseUrl,
     bootstrapLlmApiKey: process.env.KELABO_LLM_API_KEY || "",
     gateway: { agent: { ...base.gateway.agent } },

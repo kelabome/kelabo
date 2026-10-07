@@ -122,8 +122,8 @@ export const opConfigSchema = z.object({
    *
    * All four fields, not just the model: a deployment that changes provider
    * almost always changes the endpoint in the same breath, and splitting them
-   * across two mechanisms is how one ends up posting a DeepSeek key to
-   * api.openai.com. The API key is **not** here — it is the `llm` credential
+   * across two mechanisms is how one ends up posting one supplier's key to
+   * another supplier's endpoint. The API key is **not** here — it is the `llm` credential
    * slot, and always was.
    *
    * `smallModel` empty means "use `model`", which is what the gateway's

@@ -583,9 +583,10 @@ persona (`rig/templates/agent/kelabo-bot.md`) asks for the same document.
 
 Model routing by ROLE: **main = `modelConfig.smallModel`**; **sub-agents =
 `modelConfig.model`**; gate stays on `smallModel`. The split is structural and
-stays regardless of which models are configured — today **both are
-`deepseek-v4-flash`**, which is cheap enough to run the orchestrator on every
-trigger and fast enough for the worker loop; pointing `model` at a stronger
+stays regardless of which models — or which supplier — are configured. The
+template's example sets **both to one fast, inexpensive open-weight model**
+(DeepSeek V4.1 Flash, served by DeepInfra), which is cheap enough to run the
+orchestrator on every trigger and fast enough for the worker loop; pointing `model` at a stronger
 model is a **publish**, not a code change and not a deploy — `/admin` →
 Assistant, applied to a running worker in seconds (docs 23). `smallModel` left
 empty means "use `model`", and `llm.baseUrl` moves with the provider:
