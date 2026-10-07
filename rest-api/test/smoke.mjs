@@ -95,6 +95,7 @@ const sentInvites = [];
 const sentCancellations = [];
 const sentReschedules = [];
 const sentUninvites = [];
+const sentHostCopies = [];
 // Stands in for `createMailer` — the same four methods, no transport. `from` is
 // no longer passed by the callers (the mailer defaults it), so it arrives
 // undefined here and the assertions below are about `to` and the content.
@@ -116,6 +117,9 @@ const mailer = {
   },
   sendUninvite: async (msg) => {
     sentUninvites.push(msg);
+  },
+  sendHostCopy: async (msg) => {
+    sentHostCopies.push(msg);
   },
 };
 const internalCalls = [];
@@ -1717,6 +1721,67 @@ await test("POST /kelabos/:id/reschedule — time change resets RSVPs and emails
   assert.ok(internalCalls.some((c) => c.op === "reschedule" && c.kelaboId === id));
 
   await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+});
+
+await test("the host gets their own calendar copy at schedule, reschedule and cancel (#17)", async () => {
+  const before = sentHostCopies.length;
+  const res = await call("POST", "/kelabos/schedule", {
+    body: { title: "Mine too", scheduledAt: Date.now() + 86400000, invitees: ["matt@example.com", "host@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  const id = res.json.kelaboId;
+  assert.deepEqual(res.json.hostCopy, { sent: true });
+  // The host typed among the invitees still gets no invitee REQUEST — only the copy.
+  assert.ok(!sentInvites.some((m) => m.to === "host@example.com" && m.event?.kelaboId === id));
+  assert.equal(sentHostCopies.length, before + 1);
+  const copy = sentHostCopies.at(-1);
+  assert.equal(copy.to, "host@example.com");
+  assert.equal(copy.kind, "scheduled");
+  assert.equal(copy.event.kelaboId, id);
+  assert.equal(copy.event.organizerEmail, "host@example.com");
+
+  // A title-only edit mails nobody, the host included — same rule as invitees.
+  await call("POST", `/kelabos/${id}/reschedule`, { body: { title: "Mine too (renamed)" }, cookies: sessionCookies });
+  assert.equal(sentHostCopies.length, before + 1);
+
+  const newAt = Date.now() + 3 * 86400000;
+  const moved = await call("POST", `/kelabos/${id}/reschedule`, { body: { scheduledAt: newAt }, cookies: sessionCookies });
+  assert.deepEqual(moved.json.hostCopy, { sent: true });
+  const r = sentHostCopies.at(-1);
+  assert.equal(r.kind, "rescheduled");
+  assert.equal(r.scheduledAt, newAt);
+  assert.equal(r.title, "Mine too (renamed)", "the copy carries the current title, not the one at schedule time");
+  assert.equal(typeof r.previousScheduledAt, "number");
+
+  const cancelled = await call("POST", `/kelabos/${id}/cancel`, { body: { reason: "moved again" }, cookies: sessionCookies });
+  assert.deepEqual(cancelled.json.hostCopy, { sent: true });
+  const c = sentHostCopies.at(-1);
+  assert.equal(c.kind, "cancelled");
+  assert.equal(c.reason, "moved again");
+  assert.equal(c.event.kelaboId, id, "same UID, so the cancel removes the event the copy made");
+});
+
+await test("a failed host copy does not fail the schedule", async () => {
+  const orig = mailer.sendHostCopy;
+  mailer.sendHostCopy = async () => {
+    const e = new Error("rejected");
+    e.name = "MessageRejected";
+    throw e;
+  };
+  try {
+    const res = await call("POST", "/kelabos/schedule", {
+      body: { title: "Still scheduled", scheduledAt: Date.now() + 86400000, invitees: ["matt@example.com"] },
+      cookies: sessionCookies,
+    });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json.hostCopy, { sent: false, reason: "MessageRejected" });
+    assert.deepEqual(res.json.failed, []);
+    assert.equal((await db.getKelaboMeta(res.json.kelaboId)).status, "scheduled");
+    await db.updateKelaboMeta(res.json.kelaboId, { status: "ended", tenantStatus: null });
+  } finally {
+    mailer.sendHostCopy = orig;
+  }
 });
 
 await test("reschedule with an empty body is nothing_to_change", async () => {

@@ -34,15 +34,16 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * organizer that is not an address (a guest identity) gets no calendar part:
  * iTIP REQUEST without a real ORGANIZER is rejected or mis-shown by Outlook.
  */
-function calendarFor(method, event, fields) {
-  if (!event || !EMAIL.test(event.organizerEmail || "") || !EMAIL.test(event.to || "")) return undefined;
+function calendarFor(method, event, fields, { attendee = true } = {}) {
+  if (!event || !EMAIL.test(event.organizerEmail || "")) return undefined;
+  if (attendee && !EMAIL.test(event.to || "")) return undefined;
   const content = buildIcs({
     method,
     kelaboId: event.kelaboId,
     sequence: event.sequence,
     stamp: event.stamp,
     organizer: { email: event.organizerEmail, name: event.organizerName },
-    attendee: { email: event.to },
+    ...(attendee ? { attendee: { email: event.to } } : {}),
     ...fields,
   });
   return { method, content };
@@ -262,6 +263,71 @@ export function uninviteMessage({ hostName, title, scheduledAt, durationMinutes,
   // (RFC 5546 §3.2.5) — the kelabo goes on for everybody else.
   const calendar = calendarFor("CANCEL", event, { start: scheduledAt, durationMinutes, title });
   return { subject: `Removed: ${title}`, text, html, inline: [], ...(calendar ? { calendar } : {}) };
+}
+
+/**
+ * The host's own copy of a scheduled kelabo, so it appears in THEIR calendar
+ * too (#17). Before this the host got no mail at all, so only the invitees'
+ * calendars had the event.
+ *
+ * It is not the invitee mail sent to one more address. The host is the
+ * ORGANIZER, and an iTIP `REQUEST` addressed to its own organizer is something
+ * Outlook declines to put on the calendar. So the calendar part is `PUBLISH`,
+ * with no ATTENDEE, on the same UID as the invitations. `cancelled` is a
+ * `CANCEL` on that UID, which removes the event this copy created. There are
+ * no Accept/Decline buttons, because the host is already marked as attending.
+ *
+ * @param {object} p
+ * @param {"scheduled"|"rescheduled"|"cancelled"} p.kind
+ */
+export function hostCopyMessage({ kind, title, scheduledAt, previousScheduledAt, durationMinutes, note, reason, inviteUrl, joinUrl, event }) {
+  if (!["scheduled", "rescheduled", "cancelled"].includes(kind)) throw new Error(`hostCopyMessage: unknown kind "${kind}"`);
+  const when = formatWhen(scheduledAt, durationMinutes);
+  const cancelled = kind === "cancelled";
+  const lead = {
+    scheduled: `You scheduled "${title}".`,
+    rescheduled: `You moved "${title}" to a new time.`,
+    cancelled: `You cancelled "${title}".`,
+  }[kind];
+  const text = [
+    lead,
+    "",
+    kind === "rescheduled" ? `Was: ${formatWhen(previousScheduledAt)}` : "",
+    kind === "rescheduled" ? `Now: ${when}` : cancelled ? `It was scheduled for ${when}.` : when,
+    note && !cancelled ? `\n${note}\n` : "",
+    reason && cancelled ? `\nReason: ${reason}\n` : "",
+    joinUrl && !cancelled ? "Join the meeting:" : "",
+    !cancelled ? joinUrl || "" : "",
+    inviteUrl && !cancelled ? "Invitation link to share:" : "",
+    !cancelled ? inviteUrl || "" : "",
+    "",
+    cancelled ? "Your invitees have been told." : "This is your own copy, for your calendar.",
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+  const html = [
+    `<p>${esc(lead)}</p>`,
+    kind === "rescheduled"
+      ? `<p style="color:#666">Was: ${esc(formatWhen(previousScheduledAt))}</p><p>Now: <strong>${esc(when)}</strong></p>`
+      : `<p>${cancelled ? `It was scheduled for ${esc(when)}.` : esc(when)}</p>`,
+    note && !cancelled ? `<p>${esc(note)}</p>` : "",
+    reason && cancelled ? `<p>Reason: ${esc(reason)}</p>` : "",
+    joinUrl && !cancelled ? joinBlock(joinUrl) : "",
+    inviteUrl && !cancelled
+      ? `<p style="margin:0 0 4px;font-weight:600">Invitation link to share</p><p style="margin:0 0 16px"><a href="${esc(inviteUrl)}">${esc(inviteUrl)}</a></p>`
+      : "",
+    `<p style="color:#666;font-size:13px">${cancelled ? "Your invitees have been told." : "This is your own copy, for your calendar."}</p>`,
+  ].join("");
+  const calendar = calendarFor(
+    cancelled ? "CANCEL" : "PUBLISH",
+    event,
+    cancelled
+      ? { start: scheduledAt, durationMinutes, title, description: reason ? `Cancelled: ${reason}` : "Cancelled" }
+      : { start: scheduledAt, durationMinutes, title, description: eventDescription(joinUrl, inviteUrl, note), url: joinUrl || inviteUrl },
+    { attendee: false },
+  );
+  const subject = { scheduled: `Scheduled: ${title}`, rescheduled: `Rescheduled: ${title}`, cancelled: `Cancelled: ${title}` }[kind];
+  return { subject, text, html, inline: [], ...(calendar ? { calendar } : {}) };
 }
 
 /** A scheduled kelabo moved to a new time (docs 18 §3.3). */

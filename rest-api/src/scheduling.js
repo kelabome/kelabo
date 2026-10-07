@@ -93,6 +93,36 @@ export function createScheduling({
     return { acceptUrl: `${base}?t=${t}&r=accepted`, declineUrl: `${base}?t=${t}&r=declined` };
   }
 
+  /**
+   * The host's own calendar copy (#17): a mail at schedule, reschedule and
+   * cancel, so the kelabo is on the host's calendar as well as the invitees'.
+   * Before this the host was skipped in every mail loop and got nothing.
+   * Non-fatal like every other scheduling mail, but the outcome is returned so
+   * a failure can be reported to the host instead of only being logged.
+   */
+  async function mailHost(kind, meta, fields = {}, organizerName) {
+    const to = meta.hostIdentity;
+    if (!to || !to.includes("@")) return { sent: false, reason: "no_address" };
+    try {
+      await mailer.sendHostCopy({
+        to,
+        kind,
+        title: meta.title,
+        scheduledAt: meta.scheduledAt,
+        durationMinutes: meta.durationMinutes,
+        note: meta.note,
+        inviteUrl: config.inviteUrl(meta.kelaboId),
+        joinUrl: config.joinUrl(meta.kelaboId),
+        ...fields,
+        event: calendarEvent(meta, organizerName),
+      });
+      return { sent: true };
+    } catch (e) {
+      console.warn(JSON.stringify({ level: "warn", msg: "host copy email failed", kind, kelaboId: meta.kelaboId, error: String(e) }));
+      return { sent: false, reason: e.code || e.name || "send_failed" };
+    }
+  }
+
   async function schedule({ identity, displayName, body }) {
     const tenantId = await tenantOf(identity);
     const now = Date.now();
@@ -187,6 +217,9 @@ export function createScheduling({
       results.push({ email, sent, ...(reason ? { reason } : {}) });
     }
 
+    // After the invitees: the host is the one person who already knows.
+    const hostCopy = await mailHost("scheduled", { ...meta, kelaboId }, {}, displayName);
+
     return {
       status: 200,
       body: {
@@ -198,6 +231,7 @@ export function createScheduling({
         inviteUrl,
         invited: results,
         failed: results.filter((r) => !r.sent).map((r) => r.email),
+        hostCopy,
       },
     };
   }
@@ -355,6 +389,9 @@ export function createScheduling({
         console.warn(JSON.stringify({ level: "warn", msg: "cancellation email failed", to: inv.email, error: String(e) }));
       }
     }
+    // The host's copy was skipped above; it gets its own CANCEL, which removes
+    // the event their copy put on their calendar.
+    const hostCopy = await mailHost("cancelled", { ...meta, kelaboId }, { reason });
 
     // "A cancelled scheduled kelabo leaves nothing behind" — and the invite
     // rows are the part that matters, because they name people who may never
@@ -372,7 +409,7 @@ export function createScheduling({
       }
     }
 
-    return { status: 200, body: { kelaboId, status: "cancelled" } };
+    return { status: 200, body: { kelaboId, status: "cancelled", hostCopy } };
   }
 
   /**
@@ -411,6 +448,7 @@ export function createScheduling({
       throw err(409, "not_scheduled");
     }
 
+    let hostCopy;
     if (timeMoved) {
       await db.resetInviteResponses(kelaboId);
       const invites = await db.listInvites(kelaboId);
@@ -433,6 +471,12 @@ export function createScheduling({
           console.warn(JSON.stringify({ level: "warn", msg: "reschedule email failed", to: inv.email, error: String(e) }));
         }
       }
+      // Same UID, higher SEQUENCE: moves the event the host's first copy made.
+      hostCopy = await mailHost(
+        "rescheduled",
+        { ...meta, ...updates, kelaboId },
+        { previousScheduledAt: meta.scheduledAt },
+      );
       // The prep-bound agent's briefing named a time that no longer holds.
       try {
         await internal.rescheduleKelabo?.(kelaboId, identity);
@@ -450,6 +494,7 @@ export function createScheduling({
         durationMinutes: updates.durationMinutes ?? meta.durationMinutes,
         title: updates.title ?? meta.title,
         rsvpsReset: timeMoved,
+        ...(hostCopy ? { hostCopy } : {}),
       },
     };
   }

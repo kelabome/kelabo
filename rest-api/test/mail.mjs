@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { createMailer, mailSettingsFromConfig, MAIL_PROVIDERS } from "../src/mail/index.js";
 import { createMailerSendTransport } from "../src/mail/mailersend.js";
 import { createSesTransport } from "../src/mail/ses.js";
-import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage, esc } from "../src/mail/messages.js";
+import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage, hostCopyMessage, esc } from "../src/mail/messages.js";
 import { loadConfig } from "../../config/loadConfig.mjs";
 import { CREDENTIAL_SLOTS, mailKeyFrom } from "@kelabo/contracts/credentials";
 
@@ -201,7 +201,8 @@ await test("the stub seam still stands in for every kind of mail", async () => {
   await mailer.sendCancellation({ to: "c@example.com" });
   await mailer.sendReschedule({ to: "d@example.com" });
   await mailer.sendUninvite({ to: "f@example.com" });
-  assert.equal(seen.length, 5);
+  await mailer.sendHostCopy({ to: "g@example.com" });
+  assert.equal(seen.length, 6);
 });
 
 // --- SES --------------------------------------------------------------------
@@ -564,6 +565,61 @@ await test("an invitation has Accept and Decline buttons, then the join link", a
 await test("no event, or an organizer that is not an address, means no calendar part", async () => {
   assert.ok(!("calendar" in inviteMessage({ hostName: "R", title: "T", scheduledAt: 0, inviteUrl: "u" })));
   assert.ok(!("calendar" in inviteMessage({ hostName: "R", title: "T", scheduledAt: 0, inviteUrl: "u", event: { ...EVENT, organizerEmail: "guest-123" } })));
+});
+
+// The host's own copy (#17). The host is the ORGANIZER, and a REQUEST sent to
+// its own organizer is what Outlook declines to put on a calendar. So the copy
+// is PUBLISH with no ATTENDEE, on the same UID as the invitations.
+const HOST_EVENT = { ...EVENT, to: undefined };
+
+await test("the host's copy is an iTIP PUBLISH with no ATTENDEE, on the invitations' UID", async () => {
+  const joinUrl = "https://p/join/k-1";
+  const m = hostCopyMessage({ kind: "scheduled", title: "T", scheduledAt: Date.UTC(2026, 9, 2, 3, 30), durationMinutes: 45, note: "agenda", inviteUrl: "https://p/invite/k-1", joinUrl, event: HOST_EVENT });
+  assert.equal(m.subject, "Scheduled: T");
+  assert.equal(m.calendar.method, "PUBLISH");
+  const u = unfold(m.calendar.content);
+  for (const line of ["METHOD:PUBLISH", "UID:kelabo-k-1@kelabo", "DTSTART:20261002T033000Z", "DTEND:20261002T041500Z", "STATUS:CONFIRMED", `LOCATION:${joinUrl}`, 'ORGANIZER;CN="Host, Esq.":mailto:host@example.com'])
+    assert.ok(u.includes(`${line}\r\n`), `missing ${line}\n${u}`);
+  assert.ok(!u.includes("ATTENDEE"), "the host is not an attendee of their own event");
+  assert.ok(!/Accept|Decline/.test(m.html), "the host has nothing to answer");
+  assert.ok(m.text.includes(joinUrl) && m.text.includes("https://p/invite/k-1") && m.text.includes("agenda"));
+});
+
+await test("the host's reschedule moves their event; their cancel removes it", async () => {
+  const r = hostCopyMessage({ kind: "rescheduled", title: "T", scheduledAt: 1000, previousScheduledAt: 0, inviteUrl: "u", event: HOST_EVENT });
+  assert.equal(r.subject, "Rescheduled: T");
+  assert.equal(r.calendar.method, "PUBLISH");
+  assert.ok(r.text.includes("Was: ") && r.text.includes("Now: "));
+  assert.ok(r.calendar.content.includes("UID:kelabo-k-1@kelabo"));
+
+  const c = hostCopyMessage({ kind: "cancelled", title: "T", scheduledAt: 0, reason: "clash", inviteUrl: "u", joinUrl: "j", event: HOST_EVENT });
+  assert.equal(c.subject, "Cancelled: T");
+  assert.equal(c.calendar.method, "CANCEL");
+  const u = unfold(c.calendar.content);
+  assert.ok(u.includes("STATUS:CANCELLED\r\n") && u.includes("UID:kelabo-k-1@kelabo\r\n"));
+  assert.ok(!u.includes("ATTENDEE"));
+  assert.ok(c.text.includes("Reason: clash"));
+  assert.ok(!c.text.includes("Join the meeting"), "a cancelled kelabo has nothing to join");
+
+  assert.throws(() => hostCopyMessage({ kind: "nope", title: "T", scheduledAt: 0, event: HOST_EVENT }), /unknown kind/);
+});
+
+await test("the mailer sends the host copy without adding an ATTENDEE", async () => {
+  const sent = [];
+  const mailer = createMailer({ resolve: async () => ({ provider: "stub", fromAddress: "f@example.com" }), factories: { stub: () => ({ send: async (m) => sent.push(m) }) } });
+  await mailer.sendHostCopy({ to: "host@example.com", kind: "scheduled", title: "T", scheduledAt: 0, inviteUrl: "u", event: HOST_EVENT });
+  assert.equal(sent[0].to, "host@example.com");
+  assert.equal(sent[0].from, "f@example.com");
+  assert.equal(sent[0].calendar.method, "PUBLISH");
+  assert.ok(!sent[0].calendar.content.includes("ATTENDEE"));
+});
+
+await test("SES labels the host copy text/calendar;method=PUBLISH", async () => {
+  const sent = [];
+  const t = createSesTransport({ client: { send: async (cmd) => (sent.push(cmd.input), {}) } });
+  await t.send({ to: "host@example.com", from: "f@example.com", ...hostCopyMessage({ kind: "scheduled", title: "T", scheduledAt: 0, inviteUrl: "u", event: HOST_EVENT }) });
+  const raw = Buffer.from(sent[0].Content.Raw.Data).toString("utf8");
+  assert.ok(raw.includes("Content-Type: text/calendar; charset=UTF-8; method=PUBLISH"));
 });
 
 await test("folding never splits a multi-byte character", async () => {
