@@ -85,7 +85,7 @@ make uninstall-connector       # unwire everything, drop the credential, npm rm 
 npm version <patch|minor|major>
 npm run pack
 npm test
-npm publish dist/agent --access public
+npm publish ./dist/agent --access public   # "./" matters: a bare dist/agent is read as a GitHub repo
 ```
 
 `test/pack.mjs` is the gate: it asserts each emitted manifest has no `file:`

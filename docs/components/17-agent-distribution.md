@@ -589,7 +589,7 @@ rather than a pipeline:
 cd connector && npm version <patch|minor|major>
 npm run pack                       # build/pack.mjs -> dist/agent/
 npm test                           # includes install.mjs, channel.mjs and pack.mjs
-npm publish dist/agent --access public
+npm publish ./dist/agent --access public   # "./" matters: a bare dist/agent is read as a GitHub repo
 ```
 
 Or `make agent-pack && make agent-publish`, which does both: `agent-pack` builds
