@@ -17,11 +17,68 @@
 
 ---
 
+> [!IMPORTANT]
+> **Kelabo is transparent by design, and that is not a setting you can turn off.**
+> Everything said in a kelabo with the mic on is transcribed live and shown to
+> everyone in the room. The assistant reads all of it and answers onto a board
+> that everyone sees; it has no private channel to any one person. When a
+> participant brings their own coding agent, the room is told. A kelabo ends as
+> written minutes and a searchable record of who said what and what was decided.
+>
+> Kelabo is built for organisations and people who genuinely believe in fair,
+> open communication, where what is said in a meeting stays on the record and the
+> people who were there can read it back. **If your team is not ready to
+> work that way, Kelabo is not the right choice.** We would rather you know that
+> before you start.
+
 Each live room is a **kelabo** — not quite a call, not quite a meeting, its own
 kind — and that is the word the app, the code and the URLs use. Open source,
 MIT. You can run the whole thing in your own AWS account, or use the hosted
 service at [kelabo.me](https://kelabo.me). Same product either way; this README
 is the guide to choosing.
+
+## Bring your coding agent into the meeting
+
+If you already work with **Claude Code** or **opencode**, this is the part to
+read. Kelabo lets your own coding-agent session join a kelabo as a participant.
+It keeps your model, your repository, your MCP servers and your permission
+prompts. It hears the meeting, contributes while it is happening, and is still
+in your terminal when the meeting is over, with the whole discussion in context.
+
+**Before the meeting.** Attach the agent to a scheduled kelabo. It reads the
+agenda note, investigates your codebase, and posts what it found to the
+board, so the findings are waiting when the first person walks in.
+
+**During the meeting.** The transcript streams into your session as it is
+spoken. The agent stays quiet by default. When someone addresses it ("Kelabo,
+where do we retry failed uploads?") or asks something the room cannot answer,
+it searches your repository in the background and posts a short answer that
+cites `file:line`, while it keeps listening. Kelabo never runs your agent and
+never sees your code; only what the agent chooses to post reaches the room.
+Every tool call still asks for your approval in your own terminal, and the room
+can see that an agent is present.
+
+**After the meeting, skip the briefing.** The kelabo ends; your coding session
+does not. It heard the requirements, the trade-offs that were argued, the
+constraints someone mentioned in passing and what was finally agreed. So the
+next thing you type can be *"right, build what we just decided"*. You do not
+have to retype the design background into a fresh prompt or paste the minutes
+into a new chat. If the kelabo belongs to a [journey](#the-two-ideas-kelabos-and-journeys),
+the agent can also read earlier meetings' minutes, documents and reports. When
+the work is done, it can post the outcome back to the journey, so the next
+meeting starts from it.
+
+```bash
+npm i -g @kelabome/agents
+kelabo setup        # wires Claude Code and/or opencode, and pairs this machine with your Kelabo account
+kelabo claude       # or: kelabo opencode, then /kstart
+```
+
+Then ask your agent to join your kelabo. This works against
+[kelabo.me](https://kelabo.me) and against a self-hosted deployment alike, and
+`kelabo uninstall` restores your agent's configuration exactly as it was.
+Details: [connector/README.md](connector/README.md) and
+[docs/components/16-agent-bridge.md](docs/components/16-agent-bridge.md).
 
 ## Two ways to run Kelabo
 
@@ -123,7 +180,9 @@ lands on a filterable timeline. Full design: [docs/20-journey.md](docs/20-journe
   invite fields find colleagues by name, typos and all, before they have ever
   signed in.
 - **Bring your own coding agent.** Attach your own opencode or Claude Code
-  session to a kelabo — it hears the transcript and answers onto the board.
+  session to a kelabo. It hears the transcript, answers onto the board, and
+  leaves the meeting with the whole discussion in context
+  ([above](#bring-your-coding-agent-into-the-meeting)).
 - **Everything optional degrades, nothing jams.** No STT key? The room is
   typed messages and calls. No LLM? No assistant surface at all — not a broken
   one. No Cloudflare creds? Peer-to-peer calling still works, over public STUN
@@ -193,15 +252,6 @@ template ships with DeepSeek V4.1 Flash served by
 [DeepInfra](https://deepinfra.com) (OpenAI-compatible, with zero-data-retention
 listed per model) as a working example — not a recommendation over any other host. Replace it with
 whatever your organisation already trusts.
-
-## Connecting your own coding agent
-
-`npm i -g @kelabome/agents` attaches your own opencode or Claude Code session
-to a kelabo: it hears the transcript, answers onto the board, and every
-permission prompt stays in *your* terminal. Kelabo never runs your agent — it
-hands it a channel. The agent can also read and write the journey a kelabo
-belongs to (timeline, board, reports) through the same MCP tool surface. See
-[connector/README.md](connector/README.md).
 
 ## How it is put together
 
