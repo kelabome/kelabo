@@ -6,6 +6,7 @@
 
 <p align="center">
   Live rooms with transcription, an AI assistant that answers <em>into the meeting</em>,<br>
+  <a href="#bring-your-coding-agent-into-the-meeting">your own coding agent</a> in the meeting, helping live and then building what was agreed,<br>
   minutes written for you, and a searchable archive of everything your team decided.
 </p>
 
