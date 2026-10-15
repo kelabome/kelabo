@@ -16,6 +16,12 @@
   <a href="https://kelabo.me"><img alt="Hosted at kelabo.me" src="https://img.shields.io/badge/hosted-kelabo.me-2aa4b8"></a>
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/f0jABg7yy14"><img src="docs/media/kelabo-intro.jpg" width="640" alt="Watch Kelabo in 75 seconds on YouTube"></a>
+  <br>
+  <sub>Kelabo in 75 seconds (YouTube)</sub>
+</p>
+
 ---
 
 > [!IMPORTANT]
